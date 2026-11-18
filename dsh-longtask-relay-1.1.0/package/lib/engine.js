@@ -6,7 +6,7 @@
  * and re-reads the truth source for anything durable, so a restarted Host
  * rebuilds the same picture from the files on disk.
  */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { ChainIndex, ChainStore, RELAY_CODES, RelayError, featureProgress, isChainId, skeletonTruth } from './chain-store.js'
@@ -77,6 +77,24 @@ function chainSummary(chain, progress) {
     // error paths still counts as done, but the panel and status must show the gap.
     coveragePartial: progress?.partial ?? 0,
   }
+}
+
+/**
+ * Clock slack for the legacy freshness check, in milliseconds.
+ * A file's mtime comes from the filesystem clock and can read a few
+ * milliseconds earlier than a `Date` taken before the write.
+ */
+const HANDOFF_MTIME_SLACK_MS = 1000
+
+/**
+ * Fingerprint of a handoff brief's content.
+ * Line endings and outer whitespace are ignored, so a checkout that rewrites
+ * line endings does not look like a session rewriting the brief.
+ * @param {unknown} text - brief text.
+ * @returns {string} sha256 hex digest.
+ */
+function handoffHash(text) {
+  return createHash('sha256').update(String(text ?? '').replace(/\r\n/g, '\n').trim()).digest('hex')
 }
 
 /** Prefix that marks a blocker as owned by a blocked goal, not by the model. */
@@ -529,6 +547,7 @@ export class RelayEngine {
         joinedAt,
         compactions: 0,
         parentSessionId: null,
+        handoffHashAtJoin: handoffHash(skeleton.handoff),
       })
       record.currentSessionId = agent.session.id
       // The list is not frozen yet; the first accepted checkpoint flips this.
@@ -603,11 +622,23 @@ export class RelayEngine {
     this.verifyFrozen(chain, store)
     // Ready is the gate the next session depends on: without a structured
     // brief it starts blind, so refuse before writing anything.
-    if (ready === true && !/<!--\s*relay:state\s*-->/.test(store.readHandoff(chain.chainId))) {
-      return {
-        ok: false,
-        code: 'handoff_missing',
-        message: 'write HANDOFF.md with a <!-- relay:state --> block before ready=true',
+    if (ready === true) {
+      const freshness = this.handoffFreshness(chain, store, self)
+      if (!freshness.fresh && freshness.reason === 'missing') {
+        return {
+          ok: false,
+          code: 'handoff_missing',
+          message: 'write HANDOFF.md with a <!-- relay:state --> block before ready=true',
+        }
+      }
+      // The session is still awake here, so asking it to rewrite the brief
+      // costs one more step; handing a stale brief over costs the next session.
+      if (!freshness.fresh) {
+        return {
+          ok: false,
+          code: 'handoff_stale',
+          message: 'HANDOFF.md is still the brief this session was handed; rewrite its <!-- relay:state --> block with what this session did and the next action before ready=true',
+        }
       }
     }
     // Snapshot before the write so the audit can name exactly what changed.
@@ -782,18 +813,30 @@ export class RelayEngine {
       this.statsFor(chain.currentSessionId).autoContinues = 0
     }
     this.record(store, chain.chainId, { kind: 'blocker.cleared', actor: 'host', detail: { kind: blocker.kind, action: blocker.action } })
-    const current = store.readChain(chain.chainId)
-    if (current !== undefined && (current.status === 'active' || current.status === 'initializing')) {
-      // Nothing else wakes an idle session: evaluation only follows an idle
-      // event or a timer, and the timers were dropped when the chain paused.
-      this.reconcilePendingHandoff(current, store)
-      const live = typeof current.currentSessionId === 'string' ? this.ctx.get('agents')?.get(current.currentSessionId) : undefined
-      if (live !== undefined) {
-        this.scheduleWrapupDeadline(live)
-        this.scheduleEvaluate(live.id, 0)
-      }
-    }
+    const current = this.restartSupervision(chain.chainId, store)
     return { chainId: chain.chainId, status: current?.status ?? chain.status, cleared: true }
+  }
+
+  /**
+   * Put a chain that just left a pause back under supervision.
+   * Nothing else wakes an idle session: evaluation only follows an idle event
+   * or a timer, and the timers were dropped when the chain paused. A chain
+   * that is still stopped is left alone.
+   * @param {string} chainId - chain identity.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @returns {object|undefined} the chain record as it is now.
+   */
+  restartSupervision(chainId, store) {
+    const current = store.readChain(chainId)
+    if (current === undefined || (current.status !== 'active' && current.status !== 'initializing')) return current
+    // A resumed chain may still carry a half-finished handoff or a wrap-up deadline.
+    this.reconcilePendingHandoff(current, store)
+    const live = typeof current.currentSessionId === 'string' ? this.ctx.get('agents')?.get(current.currentSessionId) : undefined
+    if (live !== undefined) {
+      this.scheduleWrapupDeadline(live)
+      this.scheduleEvaluate(live.id, 0)
+    }
+    return current
   }
 
   /**
@@ -957,15 +1000,7 @@ export class RelayEngine {
       actor: agent?.session?.id ?? 'host',
     })
     if (paused) this.clearChainTimers(chain)
-    if (!paused) {
-      // A resumed chain may still carry a half-finished handoff or a wrap-up deadline.
-      const current = store.readChain(chain.chainId)
-      if (current !== undefined) {
-        this.reconcilePendingHandoff(current, store)
-        const live = current.currentSessionId === null ? undefined : this.ctx.get('agents')?.get(current.currentSessionId)
-        if (live !== undefined) this.scheduleWrapupDeadline(live)
-      }
-    }
+    if (!paused) this.restartSupervision(chain.chainId, store)
     return { chainId: chain.chainId, status: store.readChain(chain.chainId)?.status ?? chain.status }
   }
 
@@ -1914,8 +1949,8 @@ export class RelayEngine {
 
   /**
    * Whether the handoff brief was written by the session that is retiring.
-   * A brief without a state block is missing; one older than this session's
-   * join time belongs to an earlier session.
+   * A brief without a state block is missing; one whose content is still what
+   * this session was handed belongs to an earlier session.
    * @param {object} chain - chain record.
    * @param {import('./chain-store.js').ChainStore} store - its store.
    * @param {object|undefined} entry - the retiring session entry.
@@ -1929,6 +1964,13 @@ export class RelayEngine {
       text = ''
     }
     if (!/<!--\s*relay:state\s*-->/.test(text)) return { fresh: false, reason: 'missing' }
+    // The session rewrote the brief when its content differs from what the
+    // session was given. A file time cannot say that: a checkout, a stash, or a
+    // copied workspace touches the file without anyone rewriting it.
+    if (typeof entry?.handoffHashAtJoin === 'string') {
+      return handoffHash(text) === entry.handoffHashAtJoin ? { fresh: false, reason: 'stale' } : { fresh: true }
+    }
+    // Sessions that joined before the fingerprint was recorded keep the time rule.
     let mtime = 0
     try {
       mtime = statSync(store.paths(chain.chainId).handoff).mtimeMs
@@ -1936,7 +1978,7 @@ export class RelayEngine {
       mtime = 0
     }
     const joined = typeof entry?.joinedAt === 'string' ? Date.parse(entry.joinedAt) : Number.NaN
-    if (Number.isFinite(joined) && mtime > 0 && mtime < joined) return { fresh: false, reason: 'stale' }
+    if (Number.isFinite(joined) && mtime > 0 && mtime < joined - HANDOFF_MTIME_SLACK_MS) return { fresh: false, reason: 'stale' }
     return { fresh: true }
   }
 
@@ -2293,6 +2335,8 @@ export class RelayEngine {
             // the previous session's parent rather than becoming a child of it.
             parentSessionId: previous?.parentSessionId ?? null,
             ...(inheritedPreset === undefined ? {} : { permissionPreset: inheritedPreset }),
+            // The brief this session received: rewriting it is what makes its own brief fresh.
+            handoffHashAtJoin: handoffHash(previousHandoff),
           })
         }
         record.currentSessionId = createdSessionId

@@ -3,7 +3,7 @@
  * Run with: node test/smoke.mjs
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChainIndex, ChainStore, RELAY_CODES, RelayError } from '../lib/chain-store.js'
@@ -437,6 +437,48 @@ await checkAsync('a handoff carries the permission preset to the successor', asy
   assert.deepEqual(record.detail, { sessionId: 'session-new', from: 'session-old', preset: 'danger-full-access' })
 })
 
+await checkAsync('a brief is fresh only once the session rewrote what it was handed', async () => {
+  const world = fakeWorld()
+  await handOffOnce(world)
+  const chainId = world.chain.chainId
+  const freshness = () => world.engine.detail(chainId).handoffFreshness
+  const handed = world.local.readHandoff(chainId)
+  assert.equal(typeof world.local.readChain(chainId).sessions.find(session => session.sessionId === 'session-new').handoffHashAtJoin, 'string')
+  assert.deepEqual(freshness(), { fresh: false, reason: 'stale' }, 'the successor has not written anything yet')
+  // Touching the file is what a checkout or a copied workspace does: no new content.
+  world.local.writeHandoff(chainId, handed)
+  assert.deepEqual(freshness(), { fresh: false, reason: 'stale' }, 'a newer file time passed for a rewritten brief')
+  world.local.writeHandoff(chainId, handed.split('\n').join('\r\n'))
+  assert.deepEqual(freshness(), { fresh: false, reason: 'stale' }, 'rewritten line endings passed for a rewritten brief')
+  world.local.writeHandoff(chainId, '# HANDOFF\n\n<!-- relay:state -->\n- step: F001 done, start F002\n<!-- /relay:state -->\n')
+  assert.deepEqual(freshness(), { fresh: true })
+})
+
+await checkAsync('ready is refused while the brief is still the one the session was handed', async () => {
+  const world = fakeWorld()
+  await handOffOnce(world)
+  const chainId = world.chain.chainId
+  const refused = world.engine.checkpoint({ agent: world.newAgent, ready: true })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, 'handoff_stale')
+  assert.equal(world.local.readChain(chainId).readySessionId ?? null, null, 'a refused ready must not be recorded')
+  world.local.writeHandoff(chainId, '# HANDOFF\n\n<!-- relay:state -->\n- step: F001 done, start F002\n<!-- /relay:state -->\n')
+  const accepted = world.engine.checkpoint({ agent: world.newAgent, ready: true })
+  assert.notEqual(accepted.ok, false)
+  assert.equal(world.local.readChain(chainId).readySessionId, 'session-new')
+  world.engine.clearChainTimers(world.local.readChain(chainId))
+})
+
+check('a session without a recorded brief keeps the time rule, with clock slack', () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  const chain = world.local.readChain(chainId)
+  const written = statSync(world.local.paths(chainId).handoff).mtimeMs
+  const entryAt = offset => ({ sessionId: 'session-old', joinedAt: new Date(written + offset).toISOString() })
+  assert.deepEqual(world.engine.handoffFreshness(chain, world.local, entryAt(200)), { fresh: true }, 'a few milliseconds of clock skew read as stale')
+  assert.deepEqual(world.engine.handoffFreshness(chain, world.local, entryAt(60_000)), { fresh: false, reason: 'stale' })
+})
+
 await checkAsync('the preset survives a second hop after the worker policy made it custom', async () => {
   const world = fakeWorld()
   const presets = withPresets(world, { 'session-old': 'read-only' })
@@ -764,6 +806,17 @@ await checkAsync('clearing a blocker wakes the idle session up again', async () 
   assert.equal(world.engine.timers.has('session-old'), false)
   world.engine.clearBlocker({ chainId })
   assert.equal(world.engine.timers.has('session-old'), true, 'nothing would evaluate the idle session after the blocker is cleared')
+  world.engine.clearChainTimers(world.local.readChain(chainId))
+})
+
+await checkAsync('resuming a paused chain wakes the idle session up again', async () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  world.engine.setPaused({ chainId, paused: true })
+  assert.equal(world.engine.timers.has('session-old'), false, 'a pause must drop the pending re-checks')
+  world.engine.setPaused({ chainId, paused: false })
+  assert.equal(world.local.readChain(chainId).status, 'active')
+  assert.equal(world.engine.timers.has('session-old'), true, 'nothing would evaluate the idle session after the resume')
   world.engine.clearChainTimers(world.local.readChain(chainId))
 })
 
