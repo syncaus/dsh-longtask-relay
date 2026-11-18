@@ -158,6 +158,9 @@ function boot({ failSessionViewOnce = false } = {}) {
   const panelChains = {
     chains: [{
       ...chainSummary,
+      blocker: { kind: 'external', who: 'human', action: 'grant access' },
+      // The same text lands in lastError; the panel must not show it twice.
+      lastError: 'external blocker: grant access',
       sessionsDetail: [{ sessionId: 'session-1', role: 'initializer', running: false, loaded: true, peakRatio: 0.4, pressureRatio: 0.23 }],
     }],
   }
@@ -262,7 +265,10 @@ function collectText(node, parts = []) {
         /* the child owns hooks and is rendered by the component under test */
       }
     }
-    for (const value of Object.values(node.props ?? {})) {
+    for (const [key, value] of Object.entries(node.props ?? {})) {
+      // `children` is mirrored into props by this stand-in; counting it again
+      // would collect every text node twice.
+      if (key === 'children') continue
       if (typeof value === 'string') parts.push(value)
     }
     collectText(node.children, parts)
@@ -291,5 +297,7 @@ const panelTree = await react.settle(panel.component, {})
 const panelText = collectText(panelTree)
 assert.ok(panelText.includes('40%'), 'the chain card must show the peak context ratio')
 assert.ok(!panelText.includes('23%'), 'the chain row must show the peak, not the current reading')
+const viewChainButtons = panelText.filter(text => text === 'viewChain').length
+assert.equal(viewChainButtons, 1, 'a blocker echoed in lastError must produce one attention row, not two')
 
 console.log('session tab render check passed: hook order holds, a read error clears after recovery, and the panel shows the peak ratio')

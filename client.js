@@ -2389,6 +2389,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const [needle, setNeedle] = useState('')
           const [actionError, setActionError] = useState(null)
           const selectedRef = useRef(focus.chainId ?? panelCache.selectedId)
+          const splitRef = useRef(null)
           const decisions = usePendingDecisions()
 
           const refresh = useCallback(async () => {
@@ -2426,6 +2427,24 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             setSelectedId(chainId)
             void refresh()
           }, [refresh])
+
+          /**
+           * Jump to a chain from the attention list.
+           * A single-chain panel already auto-selects that chain, so selecting
+           * alone would change nothing on screen; scroll the detail side into
+           * view and clear any filter hiding the chain.
+           */
+          const focusChain = useCallback((chainId) => {
+            setFilter('all')
+            select(chainId)
+            requestAnimationFrame(() => {
+              try {
+                splitRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+              } catch {
+                /* this shell may not scroll programmatically */
+              }
+            })
+          }, [select])
 
           useEffect(() => {
             focus.chainId = null
@@ -2494,7 +2513,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 kind: label('blocker', chain.blocker.kind),
                 text: chain.blocker.action ?? '',
                 meta: [chain.title, chain.blocker.who].filter(part => typeof part === 'string' && part.length > 0).join(' / '),
-                action: { label: t('viewChain'), run: () => select(chain.chainId) },
+                action: { label: t('viewChain'), run: () => focusChain(chain.chainId) },
               })
             }
             if (errorOf(chain) !== null) {
@@ -2504,7 +2523,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 kind: t('attnError'),
                 text: errorOf(chain),
                 meta: chain.title ?? '',
-                action: { label: t('viewChain'), run: () => select(chain.chainId) },
+                action: { label: t('viewChain'), run: () => focusChain(chain.chainId) },
               })
             }
           }
@@ -2570,7 +2589,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 !loading && chains.length === 0
                   ? h('section', { className: 'relay-card' }, h(EmptyState))
                   : null,
-                chains.length === 0 ? null : h('div', { className: 'relay-split' },
+                chains.length === 0 ? null : h('div', { className: 'relay-split', ref: splitRef },
                   h('section', { className: 'relay-card relay-rail' },
                     h(CardTitle, { sub: String(chains.length) }, t('chains')),
                     h('div', { className: 'relay-rail-tools' },
