@@ -713,6 +713,16 @@ await checkAsync('spawn refuses a session that is not the chain head', async () 
   )
 })
 
+await checkAsync('sessionView rediscovers a chain after a reload', async () => {
+  const world = spawnWorld()
+  world.engine.stores.clear()
+  world.engine.members.clear()
+  const view = world.engine.sessionView('session-parent')
+  assert.ok(view !== undefined, 'the loaded session did not rediscover its chain')
+  assert.equal(view.chain.chainId, world.chain.chainId)
+  assert.equal(view.self.sessionId, 'session-parent')
+})
+
 await checkAsync('sessionView reports parent, children, and owned features', async () => {
   const world = spawnWorld()
   world.setGoal({ phase: 'active', activation: 'armed', roundsStarted: 2, maxGoalRounds: 16 })
