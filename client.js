@@ -104,6 +104,9 @@ window.__ModuleLoader__.load({
       noGoal: '这个会话没有目标',
       goalArmed: '自动继续',
       goalDisarmed: '不自动继续',
+      delete: '删除',
+      confirmDelete: '删除这条链？功能清单、进度、交接说明和审计记录会一起删除，不能恢复。',
+      deleteBlocked: '先暂停这条链才能删除',
     }
 
     const STRINGS_EN = {
@@ -189,6 +192,9 @@ window.__ModuleLoader__.load({
       noGoal: 'This session has no goal',
       goalArmed: 'armed',
       goalDisarmed: 'not continuing',
+      delete: 'Delete',
+      confirmDelete: 'Delete this chain? Its features, progress, handoff brief, and audit log are removed too; this cannot be undone.',
+      deleteBlocked: 'Pause the chain before deleting it',
     }
 
     const STATUS_LABELS = {
@@ -877,6 +883,7 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
           const lastSession = sessions.length === 0 ? null : sessions[sessions.length - 1]
           const pressure = lastSession === null ? 0 : Math.round((lastSession.pressureRatio ?? 0) * 100)
           const isPaused = chain.status === 'paused'
+          const deletable = chain.status !== 'active' && chain.status !== 'initializing'
           const blocker = chain.blocker ?? null
           const progressTone = total > 0 && done === total ? 'success' : 'brand'
           const handoffCap = chain.maxHandoffs ?? 32
@@ -921,6 +928,16 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
                       }
                     },
                   }, t('handoffNow')),
+                  h('button', {
+                    className: 'relay-btn',
+                    disabled: busy || !deletable,
+                    title: deletable ? undefined : t('deleteBlocked'),
+                    onClick: () => {
+                      if (window.confirm(t('confirmDelete'))) {
+                        void onAct('relay/deleteChain', { chainId: chain.chainId })
+                      }
+                    },
+                  }, t('delete')),
                 ),
               ),
               h('p', { className: 'relay-text' }, chain.objective),

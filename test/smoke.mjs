@@ -3,7 +3,7 @@
  * Run with: node test/smoke.mjs
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChainIndex, ChainStore, RELAY_CODES, RelayError } from '../lib/chain-store.js'
@@ -265,6 +265,35 @@ await checkAsync('a ready checkpoint survives a reload', async () => {
   world.setRatio(0.3)
   await restarted.evaluate(world.oldAgent)
   assert.ok(world.calls.some(call => call.kind === 'create'), 'the ready checkpoint was lost across the reload')
+})
+
+await checkAsync('an active chain cannot be deleted', async () => {
+  const world = fakeWorld()
+  assert.throws(
+    () => world.engine.deleteChain(world.chain.chainId),
+    error => error instanceof RelayError && error.code === RELAY_CODES.invalid,
+  )
+  assert.equal(existsSync(world.local.paths(world.chain.chainId).dir), true)
+})
+
+await checkAsync('deleting a paused chain removes its files and both indexes', async () => {
+  const world = fakeWorld()
+  world.engine.setPaused({ chainId: world.chain.chainId, paused: true })
+  const result = world.engine.deleteChain(world.chain.chainId)
+  assert.equal(result.chainId, world.chain.chainId)
+  assert.equal(result.status, 'paused')
+  assert.equal(existsSync(world.local.paths(world.chain.chainId).dir), false)
+  assert.deepEqual(world.local.listChainIds(), [])
+  assert.deepEqual(world.engine.chainIndex.entries(), [])
+  assert.equal(world.engine.members.has('session-old'), false)
+})
+
+await checkAsync('deleting an unknown chain is refused', async () => {
+  const world = fakeWorld()
+  assert.throws(
+    () => world.engine.deleteChain('chain-missing'),
+    error => error instanceof RelayError && error.code === RELAY_CODES.notFound,
+  )
 })
 
 await checkAsync('below every threshold the engine does nothing', async () => {
