@@ -1840,7 +1840,7 @@ check('a nested truthDir still resolves the workspace cwd', () => {
 
 check('package metadata exposes the test script and version', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(pkg.version, '1.2.0')
+  assert.equal(pkg.version, '1.3.0')
   assert.match(pkg.scripts.test, /node test\/smoke\.mjs/)
 })
 
