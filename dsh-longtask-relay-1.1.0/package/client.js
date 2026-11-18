@@ -164,6 +164,13 @@ window.__ModuleLoader__.load({
       goalArmed: '自动继续',
       goalDisarmed: '不自动继续',
       goalRounds: '轮次',
+      goalRow: '目标',
+      goalHeld: '续行已暂缓，等待交接',
+      goalPausedWithChain: '随链暂停',
+      goalBudget: '整条链共用的轮次',
+      planModeChip: '计划模式',
+      planModeNote: '当前会话在计划模式：先规划、不执行。计划批准后才会拆出功能清单。',
+      emptyPlanNote: '在计划模式下，先让计划获得批准，再启动链；批准的计划会写进 PLAN.md。',
       delete: '删除',
       confirmDelete: '确认删除',
       deleteNote: '功能清单、进度、交接说明和审计记录会一起删除，不能恢复。',
@@ -412,6 +419,13 @@ window.__ModuleLoader__.load({
       goalArmed: 'armed',
       goalDisarmed: 'not continuing',
       goalRounds: 'Rounds',
+      goalRow: 'Goal',
+      goalHeld: 'Continuation on hold until handoff',
+      goalPausedWithChain: 'Paused with the chain',
+      goalBudget: 'Rounds shared by the whole chain',
+      planModeChip: 'Plan mode',
+      planModeNote: 'This session is in plan mode: it plans and does not execute. The feature list is created once the plan is approved.',
+      emptyPlanNote: 'In plan mode, get the plan approved before starting a chain; the approved plan is written to PLAN.md.',
       delete: 'Delete',
       confirmDelete: 'Confirm delete',
       deleteNote: 'Its features, progress, handoff brief, and audit log are removed too; this cannot be undone.',
@@ -567,13 +581,18 @@ window.__ModuleLoader__.load({
           { key: 'autoContinue', label: '自动续跑', kind: 'boolean', hint: '链头空闲且没有 goal 驱动时自动续跑下一个功能' },
           { key: 'maxAutoContinues', label: '续跑次数上限', kind: 'int', min: 1, hint: '每个会话自动续跑的次数上限，到顶记阻塞' },
           { key: 'maxHandoffs', label: '交接次数上限', kind: 'int', min: 1, max: 1000, hint: '单条链的交接次数上限' },
-          { key: 'pauseGoalOnRetire', label: '退役时暂停旧目标', kind: 'boolean', hint: '交接后暂停旧会话的 goal' },
+          { key: 'notifyOldSession', label: '给旧会话留言', kind: 'boolean', hint: '交接后给旧会话留一条退役说明' },
+        ],
+      },
+      {
+        title: '目标与计划',
+        fields: [
+          { key: 'inheritGoal', label: '新会话继承目标', kind: 'boolean', hint: '交接时新会话沿用旧会话的 goal 目标，轮次只给剩余部分，轮次上限成为整条链的预算；关掉后新会话不继承（仍可由「给新会话建目标」新建）' },
           { key: 'seedGoalOnHandoff', label: '给新会话建目标', kind: 'boolean', hint: '交接后给新会话建一个 goal，让它按目标轮次自动继续；需要目标功能可用' },
           { key: 'goalRoundsPerHandoff', label: '新目标的轮次上限', kind: 'int', min: 1, hint: '给新会话 goal 分配的续轮上限' },
-          { key: 'inheritGoal', label: '新会话继承目标', kind: 'boolean', hint: '交接时新会话沿用旧会话的 goal 目标，轮次只给剩余部分，轮次上限成为整条链的预算；关掉后新会话不继承（仍可由「给新会话建目标」新建）' },
           { key: 'rearmGoalOnReload', label: '重启后恢复目标续行', kind: 'boolean', hint: 'DSH 重启或插件重载后，恢复本插件建的 goal 的自动续行；关掉后需要人在输入框里手动恢复（用户自己建的 goal 不受影响）' },
+          { key: 'pauseGoalOnRetire', label: '退役时暂停旧目标', kind: 'boolean', hint: '交接后暂停旧会话的 goal' },
           { key: 'inheritPlanMode', label: '新会话继承计划模式', kind: 'boolean', hint: '旧会话处于计划模式时，接力会话和子会话也以计划模式启动；关掉后新会话退出计划模式' },
-          { key: 'notifyOldSession', label: '给旧会话留言', kind: 'boolean', hint: '交接后给旧会话留一条退役说明' },
         ],
       },
       {
@@ -652,6 +671,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-chip.is-error { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 35%, var(--dsw-alias-border-l2)); color: var(--dsw-alias-state-error-primary); }
 .relay-chip.is-human { border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 35%, var(--dsw-alias-border-l2)); color: var(--dsw-alias-state-business-primary); }
 .relay-pills { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.relay-goal { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.relay-goal-bar { --relay-hue: var(--dsw-alias-brand-primary); max-width: 220px; }
+.relay-facts .relay-facts-note { grid-column: 2; }
 
 .relay-text { margin: 0; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .relay-mono { overflow: hidden; color: var(--dsw-alias-label-secondary); font-family: var(--dsw-font-family-mono, ui-monospace, monospace); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
@@ -1343,6 +1365,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 ),
               )),
             ),
+            // A note, not a step: plan mode changes when the chain should be started.
+            h('div', { className: 'relay-text' }, t('emptyPlanNote')),
             h('div', { className: 'relay-example' }, t('example')),
             h('div', {}, h(CopyButton, { text: t('example'), small: false }, t('copyExample'))),
           )
@@ -1381,10 +1405,15 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 h('span', {}, t('statHandoffs'), h('b', {}, `${chain.handoffCount ?? 0}/${chain.maxHandoffs ?? 0}`)),
                 h('span', {}, t('sessions'), h('b', {}, String(chain.sessions ?? sessions.length))),
                 h('span', {}, t('peak'), h('b', {}, `${pct(peak)}%`)),
+                // The round cap is a budget for the whole chain, so the list shows it too.
+                chain.head?.goal
+                  ? h('span', {}, t('goalRow'), h('b', {}, `${chain.head.goal.roundsStarted ?? 0}/${chain.head.goal.maxGoalRounds ?? 0}`))
+                  : null,
               ),
-              hasBlocker || hasError || waiting
+              hasBlocker || hasError || waiting || chain.head?.planMode === true
                 ? h('span', { className: 'relay-pills' },
                   waiting ? h('span', { className: 'relay-chip is-warn' }, t('decisionShort')) : null,
+                  chain.head?.planMode === true ? h('span', { className: 'relay-chip is-human' }, t('planModeChip')) : null,
                   hasBlocker
                     ? h('span', { className: `relay-chip is-${chain.blocker.kind === 'external' ? 'error' : 'warn'}` }, label('blocker', chain.blocker.kind))
                     : null,
@@ -1517,7 +1546,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
         }
 
         /** The chain's feature list with a pass-state filter. */
-        function FeatureCard({ features, onAccept }) {
+        function FeatureCard({ features, onAccept, planMode = false }) {
           const [filter, setFilter] = useState('all')
           const done = features.filter(feature => feature.passes).length
           const shown = features.filter(feature => (filter === 'all' ? true : filter === 'done' ? feature.passes : !feature.passes))
@@ -1529,7 +1558,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           return h('section', { className: 'relay-card' },
             h(CardTitle, { tools: features.length === 0 ? null : h(Seg, { options, value: filter, onChange: setFilter }) }, t('features')),
             features.length === 0
-              ? h('div', { className: 'relay-text' }, t('noFeatures'))
+              ? h('div', { className: 'relay-text' }, planMode ? t('planModeNote') : t('noFeatures'))
               : shown.length === 0
                 ? h('div', { className: 'relay-text' }, t('filterEmpty'))
                 : h('ul', { className: 'relay-list' }, shown.map(feature => h(FeatureRow, { key: feature.id, feature, onAccept }))),
@@ -1779,6 +1808,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const total = chain.featuresTotal ?? features.length
           const done = chain.featuresDone ?? features.filter(feature => feature.passes).length
           const current = sessions.find(session => session.sessionId === chain.currentSessionId) ?? null
+          // An older Host sends no head: treat that as no goal and no plan mode.
+          const head = detail.head ?? {}
+          const headGoal = head.goal ?? null
           const currentState = stateOf(current)
           const live = currentState === 'running' || currentState === 'idle'
           const pressure = live ? (current.pressureRatio ?? 0) : null
@@ -1818,6 +1850,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                     blocker === null
                       ? null
                       : h('span', { className: `relay-status is-${blocker.kind === 'external' ? 'failed' : 'paused'}` }, label('blocker', blocker.kind)),
+                    head.planMode === true ? h('span', { className: 'relay-chip is-human' }, t('planModeChip')) : null,
                   ),
                 ),
                 h('div', { className: 'relay-actions' },
@@ -1902,6 +1935,16 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                       h('button', { type: 'button', className: 'relay-btn is-small', onClick: () => openSession(current.sessionId) }, t('open')),
                     ),
                 ),
+                headGoal === null ? null : h('dt', {}, t('goalRow')),
+                headGoal === null
+                  ? null
+                  : h('dd', {},
+                    h(GoalPills, { goal: headGoal, held: head.goalHeld === true, pausedByRelay: head.goalPausedByRelay === true }),
+                    h('span', { className: 'relay-tag' }, t('goalBudget')),
+                  ),
+                headGoal === null || typeof headGoal.blockedMessage !== 'string' || headGoal.blockedMessage.length === 0
+                  ? null
+                  : h('dd', { className: 'relay-facts-note' }, h('div', { className: 'relay-text' }, headGoal.blockedMessage)),
                 h('dt', {}, t('updatedAt')),
                 h('dd', {},
                   h('span', { title: chain.updatedAt }, ago(chain.updatedAt)),
@@ -1928,6 +1971,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             section === 'features'
               ? h(FeatureCard, {
                 features,
+                planMode: head.planMode === true,
                 onAccept: (target, accepted) => {
                   void onAct('relay/acceptCoverage', { chainId: chain.chainId, featureId: target.id, accepted })
                 },
@@ -1997,7 +2041,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
         }
 
         /** The chain a session tab belongs to, with the way back to the panel. */
-        function ChainBanner({ chain }) {
+        function ChainBanner({ chain, head }) {
           const total = chain.featuresTotal ?? 0
           const done = chain.featuresDone ?? 0
           const blocker = chain.blocker ?? null
@@ -2011,6 +2055,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 blocker === null
                   ? null
                   : h('span', { className: `relay-status is-${blocker.kind === 'external' ? 'failed' : 'paused'}`, title: blocker.action }, label('blocker', blocker.kind)),
+                head?.planMode === true ? h('span', { className: 'relay-chip is-human' }, t('planModeChip')) : null,
               ),
               h('div', { className: 'relay-banner-objective', title: chain.objective }, chain.objective ?? ''),
             ),
@@ -2039,14 +2084,23 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           )
         }
 
-        /** Pill and chip for a session's goal; nothing when it has none. */
-        function GoalPills({ goal }) {
+        /**
+         * Pill and chip for a session's goal, with the round budget as a bar;
+         * nothing when it has none. `held` and `pausedByRelay` explain why a
+         * disarmed goal is not continuing: the plugin did it on purpose.
+         */
+        function GoalPills({ goal, held = false, pausedByRelay = false }) {
           if (goal === null || goal === undefined) return null
-          return h('div', { className: 'relay-pills' },
-            h('span', { className: `relay-status is-${GOAL_TONES[goal.phase] ?? 'paused'}` }, label('goal', goal.phase)),
-            h('span', { className: `relay-chip${goal.activation === 'armed' ? '' : ' is-warn'}` },
-              goal.activation === 'armed' ? t('goalArmed') : t('goalDisarmed')),
-            h('span', { className: 'relay-tag' }, `${t('goalRounds')} ${goal.roundsStarted ?? 0}/${goal.maxGoalRounds ?? 0}`),
+          const activation = pausedByRelay && goal.phase === 'paused'
+            ? t('goalPausedWithChain')
+            : held ? t('goalHeld') : (goal.activation === 'armed' ? t('goalArmed') : t('goalDisarmed'))
+          return h('div', { className: 'relay-goal' },
+            h('div', { className: 'relay-pills' },
+              h('span', { className: `relay-status is-${GOAL_TONES[goal.phase] ?? 'paused'}` }, label('goal', goal.phase)),
+              h('span', { className: `relay-chip${goal.activation === 'armed' ? '' : ' is-warn'}` }, activation),
+              h('span', { className: 'relay-tag' }, `${t('goalRounds')} ${goal.roundsStarted ?? 0}/${goal.maxGoalRounds ?? 0}`),
+            ),
+            h('div', { className: 'relay-goal-bar' }, h(Bar, { done: goal.roundsStarted ?? 0, total: goal.maxGoalRounds ?? 0 })),
           )
         }
 
@@ -2062,6 +2116,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
               h('span', { className: 'relay-mono', title: child.sessionId }, shortId(child.sessionId)),
               waiting ? h('span', { className: 'relay-status is-warn' }, t('decisionShort')) : null,
               h(StatePill, { session: child }),
+              child.planMode === true ? h('span', { className: 'relay-chip is-human' }, t('planModeChip')) : null,
               h('button', { type: 'button', className: 'relay-btn is-small', onClick: () => openSession(child.sessionId) }, t('open')),
               onReclaim !== undefined && state !== 'retired' && owned.some(feature => !feature.passes)
                 ? h(ConfirmButton, {
@@ -2123,7 +2178,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const waiting = new Set(decisions.map(decision => decision.sessionId).filter(id => typeof id === 'string'))
           const isCurrent = view.chain.currentSessionId === sessionId
           return h(TabShell, {},
-            h(ChainBanner, { chain: view.chain }),
+            h(ChainBanner, { chain: view.chain, head: view.head }),
             children.length === 0
               ? h(TabEmpty, { title: t('noChildrenTitle'), body: isCurrent ? t('noChildrenBody') : t('noChildrenNotCurrent') })
               : h(React.Fragment, {},
@@ -2165,7 +2220,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const handedOver = !delegated && state === 'retired' && typeof currentId === 'string' && !isCurrent
           const goal = self.goal ?? null
           return h(TabShell, {},
-            h(ChainBanner, { chain: view.chain }),
+            h(ChainBanner, { chain: view.chain, head: view.head }),
             h('div', { className: 'relay-task-grid' },
               h('div', { className: 'relay-task-side' },
                 h('section', { className: 'relay-card' },
@@ -2174,6 +2229,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                     h('span', { className: 'relay-chip' }, delegated ? t('posChild') : t('posMainline')),
                     typeof self.role === 'string' ? h('span', { className: 'relay-chip' }, label('role', self.role)) : null,
                     isCurrent ? h('span', { className: 'relay-chip is-human' }, t('posCurrent')) : null,
+                    self.planMode === true ? h('span', { className: 'relay-chip is-human' }, t('planModeChip')) : null,
                     h(StatePill, { session: self }),
                   ),
                   state === null
@@ -2210,7 +2266,12 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                   goal === null
                     ? h('div', { className: 'relay-text' }, t('noGoal'))
                     : h('div', {},
-                      h(GoalPills, { goal }),
+                      // The head state describes the chain's current session only.
+                      h(GoalPills, {
+                        goal,
+                        held: isCurrent && view.head?.goalHeld === true,
+                        pausedByRelay: isCurrent && view.head?.goalPausedByRelay === true,
+                      }),
                       goal.blockedMessage === null || goal.blockedMessage === undefined
                         ? null
                         : h('div', { className: 'relay-text', style: { marginTop: '6px' } }, goal.blockedMessage),

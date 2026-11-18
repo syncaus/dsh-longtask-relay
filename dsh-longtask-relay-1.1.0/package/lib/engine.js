@@ -1254,6 +1254,29 @@ export class RelayEngine {
     }
   }
 
+  /**
+   * What the panel needs to know about the chain's current session beyond its
+   * snapshot: its goal, whether it is in plan mode, and whether the plugin is
+   * holding or pausing the goal. The panel reads this to explain a chain that
+   * looks stuck (plan mode, held goal) and to show the shared round budget.
+   * @param {object} chain - chain record.
+   * @returns {{ goal: object|null, planMode: boolean, goalHeld: boolean, goalPausedByRelay: boolean }} head state.
+   */
+  headState(chain) {
+    const goalPausedByRelay = chain.goalPausedByRelay !== null && chain.goalPausedByRelay !== undefined
+    const agent = this.ctx.get('agents')?.get(chain.currentSessionId)
+    if (agent === undefined) return { goal: null, planMode: false, goalHeld: false, goalPausedByRelay }
+    const goal = this.goalViewOf(agent)
+    const wrapping = (chain.wrapupAt !== null && chain.wrapupAt !== undefined)
+      || (chain.readyAt !== null && chain.readyAt !== undefined)
+    return {
+      goal,
+      planMode: this.planActive(agent),
+      goalHeld: goal !== null && goal.phase === 'active' && goal.activation === 'disarmed' && wrapping,
+      goalPausedByRelay,
+    }
+  }
+
   /** Snapshot every chain this Host knows about. */
   status() {
     const signature = this.statusSignature()
@@ -1294,6 +1317,7 @@ export class RelayEngine {
           items.push({
             ...chainSummary(chain, progress),
             sessionsDetail: chain.sessions.map(session => this.sessionSnapshot(session)),
+            head: this.headState(chain),
           })
         } catch (error) {
           this.warn(`cannot read chain ${chainId}: ${error instanceof Error ? error.message : String(error)}`)
@@ -1419,6 +1443,7 @@ export class RelayEngine {
       // Whether the current session wrote the brief a successor would receive.
       handoffFreshness: this.handoffFreshness(chain, store, chain.sessions.find(session => session.sessionId === chain.currentSessionId)),
       sessions: chain.sessions.map(session => this.sessionSnapshot(session)),
+      head: this.headState(chain),
     }
   }
 
@@ -1632,6 +1657,7 @@ export class RelayEngine {
     const describe = session => ({
       ...this.sessionSnapshot(session),
       goal: this.goalViewOf(this.ctx.get('agents')?.get(session.sessionId)),
+      planMode: this.planActive(this.ctx.get('agents')?.get(session.sessionId)),
     })
     const brief = feature => ({
       id: feature.id,
@@ -1656,6 +1682,7 @@ export class RelayEngine {
       })
     return {
       chain: chainSummary(chain, document === undefined ? undefined : featureProgress(document)),
+      head: this.headState(chain),
       self: describe(self),
       parent: self.parentSessionId === null || self.parentSessionId === undefined
         ? null
