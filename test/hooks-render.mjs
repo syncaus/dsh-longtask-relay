@@ -82,7 +82,13 @@ function createFakeReact() {
     if (changed) effectQueue.push(fn)
   }
 
-  const createElement = (type, props, ...children) => ({ type, props, children })
+  const createElement = (type, props, ...children) => {
+    const merged = { ...props }
+    if (!('children' in merged) && children.length > 0) {
+      merged.children = children.length === 1 ? children[0] : children
+    }
+    return { type, props: merged, children }
+  }
 
   function render(component, props) {
     store = storeFor(component)
@@ -148,6 +154,20 @@ function boot({ failSessionViewOnce = false } = {}) {
     assignedFeatures: [{ id: 'F001', title: 'first', passes: false, evidence: null, verify: 'node test', coverage: 'full', acceptedBy: null }],
   }
 
+  const chainSummary = { chainId: 'chain-1', status: 'active', title: 'demo', objective: 'ship it', featuresTotal: 2, featuresDone: 1, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null, sessions: 1 }
+  const panelChains = {
+    chains: [{
+      ...chainSummary,
+      sessionsDetail: [{ sessionId: 'session-1', role: 'initializer', running: false, loaded: true, peakRatio: 0.4, pressureRatio: 0.2 }],
+    }],
+  }
+  const panelDetail = {
+    chain: chainSummary,
+    features: [],
+    sessions: [{ sessionId: 'session-1', role: 'initializer', running: false, loaded: true, pressureRatio: 0.2, peakRatio: 0.4 }],
+    handoff: null,
+  }
+
   const context = {
     connection: {
       rpc: {
@@ -160,6 +180,9 @@ function boot({ failSessionViewOnce = false } = {}) {
             }
             return Promise.resolve({ ok: true, value: chainView })
           }
+          if (endpoint === 'relay/listChains') return Promise.resolve({ ok: true, value: panelChains })
+          if (endpoint === 'relay/chainDetail') return Promise.resolve({ ok: true, value: panelDetail })
+          if (endpoint === 'relay/chainAudit') return Promise.resolve({ ok: true, value: [] })
           return Promise.resolve({ ok: true, value: {} })
         },
       },
@@ -230,6 +253,15 @@ function collectText(node, parts = []) {
     return parts
   }
   if (typeof node === 'object') {
+    // Child components render their own trees; hook-using ones are left to the
+    // top-level render, so a throw here only means "not collectable".
+    if (typeof node.type === 'function') {
+      try {
+        collectText(node.type(node.props), parts)
+      } catch {
+        /* the child owns hooks and is rendered by the component under test */
+      }
+    }
     for (const value of Object.values(node.props ?? {})) {
       if (typeof value === 'string') parts.push(value)
     }
@@ -252,4 +284,12 @@ for (const tab of tabs) {
   )
 }
 
-console.log('session tab render check passed: hook order holds, and a read error clears after recovery')
+// The panel's "peak context" KPI must read the field the Host actually sends;
+// it used to read a name `status()` never returned and always showed 0%.
+const panel = registrations.find(entry => entry.options.name === 'main')
+const panelTree = await react.settle(panel.component, {})
+const panelText = collectText(panelTree)
+assert.ok(panelText.includes('40%'), 'the chain card must show the peak context ratio')
+assert.ok(!panelText.includes('20%'), 'the chain card read a context field the Host does not send')
+
+console.log('session tab render check passed: hook order holds, a read error clears after recovery, and the panel shows the peak ratio')
