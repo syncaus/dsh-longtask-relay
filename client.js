@@ -239,8 +239,8 @@ window.__ModuleLoader__.load({
       {
         title: '交接触发',
         fields: [
-          { key: 'handoffRatio', kind: 'number', min: 0.1, max: 0.95, step: 0.01, hint: '上下文占用到这个比例就收尾交接，必须低于 DSH 自动压缩的阈值（默认 0.8）' },
-          { key: 'wrapupRatio', kind: 'number', min: 0.1, max: 0.9, step: 0.01, hint: '进入收尾阶段的比例，低于交接比例' },
+          { key: 'handoffRatio', kind: 'number', min: 0.1, max: 0.95, step: 0.01, hint: '收尾后仍到这个比例就强制交接，必须低于 DSH 自动压缩的阈值（默认 0.8）' },
+          { key: 'wrapupRatio', kind: 'number', min: 0.1, max: 0.9, step: 0.01, hint: '进入收尾阶段的比例，必须低于交接比例' },
           { key: 'handoffAfterCompactions', kind: 'int', min: 1, hint: '压缩过几次后，达到下面的比例也触发收尾' },
           { key: 'compactedRatioFloor', kind: 'number', min: 0.1, max: 0.9, step: 0.01, hint: '已压缩过的会话触发收尾的最低比例' },
           { key: 'hardCompactions', kind: 'int', min: 1, hint: '压缩达到几次后不等边界，直接交接' },
@@ -838,6 +838,7 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
                   const next = Array.isArray(value) ? value : []
                   auditCache.set(chainId, next)
                   setRecords(next)
+                  setError(null)
                 })
                 .catch(failure => { if (live) setError(failure instanceof Error ? failure.message : String(failure)) })
             }
@@ -989,6 +990,7 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
                   const next = value ?? null
                   sessionViewCache.set(sessionId, next)
                   setView(next)
+                  setError(null)
                 })
                 .catch(failure => { if (live) setError(failure instanceof Error ? failure.message : String(failure)) })
             }
