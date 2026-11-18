@@ -1,6 +1,6 @@
 {
   "name": "@local/longtask-relay",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
   "description": "Long-task relay: keep one task moving across fresh sessions through a workspace truth source (plan + features + evidence + decisions + traps), with automatic handoff that carries the permission preset, goal, and plan mode, blocker-aware pausing, and a panel to monitor and steer every chain.",
