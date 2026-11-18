@@ -7,6 +7,7 @@
  * rebuilds the same picture from the files on disk.
  */
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ChainIndex, ChainStore, RELAY_CODES, RelayError, featureProgress, skeletonTruth } from './chain-store.js'
 import {
@@ -301,6 +302,7 @@ export class RelayEngine {
     store.writeHandoff(chain.chainId, skeleton.handoff)
     store.writeText(store.paths(chain.chainId).decisions, skeleton.decisions)
     store.writeText(store.paths(chain.chainId).traps, skeleton.traps)
+    store.writeText(store.paths(chain.chainId).history, skeleton.history)
     const joinedAt = new Date().toISOString()
     const updated = store.update(chain.chainId, record => {
       record.sessions.push({
@@ -352,6 +354,15 @@ export class RelayEngine {
   checkpoint({ agent, chainId, features, ready, blocked, note, addFeatures, reason, blocker }) {
     const resolved = this.resolveChain(agent, chainId)
     const { chain, store } = resolved
+    // Ready is the gate the next session depends on: without a structured
+    // brief it starts blind, so refuse before writing anything.
+    if (ready === true && !/<!--\s*relay:state\s*-->/.test(store.readHandoff(chain.chainId))) {
+      return {
+        ok: false,
+        code: 'handoff_missing',
+        message: 'write HANDOFF.md with a <!-- relay:state --> block before ready=true',
+      }
+    }
     // Snapshot before the write so the audit can name exactly what changed.
     const before = store.readFeatures(chain.chainId)?.features ?? []
     const beforePasses = new Map(before.map(feature => [feature.id, feature.passes]))
@@ -1019,6 +1030,93 @@ export class RelayEngine {
     return store.readAudit(chainId, limit)
   }
 
+  /**
+   * How many handoffs the history file already records.
+   * @param {import('./chain-store.js').ChainStore} store - chain store.
+   * @param {string} chainId - chain identity.
+   * @returns {number} entry count.
+   */
+  historyEntries(store, chainId) {
+    try {
+      return (store.readHistory(chainId).match(/^## Handoff #/gm) ?? []).length
+    } catch {
+      return 0
+    }
+  }
+
+  /**
+   * Append the brief the retiring session wrote, so a later session can still
+   * read it after HANDOFF.md is overwritten.
+   * @param {import('./chain-store.js').ChainStore} store - chain store.
+   * @param {object} chain - chain record.
+   * @param {{ from: string, to: string, handoffNo: number, reason: string, handoff: string }} entry - handoff facts.
+   * @returns {void}
+   */
+  appendHistory(store, chain, entry) {
+    const brief = entry.handoff.trim()
+    const body = [
+      `## Handoff #${entry.handoffNo} — ${entry.from} → ${entry.to} — ${new Date().toISOString()}`,
+      `Reason: ${entry.reason}`,
+      '',
+      brief.length === 0 ? '(the previous session wrote no handoff brief)' : brief,
+    ].join('\n')
+    try {
+      store.appendHistory(chain.chainId, body)
+    } catch (error) {
+      this.warn(`could not append the handoff history for ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * Search this chain's memory for lines containing every word of the query.
+   * The ledgers grow across handoffs, so recall lets a session look things up
+   * instead of reading every file in full.
+   * @param {{ agent?: object, chainId?: string, query: string, limit?: number }} input - recall input.
+   * @returns {{ chainId: string, query: string, total: number, returned: number, truncated: boolean, matches: Array<object> }} matches.
+   */
+  recall({ agent, chainId, query, limit }) {
+    if (typeof query !== 'string' || query.trim().length === 0) {
+      throw new RelayError(RELAY_CODES.invalid, 'query is required')
+    }
+    const { chain, store } = this.resolveChain(agent, chainId)
+    const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    const cap = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 30
+    const paths = store.paths(chain.chainId)
+    const files = [
+      ['HANDOFF.md', paths.handoff],
+      ['history.md', paths.history],
+      ['PROGRESS.md', paths.progress],
+      ['decisions.md', paths.decisions],
+      ['traps.md', paths.traps],
+      ['features.json', paths.features],
+      ['audit.jsonl', paths.audit],
+    ]
+    const matches = []
+    let total = 0
+    for (const [name, file] of files) {
+      let text
+      try {
+        text = readFileSync(file, 'utf8')
+      } catch {
+        continue
+      }
+      for (const [index, line] of text.split(/\r?\n/).entries()) {
+        const lower = line.toLowerCase()
+        if (!words.every(word => lower.includes(word))) continue
+        total += 1
+        if (matches.length < cap) matches.push({ file: name, line: index + 1, text: line.trim().slice(0, 240) })
+      }
+    }
+    return {
+      chainId: chain.chainId,
+      query: query.trim(),
+      total,
+      returned: matches.length,
+      truncated: total > matches.length,
+      matches,
+    }
+  }
+
   /** Record one successful compaction for a session and persist the count. */
   noteCompaction(sessionId) {
     const stats = this.statsFor(sessionId)
@@ -1212,10 +1310,12 @@ export class RelayEngine {
       if (session !== undefined) this.decorateSession(chain, newAgent, handoffNo)
 
       const document = store.readFeatures(chain.chainId)
+      const previousHandoff = store.readHandoff(chain.chainId)
       const prompt = renderHandoffPrompt({
         chain,
         features: document,
-        handoff: store.readHandoff(chain.chainId),
+        handoff: previousHandoff,
+        historyEntries: this.historyEntries(store, chain.chainId),
         handoffNo,
         previousSessionId: oldAgent.session.id,
         truthDir: join(store.truthDir, chain.chainId),
@@ -1265,6 +1365,13 @@ export class RelayEngine {
       this.statsFor(createdSessionId)
       const settled = store.readChain(chain.chainId)
       if (settled !== undefined) this.remember(settled, store)
+      this.appendHistory(store, chain, {
+        from: oldAgent.session.id,
+        to: createdSessionId,
+        handoffNo,
+        reason,
+        handoff: previousHandoff,
+      })
       this.retire(oldAgent, chain, createdSessionId, handoffNo)
       this.record(store, chain.chainId, {
         kind: 'handoff.completed',

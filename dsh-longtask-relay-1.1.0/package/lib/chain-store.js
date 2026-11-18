@@ -247,6 +247,7 @@ export class ChainStore {
       features: join(dir, 'features.json'),
       progress: join(dir, 'PROGRESS.md'),
       handoff: join(dir, 'HANDOFF.md'),
+      history: join(dir, 'history.md'),
       decisions: join(dir, 'decisions.md'),
       traps: join(dir, 'traps.md'),
       audit: join(dir, 'audit.jsonl'),
@@ -499,6 +500,34 @@ export class ChainStore {
   }
 
   /**
+   * Read the handoff history this plugin appends on every handoff.
+   * @param {string} chainId - chain identity.
+   * @returns {string} current text, possibly empty.
+   */
+  readHistory(chainId) {
+    return readText(this.paths(chainId).history)
+  }
+
+  /**
+   * Append one block to the handoff history, creating it when missing.
+   * @param {string} chainId - chain identity.
+   * @param {string} text - block text without the trailing newline.
+   * @returns {void}
+   */
+  appendHistory(chainId, text) {
+    const body = String(text ?? '').trim()
+    if (body.length === 0) return
+    const file = this.paths(chainId).history
+    let current = ''
+    try {
+      current = readFileSync(file, 'utf8')
+    } catch {
+      current = '# Handoff history\n'
+    }
+    writeAtomic(file, `${current.replace(/\s*$/, '\n\n')}${body}\n`)
+  }
+
+  /**
    * Write one truth-source text file that the session owns (decisions, traps).
    * @param {string} file - absolute path from `paths()`.
    * @param {string} text - complete new content.
@@ -710,6 +739,7 @@ export function skeletonTruth(objective) {
     },
     decisions: '# Decisions\n\nAppend-only. One block per decision: what was decided, why, and what would make it wrong.\n',
     traps: '# Traps\n\nAppend-only. One line per trap that cost real time; include the exact command or syntax that bit.\n',
+    history: '# Handoff history\n\nAppend-only. The plugin writes the previous handoff brief here on every handoff, so earlier sessions stay searchable.\n',
     progress: [
       '# PROGRESS',
       '',
