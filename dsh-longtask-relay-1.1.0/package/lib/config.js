@@ -46,6 +46,13 @@ export const DEFAULT_CONFIG = Object.freeze({
   /** Agent preset for the next session; empty inherits the creator's preset. */
   agentPreset: '',
   /**
+   * Whether a session this plugin creates starts with the permission preset
+   * (sandbox mode + approval policy) of the session it continues. Without it
+   * the new session gets the Host's default preset, so a chain started under
+   * full access drops back to the default at the first handoff.
+   */
+  inheritPermission: true,
+  /**
    * Approval policy applied to sessions this plugin creates on its own
    * (delegated workers and handoff successors). An unattended session's
    * approval request has no timeout, so `ask` can park a chain forever;
@@ -135,7 +142,8 @@ function issueFor(name, value) {
   }
   if (name === 'autoHandoff' || name === 'pauseGoalOnRetire' || name === 'pauseOnExternalBlocker'
     || name === 'notifyOldSession' || name === 'requireStrongEvidence' || name === 'requireHumanAcceptedCoverage'
-    || name === 'seedGoalOnHandoff' || name === 'autoContinue' || name === 'commitTruth') {
+    || name === 'seedGoalOnHandoff' || name === 'autoContinue' || name === 'commitTruth'
+    || name === 'inheritPermission') {
     if (typeof value !== 'boolean') return `${name} must be a boolean`
     return undefined
   }

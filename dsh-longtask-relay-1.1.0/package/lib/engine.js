@@ -172,6 +172,42 @@ export class RelayEngine {
   }
 
   /**
+   * Give a created session the permission preset of the session it continues.
+   * A DSH preset bundles the sandbox mode with the approval policy; a new
+   * session is pinned to the user's default preset at creation, so without this
+   * a chain started under full access loses it at the first handoff.
+   * A `custom` combination has no name to switch to and is left alone.
+   * @param {object} chain - chain record, for the audit.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object|undefined} source - the live session being continued.
+   * @param {object|undefined} created - the created live session.
+   * @returns {string|undefined} the preset that was carried over, when any.
+   */
+  inheritPermission(chain, store, source, created) {
+    if (!this.config.inheritPermission || source === undefined || created === undefined) return undefined
+    const presets = this.ctx.get('permissionPresets')
+    if (presets === undefined || typeof presets.current !== 'function' || typeof presets.set !== 'function') return undefined
+    try {
+      const preset = presets.current(source.session)
+      if (preset === 'custom') {
+        this.warn(`session ${source.id} uses a custom sandbox and approval combination; ${created.id} keeps the default preset`)
+        return undefined
+      }
+      if (presets.current(created.session) === preset) return preset
+      presets.set(created.session, preset)
+      this.record(store, chain.chainId, {
+        kind: 'session.permission',
+        actor: 'system',
+        detail: { sessionId: created.id, from: source.id, preset },
+      })
+      return preset
+    } catch (error) {
+      this.warn(`could not carry the permission preset to ${created.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return undefined
+    }
+  }
+
+  /**
    * Apply this plugin's approval policy to a session it created.
    * A delegated worker or a handoff successor runs unattended: the default
    * `ask` policy has no timeout, so its approval request can park the chain
@@ -705,6 +741,25 @@ export class RelayEngine {
   }
 
   /**
+   * Clear a chain's blocker on a human's word that the blocking action is done.
+   * A blocker mirrored from a blocked goal is owned by that goal: clearing it here
+   * would only be undone by the next evaluation, so it is refused with the way out.
+   * @param {{ chainId: string }} input - chain identity.
+   * @returns {{ chainId: string, status: string, cleared: boolean }} the new status.
+   */
+  clearBlocker({ chainId }) {
+    const { chain, store } = this.findChain(chainId)
+    const blocker = chain.blocker ?? null
+    if (blocker === null) return { chainId: chain.chainId, status: chain.status, cleared: false }
+    if (typeof blocker.action === 'string' && blocker.action.startsWith(GOAL_BLOCKER_PREFIX)) {
+      throw new RelayError(RELAY_CODES.invalid, 'this blocker follows a blocked goal; resume the goal in its session to clear it')
+    }
+    this.recordBlocker(store, chain.chainId, null)
+    this.record(store, chain.chainId, { kind: 'blocker.cleared', actor: 'host', detail: { kind: blocker.kind, action: blocker.action } })
+    return { chainId: chain.chainId, status: store.readChain(chain.chainId)?.status ?? chain.status, cleared: true }
+  }
+
+  /**
    * Delete a stopped chain and forget it.
    * An active chain's supervisor is still running, so it must be paused first;
    * this keeps a delete from racing a wrap-up or handoff.
@@ -1205,6 +1260,8 @@ export class RelayEngine {
       progress: store.readProgress(chainId).slice(0, 8000),
       handoff: store.readHandoff(chainId).slice(0, 8000),
       truthDir: join(store.truthDir, chainId),
+      // Whether the current session wrote the brief a successor would receive.
+      handoffFreshness: this.handoffFreshness(chain, store, chain.sessions.find(session => session.sessionId === chain.currentSessionId)),
       sessions: chain.sessions.map(session => {
         const live = this.ctx.get('agents')?.get(session.sessionId)
         const stats = this.stats.get(session.sessionId)
@@ -1307,6 +1364,7 @@ export class RelayEngine {
 
       const child = this.ctx.get('agents')?.get(createdSessionId)
       if (child !== undefined) {
+        this.inheritPermission(chain, store, agent, child)
         this.applyWorkerPolicy(child)
         try {
           this.ctx.get('sessionTitle')?.rename(child.session, sessionTitle('subtask', { title: chain.title }))
@@ -2155,6 +2213,9 @@ export class RelayEngine {
       }
       const newAgent = this.ctx.get('agents')?.get(createdSessionId)
       const session = newAgent?.session
+      // The preset first: it sets the sandbox mode, then the worker policy
+      // may still tighten the approval side for an unattended session.
+      this.inheritPermission(chain, store, oldAgent, newAgent)
       if (newAgent !== undefined) this.applyWorkerPolicy(newAgent)
 
       store.update(chain.chainId, record => {

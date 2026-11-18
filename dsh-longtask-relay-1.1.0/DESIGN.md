@@ -579,7 +579,7 @@ subagent 的路由、目录、命名都服务于「委派」语义，用户无�
 |---|---|---|
 | 真源存储 | `lib/chain-store.js` | 四件套读写、原子写、feature 变更约束、`ChainIndex` 跨生命周期索引 |
 | 判定与交接 | `lib/engine.js` | 压力/压缩判定、收尾、创建会话、投递交接、旧会话退役、失败回退 |
-| 工具 | `lib/tools.js` | `relay_start` / `relay_status` / `relay_checkpoint` / `relay_audit` / `relay_recall` / `relay_spawn` / `relay_finish` / `relay_control`（pause / resume / handoff / delete） |
+| 工具 | `lib/tools.js` | `relay_start` / `relay_status` / `relay_checkpoint` / `relay_audit` / `relay_recall` / `relay_spawn` / `relay_finish` / `relay_control`（pause / resume / handoff / reclaim；删除链只在面板里做，见 `lib/tools.js` 的 `relay_control`） |
 | 投影 | `lib/projection.js` | `relaySession` 每会话视图（压缩次数、轮次），进会话列表摘要 |
 | Remote | `lib/remote.js` | 手写 Typert 绑定与原型标记，命名空间 `relay` |
 | 面板 | `client.js` | `main` 面板 + `sidebar.panellist` 入口，链列表/详情/暂停/交接 |
@@ -589,7 +589,7 @@ subagent 的路由、目录、命名都服务于「委派」语义，用户无�
 
 ### 已验证
 
-- 单测 13/13（`node test/smoke.mjs`）：真源读写、feature 变更约束、索引、判定阈值、收尾只发一次、ready 交接、压缩强制交接、finish 拒绝、失败回退。
+- 单测（`node test/smoke.mjs`，末行打印通过数）：真源读写、feature 变更约束、索引、判定阈值、收尾只发一次、ready 交接、压缩强制交接、finish 拒绝、失败回退。
 - 真实端到端：`schedule` 投递 → 新会话调用 `relay_start` → 真源文件生成 → 模型写入 `features.json` → 手动 `relay_control(handoff)` → 新会话创建（同 cwd、preset standard）→ 首条消息为 `<relay_handoff>`（含真源绝对路径、进度、下一个 feature）→ 新会话开始工作；链文件 `handoffCount=1`、旧会话 `retiredAt`/`retireReason` 正确。
 - 插件安装返回 `application: applied`，行 `include:longtask-relay` 为 active。
 

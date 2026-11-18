@@ -35,7 +35,7 @@ const REMOTE_METHOD_DESCRIPTOR = '@deepseek-ai/dsh-typert-protocol/remote-method
 
 /** Methods exposed to the browser. */
 const METHODS = [
-  'listChains', 'chainDetail', 'chainAudit', 'chainDoc', 'sessionView', 'setPaused', 'handoffNow', 'finishChain', 'deleteChain', 'acceptCoverage', 'raiseHandoffLimit', 'getConfig', 'saveConfig',
+  'listChains', 'chainDetail', 'chainAudit', 'chainDoc', 'sessionView', 'setPaused', 'handoffNow', 'finishChain', 'deleteChain', 'acceptCoverage', 'raiseHandoffLimit', 'clearBlocker', 'reclaimWorker', 'recall', 'getConfig', 'saveConfig',
 ]
 
 /** Relay Remote over the engine. */
@@ -193,6 +193,47 @@ export class RelayRemote {
       throw new RelayError('invalid', 'maxHandoffs must be an integer from 1 to 1000')
     }
     return this.engine.raiseHandoffLimit({ chainId, maxHandoffs })
+  }
+
+  /**
+   * Clear a chain's blocker after a human did what it asked for.
+   * @param {string} chainId - chain identity.
+   * @returns {object} the new status.
+   */
+  clearBlocker(chainId) {
+    if (typeof chainId !== 'string' || chainId.length === 0) {
+      throw new RelayError('invalid', 'chainId is required')
+    }
+    return this.engine.clearBlocker({ chainId })
+  }
+
+  /**
+   * Take a delegated worker's unfinished features back to the chain.
+   * @param {string} chainId - chain identity.
+   * @param {string} sessionId - worker session.
+   * @returns {object} the reclaimed features.
+   */
+  reclaimWorker(chainId, sessionId) {
+    if (typeof chainId !== 'string' || chainId.length === 0) {
+      throw new RelayError('invalid', 'chainId is required')
+    }
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throw new RelayError('invalid', 'sessionId is required')
+    }
+    return this.engine.reclaimDelegation({ chainId, sessionId })
+  }
+
+  /**
+   * Search one chain's memory for lines containing every word of the query.
+   * @param {string} chainId - chain identity.
+   * @param {string} query - words to look for.
+   * @returns {object} matches.
+   */
+  recall(chainId, query) {
+    if (typeof chainId !== 'string' || chainId.length === 0) {
+      throw new RelayError('invalid', 'chainId is required')
+    }
+    return this.engine.recall({ chainId, query, limit: 50 })
   }
 
   /** The running configuration plus whether this Host can persist a change. */
