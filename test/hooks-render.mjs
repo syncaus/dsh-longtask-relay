@@ -158,7 +158,7 @@ function boot({ failSessionViewOnce = false } = {}) {
   const panelChains = {
     chains: [{
       ...chainSummary,
-      sessionsDetail: [{ sessionId: 'session-1', role: 'initializer', running: false, loaded: true, peakRatio: 0.4, pressureRatio: 0.2 }],
+      sessionsDetail: [{ sessionId: 'session-1', role: 'initializer', running: false, loaded: true, peakRatio: 0.4, pressureRatio: 0.23 }],
     }],
   }
   const panelDetail = {
@@ -290,6 +290,6 @@ const panel = registrations.find(entry => entry.options.name === 'main')
 const panelTree = await react.settle(panel.component, {})
 const panelText = collectText(panelTree)
 assert.ok(panelText.includes('40%'), 'the chain card must show the peak context ratio')
-assert.ok(!panelText.includes('20%'), 'the chain card read a context field the Host does not send')
+assert.ok(!panelText.includes('23%'), 'the chain row must show the peak, not the current reading')
 
 console.log('session tab render check passed: hook order holds, a read error clears after recovery, and the panel shows the peak ratio')

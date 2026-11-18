@@ -324,6 +324,30 @@ await checkAsync('a handoff appends the previous brief to history', async () => 
   assert.ok(history.includes('session-old'), 'the history does not name the retiring session')
 })
 
+check('doc returns a truth document and the tail of a long ledger', () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  assert.deepEqual(world.engine.doc(chainId, 'traps'), { name: 'traps', text: '', truncated: false })
+  world.local.appendLedger(chainId, 'traps', '- EOL CRLF broke the PowerShell script')
+  assert.match(world.engine.doc(chainId, 'traps').text, /EOL CRLF/)
+  world.local.appendLedger(chainId, 'decisions', `${'x'.repeat(20000)} newest-line`)
+  const long = world.engine.doc(chainId, 'decisions')
+  assert.equal(long.truncated, true)
+  assert.ok(long.text.trimEnd().endsWith('newest-line'), 'a truncated ledger must keep its newest part')
+  assert.throws(() => world.engine.doc(chainId, 'relay'), error => error instanceof RelayError && error.code === RELAY_CODES.invalid)
+})
+
+await checkAsync('a chain summary reports the wrap-up phase', async () => {
+  const world = fakeWorld()
+  const before = world.engine.status().find(chain => chain.chainId === world.chain.chainId)
+  assert.equal(before.wrapupAt, null)
+  assert.equal(before.handoffPending, false)
+  world.setRatio(0.55)
+  await world.engine.evaluate(world.oldAgent)
+  const after = world.engine.status().find(chain => chain.chainId === world.chain.chainId)
+  assert.equal(typeof after.wrapupAt, 'string', 'the summary must say the session is wrapping up')
+})
+
 check('recall searches the chain ledgers', () => {
   const world = fakeWorld()
   world.local.appendLedger(world.chain.chainId, 'decisions', '- chose the clone site because the live one is the only baseline')
@@ -899,6 +923,9 @@ await checkAsync('sessionView reports parent, children, and owned features', asy
   assert.equal(parentView.children.length, 1)
   assert.equal(parentView.children[0].sessionId, 'session-child')
   assert.deepEqual(parentView.children[0].features, ['F002'])
+  assert.deepEqual(parentView.children[0].featureList, [{ id: 'F002', title: 'second', passes: false }])
+  assert.deepEqual(parentView.openFeatures.map(feature => feature.id), ['F001', 'F003'])
+  assert.equal(parentView.self.index, 0)
   assert.deepEqual(parentView.self.goal, {
     phase: 'active',
     activation: 'armed',
