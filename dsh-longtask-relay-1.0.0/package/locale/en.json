@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Long-task relay",
+    "description": "Turn a long task into a session chain: the truth source lives in workspace files, and when context nears its limit the plugin wraps up, opens a fresh session, and hands the work over. A sidebar panel monitors every chain and session.",
+    "detail": "docs/DETAIL.md"
+  }
+}
