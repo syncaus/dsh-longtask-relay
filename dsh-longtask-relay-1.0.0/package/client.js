@@ -795,15 +795,24 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
           return ''
         }
 
+        /** Last audit page seen per chain, so a revisit renders before the poll. */
+        const auditCache = new Map()
+
         /** Newest audit records for one chain, newest first. */
         function AuditCard({ chainId }) {
-          const [records, setRecords] = useState(null)
+          const [records, setRecords] = useState(() => auditCache.get(chainId) ?? null)
           const [error, setError] = useState(null)
           useEffect(() => {
             let live = true
+            setRecords(auditCache.get(chainId) ?? null)
             const load = () => {
               call('relay/chainAudit', { chainId, limit: 60 })
-                .then(value => { if (live) setRecords(Array.isArray(value) ? value : []) })
+                .then((value) => {
+                  if (!live) return
+                  const next = Array.isArray(value) ? value : []
+                  auditCache.set(chainId, next)
+                  setRecords(next)
+                })
                 .catch(failure => { if (live) setError(failure instanceof Error ? failure.message : String(failure)) })
             }
             load()
@@ -927,17 +936,34 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
         }
 
         /**
+         * Last view seen per session.
+         * The tab body unmounts when the user switches tabs, so without this
+         * every revisit would flash the loading state before the same data
+         * came back. Cached data renders first, then the poll confirms it.
+         */
+        const sessionViewCache = new Map()
+
+        /**
          * Load one session's place in its chain.
-         * `undefined` while loading, `null` when the session is in no chain.
+         * `undefined` until the first answer arrives, `null` when the session
+         * is in no chain.
          */
         function useSessionView(sessionId) {
-          const [view, setView] = useState(undefined)
+          const [view, setView] = useState(() => sessionViewCache.get(sessionId))
           const [error, setError] = useState(null)
           useEffect(() => {
             let live = true
+            // A different session reuses this component; show that session's
+            // own cache instead of the previous session's data.
+            setView(sessionViewCache.get(sessionId))
             const load = () => {
               call('relay/sessionView', { sessionId })
-                .then(value => { if (live) setView(value ?? null) })
+                .then((value) => {
+                  if (!live) return
+                  const next = value ?? null
+                  sessionViewCache.set(sessionId, next)
+                  setView(next)
+                })
                 .catch(failure => { if (live) setError(failure instanceof Error ? failure.message : String(failure)) })
             }
             load()
@@ -1089,20 +1115,26 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
           ))
         }
 
+        /** Last config payload, so the plugin page does not flash its form. */
+        const configCache = { value: null, editable: false }
+
         /** The plugin page's configuration card, registered in `plugins.bundle.config`. */
         function PluginConfigCard({ view }) {
-          const [config, setConfig] = useState(null)
-          const [editable, setEditable] = useState(false)
+          const [config, setConfig] = useState(() => configCache.value)
+          const [editable, setEditable] = useState(() => configCache.editable)
           const [error, setError] = useState(null)
           const [status, setStatus] = useState(null)
-          const [loading, setLoading] = useState(true)
+          const [loading, setLoading] = useState(() => configCache.value === null)
           const [busy, setBusy] = useState(false)
 
           const load = useCallback(async () => {
             try {
               const value = await call('relay/getConfig')
-              setConfig(value?.config ?? {})
-              setEditable(value?.editable === true)
+              const next = value?.config ?? {}
+              configCache.value = next
+              configCache.editable = value?.editable === true
+              setConfig(next)
+              setEditable(configCache.editable)
               setError(null)
             } catch (failure) {
               setError(failure instanceof Error ? failure.message : String(failure))
@@ -1205,12 +1237,18 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
         }
 
         /** The dashboard page. */
+        /**
+         * Last panel payload, so reopening the panel renders before the poll.
+         * `chains === null` means nothing has loaded yet.
+         */
+        const panelCache = { chains: null, detail: null }
+
         function RelayPage() {
-          const [chains, setChains] = useState([])
-          const [detail, setDetail] = useState(null)
+          const [chains, setChains] = useState(() => panelCache.chains ?? [])
+          const [detail, setDetail] = useState(() => panelCache.detail ?? null)
           const [selectedId, setSelectedId] = useState(null)
           const [error, setError] = useState(null)
-          const [loading, setLoading] = useState(true)
+          const [loading, setLoading] = useState(() => panelCache.chains === null)
           const [busy, setBusy] = useState(false)
           const selectedRef = useRef(null)
           const decisions = usePendingDecisions()
@@ -1227,6 +1265,8 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
                 selectedRef.current = null
                 setSelectedId(null)
               }
+              panelCache.chains = next
+              panelCache.detail = nextDetail
               setChains(next)
               setDetail(nextDetail)
               setError(null)
