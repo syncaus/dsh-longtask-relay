@@ -76,18 +76,16 @@
 
 | 条件 | 动作 |
 |---|---|
-| 上下文比例 ≥ `wrapupRatio`（默认 0.50） | 只在压缩过之后才用来触发收尾 |
-| 上下文比例 ≥ `handoffRatio`（默认 0.70） | 进入收尾 |
+| 上下文比例 ≥ `wrapupRatio`（默认 0.50） | 进入收尾 |
 | 成功压缩 ≥ `handoffAfterCompactions` 且比例 ≥ `compactedRatioFloor` | 进入收尾（压缩过说明吃紧过） |
 | 成功压缩 ≥ `hardCompactions`（默认 2） | 不等边界，直接交接 |
-| 收尾后空闲超过 `wrapupTimeoutMinutes` | 强制交接 |
-| 模型调用 `relay_checkpoint(ready=true)` | 立即允许交接 |
+| 已收尾，且 `ready=true` / 比例 ≥ `handoffRatio`（默认 0.70）/ 空闲超 `wrapupTimeoutMinutes` | 交接 |
 
 判定只在会话**完全空闲**（没有排队的下一步输入）时进行，所以不会打断正在输入的人类。每次判定之间有 `cooldownMs` 冷却。
 
 ## 与自动压缩的关系
 
-`compaction-basic` 默认在窗口的 80% 处压缩。压缩之后压力会掉到很低，本插件看起来就「不该触发」了。所以阈值必须低于压缩线：默认 0.70。如果你把压缩阈值调到 0.9，可以把 `handoffRatio` 调到 0.78，给收尾轮留出余量。
+`compaction-basic` 默认在窗口的 80% 处压缩。压缩之后压力会掉到很低，本插件看起来就「不该触发」了。所以强制交接线必须低于压缩线：默认 `handoffRatio` 0.70。如果你把压缩阈值调到 0.9，可以把 `handoffRatio` 调到 0.78，给收尾轮留出余量。
 
 ## 面板
 

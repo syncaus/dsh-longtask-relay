@@ -107,15 +107,16 @@ function createFakeReact() {
 
   /** Render until no state change is pending, so async effects settle. */
   async function settle(component, props) {
-    render(component, props)
+    let tree = render(component, props)
     const target = storeFor(component)
     for (let round = 0; round < 10 && target.pending; round += 1) {
       target.pending = false
       await new Promise(resolve => setImmediate(resolve))
-      render(component, props)
+      tree = render(component, props)
     }
     for (const cleanup of storeFor(component).cleanups) cleanup()
     storeFor(component).cleanups = []
+    return tree
   }
 
   return { createElement, useState, useRef, useCallback, useEffect, settle }
@@ -126,10 +127,11 @@ function createFakeReact() {
  * components plus the RPC stub.
  * @returns {{ registrations: object[], calls: object[] }}
  */
-function boot() {
+function boot({ failSessionViewOnce = false } = {}) {
   const react = createFakeReact()
   const registrations = []
   const calls = []
+  let failedOnce = false
 
   const chainView = {
     chain: { chainId: 'chain-1', status: 'active', title: 'demo', objective: 'ship it', featuresTotal: 2, featuresDone: 1, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null },
@@ -151,7 +153,13 @@ function boot() {
       rpc: {
         call: (_route, endpoint) => {
           calls.push(endpoint)
-          if (endpoint === 'relay/sessionView') return Promise.resolve({ ok: true, value: chainView })
+          if (endpoint === 'relay/sessionView') {
+            if (failSessionViewOnce && !failedOnce) {
+              failedOnce = true
+              return Promise.reject(new Error('transport down'))
+            }
+            return Promise.resolve({ ok: true, value: chainView })
+          }
           return Promise.resolve({ ok: true, value: {} })
         },
       },
@@ -210,4 +218,38 @@ for (const tab of tabs) {
   assert.ok(calls.includes('relay/sessionView'), `the "${label}" tab must request relay/sessionView`)
 }
 
-console.log('session tab render check passed: both tabs keep hook order across the loading -> loaded render')
+/** Flatten the strings a rendered tree would show. */
+function collectText(node, parts = []) {
+  if (node === null || node === undefined || node === false) return parts
+  if (typeof node === 'string' || typeof node === 'number') {
+    parts.push(String(node))
+    return parts
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) collectText(child, parts)
+    return parts
+  }
+  if (typeof node === 'object') {
+    for (const value of Object.values(node.props ?? {})) {
+      if (typeof value === 'string') parts.push(value)
+    }
+    collectText(node.children, parts)
+  }
+  return parts
+}
+
+// A transient RPC failure must not pin the tab on its error state: the next
+// poll succeeds and the tab has to render the recovered data.
+for (const tab of tabs) {
+  const flaky = boot({ failSessionViewOnce: true })
+  const entry = flaky.registrations.find(candidate => candidate.options.id === tab.options.id)
+  const failed = await flaky.react.settle(entry.component, { sessionId: 'session-a' })
+  assert.ok(collectText(failed).includes('failed'), 'the first load should render the failure')
+  const recovered = await flaky.react.settle(entry.component, { sessionId: 'session-b' })
+  assert.ok(
+    !collectText(recovered).includes('failed'),
+    `the "${tab.options.id}" tab kept a stale read error after a successful load`,
+  )
+}
+
+console.log('session tab render check passed: hook order holds, and a read error clears after recovery')

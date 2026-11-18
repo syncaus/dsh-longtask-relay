@@ -98,6 +98,7 @@ check('wrapup prompt names the progress and forbids new features', () => {
 check('config rejects unknown keys and out-of-range ratios', () => {
   assert.throws(() => resolveConfig({ nope: 1 }), /not a recognised setting/)
   assert.throws(() => resolveConfig({ handoffRatio: 1.2 }), /between 0 and 1/)
+  assert.throws(() => resolveConfig({ wrapupRatio: 0.8, handoffRatio: 0.7 }), /lower than handoffRatio/)
   assert.equal(resolveConfig({ handoffRatio: 0.6 }).handoffRatio, 0.6)
   assert.equal(resolveConfig({}).wrapupRatio, 0.5)
   assert.equal(resolveConfig({}).pauseOnExternalBlocker, true)
@@ -206,8 +207,65 @@ function fakeWorld({ goalService = true, ...overrides } = {}) {
   })
   engine.members.set('session-old', { chainId: chain.chainId, truthDir: local.truthDir })
   engine.remember(local.readChain(chain.chainId), local)
-  return { engine, calls, oldAgent, newAgent, local, chain, setRatio: value => { ratio = value }, setGoal: value => { goal = value } }
+  // A second engine over the same files, as after a plugin reload.
+  const rebuild = () => {
+    const next = new RelayEngine(ctx, config, { chainIndex: new ChainIndex(indexHome) })
+    next.members.set('session-old', { chainId: chain.chainId, truthDir: local.truthDir })
+    return next
+  }
+  return { engine, calls, oldAgent, newAgent, local, chain, rebuild, setRatio: value => { ratio = value }, setGoal: value => { goal = value } }
 }
+
+await checkAsync('crossing the wrapup ratio starts the wrap-up without handing off', async () => {
+  const world = fakeWorld({ wrapupRatio: 0.5, handoffRatio: 0.7 })
+  world.setRatio(0.55)
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.calls.filter(call => /<relay_wrapup>/.test(call.text ?? '')).length, 1)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0, 'the wrap-up must come first')
+})
+
+await checkAsync('below the wrapup ratio nothing happens', async () => {
+  const world = fakeWorld({ wrapupRatio: 0.5, handoffRatio: 0.7 })
+  world.setRatio(0.45)
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.calls.length, 0)
+})
+
+await checkAsync('a compaction count survives a reload', async () => {
+  const world = fakeWorld()
+  world.engine.noteCompaction('session-old')
+  const recorded = () => world.local.readChain(world.chain.chainId).sessions
+    .find(session => session.sessionId === 'session-old').compactions
+  assert.equal(recorded(), 1)
+  const restarted = world.rebuild()
+  world.setRatio(0.3)
+  await restarted.evaluate(world.oldAgent)
+  assert.equal(restarted.statsFor('session-old').compactions, 1, 'the count was not read back from the chain')
+  restarted.noteCompaction('session-old')
+  assert.equal(recorded(), 2)
+})
+
+await checkAsync('a wrapped-up session does not wrap up again after a reload', async () => {
+  const world = fakeWorld()
+  world.setRatio(0.7)
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.calls.filter(call => /<relay_wrapup>/.test(call.text ?? '')).length, 1)
+  const restarted = world.rebuild()
+  await restarted.evaluate(world.oldAgent)
+  assert.equal(world.calls.filter(call => /<relay_wrapup>/.test(call.text ?? '')).length, 1, 'the wrap-up repeated after a reload')
+  assert.ok(world.calls.some(call => call.kind === 'create'), 'the reloaded engine should hand off instead')
+})
+
+await checkAsync('a ready checkpoint survives a reload', async () => {
+  const world = fakeWorld()
+  world.setRatio(0.6)
+  await world.engine.evaluate(world.oldAgent)
+  world.engine.checkpoint({ agent: world.oldAgent, ready: true })
+  const restarted = world.rebuild()
+  world.setRatio(0.3)
+  await restarted.evaluate(world.oldAgent)
+  assert.ok(world.calls.some(call => call.kind === 'create'), 'the ready checkpoint was lost across the reload')
+})
 
 await checkAsync('below every threshold the engine does nothing', async () => {
   const world = fakeWorld()

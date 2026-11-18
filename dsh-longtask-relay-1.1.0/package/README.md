@@ -73,7 +73,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 | `truthDir` | `.relay` | 真理源目录，相对工作区 |
 | `autoHandoff` | `true` | 是否允许自动交接 |
 | `wrapupRatio` | `0.50` | 进入收尾的上下文比例（留一半窗口给收尾本身） |
-| `handoffRatio` | `0.70` | 直接触发收尾交接的比例；**必须低于 `compaction-basic` 的 `thresholdRatio`** |
+| `handoffRatio` | `0.70` | 收尾后仍到这个比例就强制交接；**必须低于 `compaction-basic` 的 `thresholdRatio`** |
 | `handoffAfterCompactions` | `1` | 压缩过几次后，低比例也触发收尾 |
 | `compactedRatioFloor` | `0.50` | 配合上一项的比例下限 |
 | `hardCompactions` | `2` | 压缩达到几次后不等边界直接交接 |
@@ -89,7 +89,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 | `requireStrongEvidence` | `true` | 通过的功能是否必须带「像命令结果」的证据；输出是自由文本的项目可关掉 |
 | `requireHumanAcceptedCoverage` | `true` | 低覆盖率是否必须由人确认；把部分覆盖当常态的项目可关掉 |
 
-**重要**：`compaction-basic` 默认在上下文窗口的 0.8 处压缩。如果它先压缩，压力会被降到很低，本插件就不会触发。请保证 `handoffRatio < compaction.thresholdRatio`（默认 0.70 < 0.80），或者把压缩阈值调到 0.9、把 `handoffRatio` 调到 0.78。
+**重要**：两个比例分工不同 —— `wrapupRatio`（默认 0.50）开始收尾，`handoffRatio`（默认 0.70）在收尾之后仍然到点就强制交接；前者必须小于后者，配置校验会拒绝反过来的组合。`compaction-basic` 默认在上下文窗口的 0.8 处压缩，如果它先压缩，压力会被降到很低，本插件就不会触发。请保证 `handoffRatio < compaction.thresholdRatio`（默认 0.70 < 0.80），或者把压缩阈值调到 0.9、把 `handoffRatio` 调到 0.78。
 
 ## 证据与阻塞的规矩
 
@@ -105,5 +105,5 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 - 新会话会重新支付一遍 system prompt 与工具 schema 的成本。
 - 「功能是否真的通过」由 `features.json` 的 `passes` 与 `evidence` 约束，插件不能代替验证；插件只校验证据的形状，不校验它是否真实。
 - 未加载的会话没有实时上下文数值，面板显示「未加载」。
-- 一个 Host 进程内的状态不跨进程共享；链本身由文件持久化，重启后按工作区目录重新发现。
+- 一个 Host 进程内的运行态不跨进程共享：峰值压力、判定冷却、交接中的忙标记。压缩次数、收尾时间、`ready` 和链结构都持久化在链文件里，重启或重载后恢复，不会重复收尾。
 - 委派给 subagent 的调用会被工具拒绝。

@@ -474,7 +474,7 @@ subagent 的路由、目录、命名都服务于「委派」语义，用户无�
     truthDir: .relay            # 相对 cwd
     autoHandoff: true
     wrapupRatio: 0.55           # 进入收尾
-    handoffRatio: 0.70          # 直接收尾并交接
+    handoffRatio: 0.70          # 收尾后仍到点就强制交接
     handoffAfterCompactions: 1  # 压缩过 1 次后，ratio ≥ 0.50 也触发
     hardCompactions: 2          # 立即交接，不等边界
     maxHandoffs: 32             # 单链上限，防跑飞
