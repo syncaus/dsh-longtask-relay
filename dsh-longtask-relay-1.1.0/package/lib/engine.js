@@ -97,6 +97,21 @@ function handoffHash(text) {
   return createHash('sha256').update(String(text ?? '').replace(/\r\n/g, '\n').trim()).digest('hex')
 }
 
+/**
+ * Fingerprint of a small file's content, for change detection.
+ * A file time is not enough: two writes inside one tick of the filesystem
+ * clock carry the same mtime, so a changed file can look untouched.
+ * @param {string} file - absolute path.
+ * @returns {string} sha256 hex digest, or `0` when the file cannot be read.
+ */
+function contentStamp(file) {
+  try {
+    return createHash('sha256').update(readFileSync(file)).digest('hex')
+  } catch {
+    return '0'
+  }
+}
+
 /** Prefix that marks a blocker as owned by a blocked goal, not by the model. */
 const GOAL_BLOCKER_PREFIX = 'goal blocked:'
 
@@ -520,6 +535,11 @@ export class RelayEngine {
     if (typeof workspace !== 'string' || workspace.length === 0) {
       throw new RelayError(RELAY_CODES.invalid, 'the session has no working directory; pass cwd explicitly')
     }
+    // Nothing is written yet: a chain started from an unapproved plan would lock
+    // the objective in before the plan exists.
+    if (this.planActive(agent)) {
+      throw new RelayError(RELAY_CODES.invalid, 'plan mode is active: finish the plan and have it approved first, then call relay_start and write the approved plan into PLAN.md and features.json')
+    }
     const active = this.locate(agent.session)
     if (active !== undefined && active.chain.status !== 'done' && active.chain.status !== 'failed') {
       throw new RelayError(RELAY_CODES.invalid, `this session already belongs to chain ${active.chain.chainId}`)
@@ -532,6 +552,7 @@ export class RelayEngine {
     })
     const skeleton = skeletonTruth(objective)
     store.writeFeatures(chain.chainId, skeleton.features)
+    store.writeText(store.paths(chain.chainId).plan, skeleton.plan)
     store.writeProgress(chain.chainId, skeleton.progress)
     store.writeHandoff(chain.chainId, skeleton.handoff)
     store.writeText(store.paths(chain.chainId).decisions, skeleton.decisions)
@@ -935,6 +956,22 @@ export class RelayEngine {
       actor: agent?.session?.id ?? 'host',
       detail: { evidence, featuresTotal: progress.total },
     })
+    // A finished chain must not keep a goal that sends further rounds. The chain
+    // is already done; a failure here only costs a warning.
+    try {
+      const head = this.headGoal(chain)
+      if (head !== undefined && typeof head.entry?.goalId === 'string' && head.entry.goalId === head.view.id
+        && ['active', 'paused', 'blocked'].includes(head.view.phase)) {
+        head.goals.complete(head.agent, { id: head.view.id, revision: head.view.revision })
+        this.record(store, chain.chainId, {
+          kind: 'goal.completed',
+          actor: 'system',
+          detail: { sessionId: head.agent.id, goalId: head.view.id },
+        })
+      }
+    } catch (error) {
+      this.warn(`could not complete the goal of chain ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
     return { ok: true, chainId: chain.chainId, featuresTotal: progress.total }
   }
 
@@ -1000,6 +1037,42 @@ export class RelayEngine {
       actor: agent?.session?.id ?? 'host',
     })
     if (paused) this.clearChainTimers(chain)
+    try {
+      if (paused && agent === undefined) {
+        // Only the panel pauses the goal: a session pausing its own chain is
+        // deciding about the chain, not about its goal.
+        const head = this.headGoal(chain)
+        if (head !== undefined && head.view.phase === 'active') {
+          head.goals.pause(head.agent, { id: head.view.id, revision: head.view.revision })
+          store.update(chain.chainId, record => { record.goalPausedByRelay = { sessionId: head.agent.id, goalId: head.view.id } })
+          this.record(store, chain.chainId, { kind: 'goal.paused', actor: 'host', detail: { sessionId: head.agent.id, goalId: head.view.id } })
+        }
+      } else if (!paused) {
+        const current = store.readChain(chain.chainId)
+        const marker = current?.goalPausedByRelay
+        if (current?.status === 'active' && marker !== null && marker !== undefined) {
+          const head = this.headGoal(current)
+          // The marker belongs to one pause: it is spent whether or not the goal can resume.
+          store.update(chain.chainId, record => { record.goalPausedByRelay = null })
+          if (head !== undefined && head.agent.id === marker.sessionId && head.view.id === marker.goalId
+            && head.view.phase === 'paused' && head.view.roundsStarted < head.view.maxGoalRounds) {
+            head.goals.resume(head.agent, { id: head.view.id, revision: head.view.revision })
+            this.record(store, chain.chainId, {
+              kind: 'goal.resumed',
+              actor: agent?.session?.id ?? 'host',
+              detail: { sessionId: head.agent.id, goalId: head.view.id },
+            })
+            // A resume arms the goal. A session that was already wrapping up
+            // when the chain paused is still waiting for its handoff.
+            const wrapping = (current.wrapupAt !== null && current.wrapupAt !== undefined)
+              || (current.readyAt !== null && current.readyAt !== undefined)
+            if (wrapping) this.holdGoal(current, store, head.agent, 'wrapup')
+          }
+        }
+      }
+    } catch (error) {
+      this.warn(`could not sync the goal of chain ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
     if (!paused) this.restartSupervision(chain.chainId, store)
     return { chainId: chain.chainId, status: store.readChain(chain.chainId)?.status ?? chain.status }
   }
@@ -1121,32 +1194,31 @@ export class RelayEngine {
 
   /**
    * File signature the panel payload was built from.
-   * Chain records and the host index change on every write, so their mtimes are
-   * enough to detect a stale cache without reading features.json again.
+   * Chain records and the host index change on every write, so their content is
+   * enough to detect a stale cache without reading features.json again. The
+   * records are small; their mtimes cannot be used, see `contentStamp`.
    * @returns {string} signature.
    */
   statusSignature() {
-    const parts = []
-    try {
-      parts.push(String(statSync(this.chainIndex.file).mtimeMs))
-    } catch {
-      parts.push('0')
-    }
+    const parts = [contentStamp(this.chainIndex.file)]
     for (const [truthDir, store] of this.stores) {
       parts.push(truthDir)
       let ids = []
       try {
         ids = store.listChainIds()
-        parts.push(String(statSync(join(truthDir, 'index.json')).mtimeMs))
+        parts.push(contentStamp(join(truthDir, 'index.json')))
       } catch {
         parts.push('0')
       }
       for (const chainId of ids) {
+        let chainFile
         try {
-          parts.push(`${chainId}:${statSync(store.paths(chainId).chain).mtimeMs}`)
+          chainFile = store.paths(chainId).chain
         } catch {
           parts.push(`${chainId}:0`)
+          continue
         }
+        parts.push(`${chainId}:${contentStamp(chainFile)}`)
       }
     }
     return parts.join('|')
@@ -1429,6 +1501,7 @@ export class RelayEngine {
       const child = this.ctx.get('agents')?.get(createdSessionId)
       if (child !== undefined) {
         const inheritedPreset = this.inheritPermission(chain, store, agent, child)
+        this.inheritPlanMode(chain, store, agent, child)
         if (inheritedPreset !== undefined) {
           store.update(chain.chainId, record => {
             const entry = record.sessions.find(session => session.sessionId === createdSessionId)
@@ -1605,11 +1678,11 @@ export class RelayEngine {
    * Long ledgers return their newest part: the tail is what a reader wants from
    * an append-only file.
    * @param {string} chainId - chain identity.
-   * @param {'handoff'|'progress'|'history'|'decisions'|'traps'} name - which document.
+   * @param {'handoff'|'progress'|'history'|'decisions'|'traps'|'plan'} name - which document.
    * @returns {{ name: string, text: string, truncated: boolean }} document text.
    */
   doc(chainId, name) {
-    if (!['handoff', 'progress', 'history', 'decisions', 'traps'].includes(name)) {
+    if (!['handoff', 'progress', 'history', 'decisions', 'traps', 'plan'].includes(name)) {
       throw new RelayError(RELAY_CODES.invalid, `unknown document ${String(name)}`)
     }
     const { store } = this.findChain(chainId)
@@ -1740,6 +1813,7 @@ export class RelayEngine {
       flush()
     }
 
+    collectParagraphs('PLAN.md', paths.plan)
     collectParagraphs('HANDOFF.md', paths.handoff)
     collectParagraphs('history.md', paths.history)
     collectParagraphs('PROGRESS.md', paths.progress)
@@ -1837,6 +1911,7 @@ export class RelayEngine {
     if (refreshed === undefined) return
     chain = refreshed
     if (chain.status !== 'active' && chain.status !== 'initializing') return
+    this.rearmGoal(chain, store, agent, entry)
     if (!this.config.autoHandoff) return
 
     const stats = this.statsFor(agent.id)
@@ -2033,7 +2108,8 @@ export class RelayEngine {
     try {
       const goals = this.ctx.get('goals')
       const view = goals?.get?.(agent)
-      if (view !== undefined && view.phase === 'active') return
+      // A disarmed goal does not drive the session, so only an armed one wins.
+      if (view !== undefined && view.phase === 'active' && view.activation === 'armed') return
     } catch {
       /* the goal service is optional */
     }
@@ -2183,6 +2259,7 @@ export class RelayEngine {
       this.warn(`could not queue the wrap-up prompt for ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
       return
     }
+    this.holdGoal(chain, store, agent, 'wrapup')
     this.statsFor(agent.id).wrapupSentAt = Date.now()
     try {
       store.update(chain.chainId, record => { record.wrapupAt = new Date().toISOString() })
@@ -2242,6 +2319,9 @@ export class RelayEngine {
       })
       throw new RelayError(RELAY_CODES.limit, `chain ${chain.chainId} reached its handoff limit`)
     }
+    // Before the first await: a goal round must not start on the retiring session
+    // while the successor is being created.
+    this.holdGoal(chain, store, oldAgent, 'handoff')
 
     this.busyChains.add(chain.chainId)
     this.record(store, chain.chainId, {
@@ -2278,6 +2358,7 @@ export class RelayEngine {
       // The preset first: it sets the sandbox mode, then the worker policy
       // may still tighten the approval side for an unattended session.
       const inheritedPreset = this.inheritPermission(chain, store, oldAgent, newAgent)
+      this.inheritPlanMode(chain, store, oldAgent, newAgent)
       if (newAgent !== undefined) this.applyWorkerPolicy(newAgent)
 
       store.update(chain.chainId, record => {
@@ -2307,7 +2388,7 @@ export class RelayEngine {
 
       // Only after the handoff brief is queued: a failed prompt must retry
       // cleanly, and a pre-created goal would then be an orphan on that session.
-      this.seedGoal(chain, store, newAgent)
+      const goalId = this.continueGoal(chain, store, oldAgent, newAgent)
 
       const retiredAt = new Date().toISOString()
       store.update(chain.chainId, record => {
@@ -2335,6 +2416,7 @@ export class RelayEngine {
             // the previous session's parent rather than becoming a child of it.
             parentSessionId: previous?.parentSessionId ?? null,
             ...(inheritedPreset === undefined ? {} : { permissionPreset: inheritedPreset }),
+            ...(goalId === undefined ? {} : { goalId }),
             // The brief this session received: rewriting it is what makes its own brief fresh.
             handoffHashAtJoin: handoffHash(previousHandoff),
           })
@@ -2427,20 +2509,197 @@ export class RelayEngine {
   }
 
   /**
+   * Read a session's goal without ever throwing.
+   * @param {object|undefined} agent - live agent.
+   * @returns {object|undefined} the goal view, or undefined when there is none or the service is unavailable.
+   */
+  goalOf(agent) {
+    if (agent === undefined) return undefined
+    try {
+      return this.ctx.get('goals')?.get?.(agent) ?? undefined
+    } catch (error) {
+      this.warn(`could not read the goal of ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return undefined
+    }
+  }
+
+  /**
+   * The chain's current live session together with its goal.
+   * @param {object} chain - chain record.
+   * @returns {{ goals: object, agent: object, entry: object|undefined, view: object }|undefined} the goal of the
+   *   current session; undefined when the session is not loaded or has no goal.
+   */
+  headGoal(chain) {
+    if (typeof chain.currentSessionId !== 'string') return undefined
+    const goals = this.ctx.get('goals')
+    const agent = this.ctx.get('agents')?.get(chain.currentSessionId)
+    if (goals === undefined || agent === undefined) return undefined
+    const view = this.goalOf(agent)
+    if (view === undefined) return undefined
+    return { goals, agent, entry: chain.sessions.find(session => session.sessionId === agent.id), view }
+  }
+
+  /**
+   * Stop the goal driver from sending further rounds to a session that is wrapping up or retiring.
+   * Without this the host driver sends another goal round as soon as the wrapped-up session is
+   * idle, so the session keeps working past its own handoff brief, and a retiring session can run
+   * one more round while its successor has already started. Only the automatic continuation is
+   * removed: the goal keeps its phase and revision.
+   * @param {object} chain - chain record, for the audit.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object} agent - the session being held.
+   * @param {'wrapup'|'handoff'} why - which step holds it.
+   * @returns {void}
+   */
+  holdGoal(chain, store, agent, why) {
+    const view = this.goalOf(agent)
+    if (view === undefined || view.phase !== 'active' || view.activation !== 'armed') return
+    const goals = this.ctx.get('goals')
+    if (typeof goals?.disarm !== 'function') return
+    try {
+      goals.disarm(agent)
+    } catch (error) {
+      this.warn(`could not hold the goal of ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    this.record(store, chain.chainId, {
+      kind: 'goal.held',
+      actor: 'system',
+      detail: { sessionId: agent.id, goalId: view.id, why },
+    })
+  }
+
+  /**
+   * Decide the successor's goal: inherit the retiring session's goal, else seed one.
+   * An inherited goal carries the remaining rounds, so the round cap is a budget for the whole
+   * chain. A retiring goal with no rounds left is not replaced by a seeded one: that would
+   * hand out a fresh budget the goal's owner already spent.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object} oldAgent - the retiring session.
+   * @param {object|undefined} newAgent - the created successor session.
+   * @returns {string|undefined} id of the goal the successor now has, when any.
+   */
+  continueGoal(chain, store, oldAgent, newAgent) {
+    if (newAgent === undefined) return undefined
+    const previous = this.goalOf(oldAgent)
+    if (this.config.inheritGoal && previous !== undefined && previous.phase === 'active') {
+      const remaining = previous.maxGoalRounds - previous.roundsStarted
+      if (remaining < 1) {
+        this.record(store, chain.chainId, {
+          kind: 'goal.inherit-skipped',
+          actor: 'system',
+          detail: { from: previous.id, reason: 'no rounds left' },
+        })
+        return undefined
+      }
+      const goals = this.ctx.get('goals')
+      try {
+        const view = goals.create(newAgent, { objective: previous.objective, maxGoalRounds: remaining })
+        this.record(store, chain.chainId, {
+          kind: 'goal.inherited',
+          actor: 'system',
+          detail: { goalId: view?.id ?? null, from: previous.id, rounds: remaining },
+        })
+        return view?.id ?? undefined
+      } catch (error) {
+        this.warn(`could not carry the goal to ${newAgent.id}: ${error instanceof Error ? error.message : String(error)}`)
+        return undefined
+      }
+    }
+    if (this.config.seedGoalOnHandoff) return this.seedGoal(chain, store, newAgent)
+    return undefined
+  }
+
+  /**
+   * Re-arm a goal this plugin created after a Host restart or plugin reload.
+   * The host disarms goals at a session-start boundary. A goal the user created is left
+   * alone for that reason; only the goal recorded as this plugin's (`entry.goalId`) is resumed,
+   * and never while a wrap-up or handoff is under way.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object} agent - the chain's current live session.
+   * @param {object} entry - that session's chain entry.
+   * @returns {void}
+   */
+  rearmGoal(chain, store, agent, entry) {
+    if (!this.config.rearmGoalOnReload || typeof entry?.goalId !== 'string') return
+    // A handoff holds the goal before its first await; a timer-driven evaluation
+    // that lands inside that handoff must not hand the rounds back.
+    if (this.busyChains.has(chain.chainId)) return
+    if (chain.pendingHandoff !== null && chain.pendingHandoff !== undefined) return
+    if (chain.wrapupAt !== null && chain.wrapupAt !== undefined) return
+    if (chain.readyAt !== null && chain.readyAt !== undefined) return
+    const view = this.goalOf(agent)
+    if (view === undefined || view.id !== entry.goalId || view.phase !== 'active' || view.activation !== 'disarmed') return
+    if (view.roundsStarted >= view.maxGoalRounds) return
+    const goals = this.ctx.get('goals')
+    if (typeof goals?.resume !== 'function') return
+    try {
+      goals.resume(agent, { id: view.id, revision: view.revision })
+    } catch (error) {
+      this.warn(`could not re-arm the goal of ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    this.record(store, chain.chainId, { kind: 'goal.rearmed', actor: 'system', detail: { sessionId: agent.id, goalId: view.id } })
+  }
+
+  /**
+   * Whether a session is in plan mode; a selected state that is not logged yet counts.
+   * @param {object|undefined} agent - live agent.
+   * @returns {boolean} true when plan mode is on or about to be.
+   */
+  planActive(agent) {
+    if (agent === undefined) return false
+    const planMode = this.ctx.get('planMode')
+    if (typeof planMode?.get !== 'function') return false
+    try {
+      const state = planMode.get(agent)
+      return (state?.pending ?? state?.active) === true
+    } catch (error) {
+      this.warn(`could not read the plan mode of ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+  }
+
+  /**
+   * Start a created session in plan mode when the session it continues is in plan mode.
+   * Without it the new session silently leaves plan mode and starts editing.
+   * @param {object} chain - chain record, for the audit.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object|undefined} source - the live session being continued.
+   * @param {object|undefined} created - the created live session.
+   * @returns {void}
+   */
+  inheritPlanMode(chain, store, source, created) {
+    if (!this.config.inheritPlanMode || source === undefined || created === undefined) return
+    if (!this.planActive(source)) return
+    const planMode = this.ctx.get('planMode')
+    if (typeof planMode?.set !== 'function') return
+    try {
+      planMode.set(created, true)
+    } catch (error) {
+      this.warn(`could not carry plan mode to ${created.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    this.record(store, chain.chainId, { kind: 'plan.inherited', actor: 'system', detail: { sessionId: created.id, from: source.id } })
+  }
+
+  /**
    * Give the handoff successor a goal so the goal-round driver keeps it moving.
    * The goal is per-session, so the objective carries the progress the successor
    * would otherwise have to rediscover.
    * @param {object} chain - chain record.
    * @param {import('./chain-store.js').ChainStore} store - its store.
    * @param {object|undefined} agent - the created successor session.
-   * @returns {void}
+   * @returns {string|undefined} id of the created goal, when any.
    */
   seedGoal(chain, store, agent) {
-    if (!this.config.seedGoalOnHandoff || agent === undefined) return
+    if (!this.config.seedGoalOnHandoff || agent === undefined) return undefined
     const goals = this.ctx.get('goals')
     if (goals === undefined || typeof goals.create !== 'function') {
       this.warn('seedGoalOnHandoff is on but the goals service is unavailable; the successor has no goal')
-      return
+      return undefined
     }
     const document = store.readFeatures(chain.chainId)
     const progress = document === undefined ? { total: 0, done: 0 } : featureProgress(document)
@@ -2450,13 +2709,14 @@ export class RelayEngine {
       view = goals.create(agent, { objective, maxGoalRounds: this.config.goalRoundsPerHandoff })
     } catch (error) {
       this.warn(`could not seed a goal on ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
-      return
+      return undefined
     }
     this.record(store, chain.chainId, {
       kind: 'goal.seeded',
       actor: 'system',
       detail: { goalId: view?.id ?? null, rounds: view?.maxGoalRounds ?? this.config.goalRoundsPerHandoff },
     })
+    return view?.id ?? undefined
   }
 
   /**
@@ -2515,7 +2775,9 @@ export class RelayEngine {
     try {
       const goals = this.ctx.get('goals')
       const view = goals?.get?.(oldAgent)
-      if (view !== undefined && view.activation === 'armed') {
+      // The handoff disarmed this goal before it started, so the phase decides:
+      // a retired session must not keep a goal that a later resume would run.
+      if (view !== undefined && view.phase === 'active') {
         goals.pause(oldAgent, { id: view.id, revision: view.revision })
       }
     } catch (error) {

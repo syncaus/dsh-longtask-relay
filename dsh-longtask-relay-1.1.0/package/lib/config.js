@@ -71,6 +71,23 @@ export const DEFAULT_CONFIG = Object.freeze({
   /** Goal-round cap given to a seeded goal. */
   goalRoundsPerHandoff: 16,
   /**
+   * Whether a handoff successor gets a goal with the retiring session's objective and its
+   * remaining rounds. The round cap then works as a budget for the whole chain instead of
+   * restarting at every handoff.
+   */
+  inheritGoal: true,
+  /**
+   * Whether a session this plugin creates starts in plan mode when the session it continues
+   * is in plan mode. Without it the new session silently leaves plan mode.
+   */
+  inheritPlanMode: true,
+  /**
+   * Whether, after a Host restart or plugin reload, a goal this plugin created on the chain's
+   * current session is re-armed. The Host disarms every goal when it reloads, so without this
+   * the chain stops being driven until a human resumes the goal.
+   */
+  rearmGoalOnReload: true,
+  /**
    * Whether a blocker of kind `external` pauses the chain.
    * An external blocker means only a human can unblock it, so spending fresh sessions on
    * handoffs makes the chain churn through its handoff budget without making progress.
@@ -143,7 +160,8 @@ function issueFor(name, value) {
   if (name === 'autoHandoff' || name === 'pauseGoalOnRetire' || name === 'pauseOnExternalBlocker'
     || name === 'notifyOldSession' || name === 'requireStrongEvidence' || name === 'requireHumanAcceptedCoverage'
     || name === 'seedGoalOnHandoff' || name === 'autoContinue' || name === 'commitTruth'
-    || name === 'inheritPermission') {
+    || name === 'inheritPermission' || name === 'inheritGoal' || name === 'inheritPlanMode'
+    || name === 'rearmGoalOnReload') {
     if (typeof value !== 'boolean') return `${name} must be a boolean`
     return undefined
   }

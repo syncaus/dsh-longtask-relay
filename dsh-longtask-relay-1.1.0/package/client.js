@@ -175,6 +175,7 @@ window.__ModuleLoader__.load({
       unloadedNote: '未加载，没有实时数值',
       current: '当前',
       docs: '真理源',
+      docPlan: '计划',
       docProgress: '进度',
       docHistory: '交接历史',
       docDecisions: '决策',
@@ -251,6 +252,14 @@ window.__ModuleLoader__.load({
       audit_session_ready: '会话收尾完成',
       audit_session_permission: '继承权限预设',
       audit_goal_seeded: '建立目标',
+      audit_goal_held: '暂缓目标续行',
+      audit_goal_inherited: '继承目标',
+      audit_goal_inherit_skipped: '未继承目标',
+      audit_goal_rearmed: '恢复目标续行',
+      audit_goal_completed: '目标完成',
+      audit_goal_paused: '暂停目标',
+      audit_goal_resumed: '恢复目标',
+      audit_plan_inherited: '继承计划模式',
       audit_supervisor_decision: '监督判定',
       audit_handoff_started: '交接开始',
       audit_handoff_completed: '交接完成',
@@ -414,6 +423,7 @@ window.__ModuleLoader__.load({
       unloadedNote: 'Not loaded; no live reading',
       current: 'current',
       docs: 'Truth source',
+      docPlan: 'Plan',
       docProgress: 'Progress',
       docHistory: 'Handoff history',
       docDecisions: 'Decisions',
@@ -490,6 +500,14 @@ window.__ModuleLoader__.load({
       audit_session_ready: 'Session wrapped up',
       audit_session_permission: 'Permission preset carried over',
       audit_goal_seeded: 'Goal seeded',
+      audit_goal_held: 'Goal rounds held',
+      audit_goal_inherited: 'Goal inherited',
+      audit_goal_inherit_skipped: 'Goal not inherited',
+      audit_goal_rearmed: 'Goal re-armed',
+      audit_goal_completed: 'Goal completed',
+      audit_goal_paused: 'Goal paused',
+      audit_goal_resumed: 'Goal resumed',
+      audit_plan_inherited: 'Plan mode carried over',
       audit_supervisor_decision: 'Supervisor decision',
       audit_handoff_started: 'Handoff started',
       audit_handoff_completed: 'Handoff completed',
@@ -520,6 +538,7 @@ window.__ModuleLoader__.load({
      */
     const DOCS = [
       { id: 'handoff', label: 'handoff', inline: true },
+      { id: 'plan', label: 'docPlan', inline: false },
       { id: 'progress', label: 'docProgress', inline: false },
       { id: 'history', label: 'docHistory', inline: false },
       { id: 'decisions', label: 'docDecisions', inline: false },
@@ -551,6 +570,9 @@ window.__ModuleLoader__.load({
           { key: 'pauseGoalOnRetire', label: '退役时暂停旧目标', kind: 'boolean', hint: '交接后暂停旧会话的 goal' },
           { key: 'seedGoalOnHandoff', label: '给新会话建目标', kind: 'boolean', hint: '交接后给新会话建一个 goal，让它按目标轮次自动继续；需要目标功能可用' },
           { key: 'goalRoundsPerHandoff', label: '新目标的轮次上限', kind: 'int', min: 1, hint: '给新会话 goal 分配的续轮上限' },
+          { key: 'inheritGoal', label: '新会话继承目标', kind: 'boolean', hint: '交接时新会话沿用旧会话的 goal 目标，轮次只给剩余部分，轮次上限成为整条链的预算；关掉后新会话不继承（仍可由「给新会话建目标」新建）' },
+          { key: 'rearmGoalOnReload', label: '重启后恢复目标续行', kind: 'boolean', hint: 'DSH 重启或插件重载后，恢复本插件建的 goal 的自动续行；关掉后需要人在输入框里手动恢复（用户自己建的 goal 不受影响）' },
+          { key: 'inheritPlanMode', label: '新会话继承计划模式', kind: 'boolean', hint: '旧会话处于计划模式时，接力会话和子会话也以计划模式启动；关掉后新会话退出计划模式' },
           { key: 'notifyOldSession', label: '给旧会话留言', kind: 'boolean', hint: '交接后给旧会话留一条退役说明' },
         ],
       },
@@ -1648,6 +1670,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             case 'delegation.failed': return detail.error ?? ''
             case 'blocker.set': return joined([label('blocker', detail.kind), detail.action])
             case 'goal.seeded': return `${detail.rounds ?? '?'} ${t('rounds')}`
+            case 'goal.inherited': return `${detail.rounds ?? '?'} ${t('rounds')}`
+            case 'goal.held':
+            case 'plan.inherited': return shortId(detail.sessionId)
             case 'session.permission': return `${shortId(detail.sessionId)}: ${detail.preset ?? ''}`
             case 'supervisor.decision': return joined([
               label('act', detail.action),

@@ -13,6 +13,7 @@
 ```
 <workspace>/.relay/<chainId>/
 ├── features.json   任务清单，JSON（根部含 statusCheck / verifyFast / verifyFull）
+├── PLAN.md         链遵循的计划；计划模式批准过的计划原样写入，改动须同时在 decisions.md 记原因
 ├── PROGRESS.md     Done / In progress / Next / Errors / Notes
 ├── HANDOFF.md      给下一个会话的短交接（≤ 60 行，开头是 relay:state 状态块）
 ├── history.md      交接历史：插件每次交接自动追加上一份 HANDOFF 全文
@@ -68,6 +69,8 @@
 4. 插件创建新会话：同一工作目录、同一 preset，命名成「任务 · 接力 N」，加入同一工作区。
 5. 投递交接说明：目标、链 id、交接序号、真理源绝对路径、当前进度、下一件事、热身步骤（读三份文件、跑验证）、以及「一次只做一个功能」的规则。开启 `seedGoalOnHandoff` 时，还会按链目标和当前进度给新会话建一个 goal，交给目标轮驱动继续。
 6. 旧会话收到退役说明，其 goal 被暂停，不再参与判定。插件同时把旧会话写的 `HANDOFF.md` 全文追加到 `history.md`（带会话 id、交接原因、时间），所以更早的交接不会因为 `HANDOFF.md` 被覆盖而丢失；新会话用 `relay_recall` 按关键词检索这些历史，而不是全量读。
+
+与目标模式、计划模式的关系：收尾指令发出后和交接开始时，插件取消旧会话 goal 的自动续行，防止旧会话在收尾后继续被目标轮驱动。新会话继承旧会话的 goal，轮次只给剩余部分（`inheritGoal`），没有剩余轮次就不继承；本插件建的 goal 在重启后恢复续行（`rearmGoalOnReload`），`relay_finish` 时标为完成，面板暂停 / 恢复链时同步暂停 / 恢复它。旧会话处于计划模式时新会话也以计划模式启动（`inheritPlanMode`），而计划模式下不能 `relay_start`，批准后的计划写进 `PLAN.md`。
 
 链头会话的 goal 如果进入 `blocked`（例如轮次耗尽），插件把它记成 external 阻塞并暂停链；在目标条里恢复或清除 goal 后，这条阻塞会自动解除。`pauseOnExternalBlocker=false` 时只记录阻塞、继续交接，让新会话拿到新的轮次预算。
 

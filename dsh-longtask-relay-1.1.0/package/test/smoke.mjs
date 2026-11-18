@@ -3,7 +3,7 @@
  * Run with: node test/smoke.mjs
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChainIndex, ChainStore, RELAY_CODES, RelayError } from '../lib/chain-store.js'
@@ -88,7 +88,7 @@ check('truth keys are absolute paths under the chain directory', () => {
   assert.match(prompt, /<relay_handoff>/)
   assert.ok(prompt.includes(store.paths(chainId).features))
   assert.ok(prompt.includes('Previous session: session-old'))
-  assert.ok(prompt.length < 2400, `handoff prompt is ${prompt.length} chars`)
+  assert.ok(prompt.length < 2600, `handoff prompt is ${prompt.length} chars`)
 })
 
 check('wrapup prompt names the progress and forbids new features', () => {
@@ -1753,6 +1753,22 @@ check('status reuses its payload until a chain file changes', () => {
   assert.equal(third[0].lastError, 'changed')
 })
 
+check('status notices a chain file rewritten within the same file-time tick', () => {
+  const world = fakeWorld()
+  const chainFile = world.local.paths(world.chain.chainId).chain
+  // What a coarse filesystem clock does to two quick writes: the same mtime.
+  const tick = new Date('2026-01-01T00:00:00.000Z')
+  utimesSync(chainFile, tick, tick)
+  const before = statSync(chainFile).mtimeMs
+  const first = world.engine.status()
+  world.local.update(world.chain.chainId, record => { record.lastError = 'changed' })
+  utimesSync(chainFile, tick, tick)
+  assert.equal(statSync(chainFile).mtimeMs, before, 'the fixture did not reproduce an unchanged file time')
+  const second = world.engine.status()
+  assert.notEqual(first, second, 'status served a stale payload for a changed chain file')
+  assert.equal(second[0].lastError, 'changed')
+})
+
 check('starting a chain clears the negative locate cache', () => {
   const world = fakeWorld()
   const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-later-'))
@@ -1826,6 +1842,327 @@ check('package metadata exposes the test script and version', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   assert.equal(pkg.version, '1.2.0')
   assert.match(pkg.scripts.test, /node test\/smoke\.mjs/)
+})
+
+// --- goal and plan mode carried across sessions ---
+
+/** One goal view as the Host's goal service reports it. */
+function goalView(overrides = {}) {
+  return {
+    id: 'goal-old',
+    revision: 1,
+    objective: 'old objective',
+    phase: 'active',
+    activation: 'armed',
+    maxGoalRounds: 10,
+    roundsStarted: 3,
+    ...overrides,
+  }
+}
+
+/** Mount a per-session stand-in for the Host's goal service on a fake world. */
+function withGoals(world, initial = {}) {
+  const views = new Map(Object.entries(initial))
+  const log = []
+  const original = world.engine.ctx.get
+  const service = {
+    get: agent => views.get(agent.id),
+    create(agent, request) {
+      const view = goalView({ id: `goal-for-${agent.id}`, objective: request.objective, maxGoalRounds: request.maxGoalRounds, roundsStarted: 0 })
+      views.set(agent.id, view)
+      log.push({ op: 'create', agentId: agent.id, objective: request.objective, maxGoalRounds: request.maxGoalRounds })
+      return view
+    },
+    disarm(agent) { views.get(agent.id).activation = 'disarmed'; log.push({ op: 'disarm', agentId: agent.id }) },
+    pause(agent, ref) { Object.assign(views.get(agent.id), { phase: 'paused' }); log.push({ op: 'pause', agentId: agent.id, ...ref }) },
+    resume(agent, ref) { Object.assign(views.get(agent.id), { phase: 'active', activation: 'armed' }); log.push({ op: 'resume', agentId: agent.id, ...ref }) },
+    complete(agent, ref) { Object.assign(views.get(agent.id), { phase: 'complete' }); log.push({ op: 'complete', agentId: agent.id, ...ref }) },
+  }
+  world.engine.ctx.get = name => (name === 'goals' ? service : original(name))
+  return { views, log, ops: op => log.filter(entry => entry.op === op) }
+}
+
+/** Mount a stand-in for the Host's plan mode service on a fake world. */
+function withPlanMode(world, initial = {}) {
+  const states = new Map(Object.entries(initial))
+  const sets = []
+  const original = world.engine.ctx.get
+  world.engine.ctx.get = name => (name === 'planMode'
+    ? {
+      get: agent => states.get(agent.id) ?? { active: false },
+      set: (agent, active) => { states.set(agent.id, { active }); sets.push({ sessionId: agent.id, active }); return 'committed' },
+    }
+    : original(name))
+  return { states, sets }
+}
+
+/** Audit records of one kind. */
+function auditOf(world, kind) {
+  return world.engine.audit(world.chain.chainId, 200).filter(entry => entry.kind === kind)
+}
+
+/** Record a goal id on the chain's current session, as a handoff does for a goal it created. */
+function markGoal(world, goalId) {
+  world.local.update(world.chain.chainId, record => {
+    record.sessions.find(session => session.sessionId === 'session-old').goalId = goalId
+  })
+}
+
+await checkAsync('a wrap-up holds an armed active goal and leaves any other goal alone', async () => {
+  const armed = fakeWorld()
+  const held = withGoals(armed, { 'session-old': goalView() })
+  armed.setRatio(0.7)
+  await armed.engine.evaluate(armed.oldAgent)
+  assert.deepEqual(held.ops('disarm'), [{ op: 'disarm', agentId: 'session-old' }])
+  assert.equal(held.views.get('session-old').phase, 'active', 'only the continuation is removed')
+  assert.deepEqual(auditOf(armed, 'goal.held')[0].detail, { sessionId: 'session-old', goalId: 'goal-old', why: 'wrapup' })
+
+  const idle = fakeWorld()
+  const untouched = withGoals(idle, { 'session-old': goalView({ activation: 'disarmed' }) })
+  idle.setRatio(0.7)
+  await idle.engine.evaluate(idle.oldAgent)
+  assert.equal(idle.calls.filter(call => /<relay_wrapup>/.test(call.text ?? '')).length, 1)
+  assert.equal(untouched.ops('disarm').length, 0)
+  const paused = fakeWorld()
+  const pausedGoals = withGoals(paused, { 'session-old': goalView({ phase: 'paused' }) })
+  paused.setRatio(0.7)
+  await paused.engine.evaluate(paused.oldAgent)
+  assert.equal(pausedGoals.ops('disarm').length, 0)
+  assert.equal(auditOf(paused, 'goal.held').length, 0)
+})
+
+await checkAsync('a handoff carries the goal with its remaining rounds to the successor', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  await handOffOnce(world)
+  assert.deepEqual(goals.ops('create'), [{ op: 'create', agentId: 'session-new', objective: 'old objective', maxGoalRounds: 7 }])
+  const entry = world.local.readChain(world.chain.chainId).sessions.find(session => session.sessionId === 'session-new')
+  assert.equal(entry.goalId, 'goal-for-session-new')
+  assert.deepEqual(auditOf(world, 'goal.inherited')[0].detail, { goalId: 'goal-for-session-new', from: 'goal-old', rounds: 7 })
+  assert.equal(goals.views.get('session-old').activation, 'disarmed', 'the retiring goal must not run another round')
+})
+
+await checkAsync('a goal with no rounds left is not inherited and is not replaced by a seeded one', async () => {
+  const world = fakeWorld({ seedGoalOnHandoff: true })
+  const goals = withGoals(world, { 'session-old': goalView({ roundsStarted: 10 }) })
+  await handOffOnce(world)
+  assert.equal(goals.ops('create').length, 0)
+  assert.deepEqual(auditOf(world, 'goal.inherit-skipped')[0].detail, { from: 'goal-old', reason: 'no rounds left' })
+  const entry = world.local.readChain(world.chain.chainId).sessions.find(session => session.sessionId === 'session-new')
+  assert.equal(entry.goalId, undefined)
+})
+
+await checkAsync('inheritGoal=false inherits nothing and keeps the seeding behaviour', async () => {
+  const off = fakeWorld({ inheritGoal: false })
+  const offGoals = withGoals(off, { 'session-old': goalView() })
+  await handOffOnce(off)
+  assert.equal(offGoals.ops('create').length, 0)
+  assert.equal(auditOf(off, 'goal.inherited').length, 0)
+
+  const seeded = fakeWorld({ inheritGoal: false, seedGoalOnHandoff: true })
+  const seededGoals = withGoals(seeded, { 'session-old': goalView() })
+  await handOffOnce(seeded)
+  const created = seededGoals.ops('create')
+  assert.equal(created.length, 1)
+  assert.match(created[0].objective, /engine objective — relay chain/)
+  assert.equal(created[0].maxGoalRounds, 16)
+  assert.equal(auditOf(seeded, 'goal.seeded').length, 1)
+  const entry = seeded.local.readChain(seeded.chain.chainId).sessions.find(session => session.sessionId === 'session-new')
+  assert.equal(entry.goalId, 'goal-for-session-new')
+})
+
+check('auto-continue stands aside only for an armed goal', () => {
+  const run = activation => {
+    const world = fakeWorld({ autoContinue: true })
+    withGoals(world, { 'session-old': goalView({ activation }) })
+    const chain = world.local.readChain(world.chain.chainId)
+    world.engine.maybeAutoContinue(chain, world.local, world.oldAgent, world.engine.statsFor('session-old'))
+    return world.calls.filter(call => /<relay_continue>/.test(call.text ?? '')).length
+  }
+  assert.equal(run('disarmed'), 1, 'a disarmed goal does not drive the session')
+  assert.equal(run('armed'), 0, 'an armed goal is already driving the session')
+})
+
+await checkAsync('a plugin-created goal is re-armed after a reload and nothing else is', async () => {
+  const setup = (view, entryGoalId, chainPatch) => {
+    const world = fakeWorld()
+    const goals = withGoals(world, { 'session-old': view })
+    if (entryGoalId !== undefined) markGoal(world, entryGoalId)
+    if (chainPatch !== undefined) world.local.update(world.chain.chainId, chainPatch)
+    const chain = world.local.readChain(world.chain.chainId)
+    world.engine.rearmGoal(chain, world.local, world.oldAgent, chain.sessions[0])
+    return { world, goals }
+  }
+  const rearmed = setup(goalView({ activation: 'disarmed' }), 'goal-old')
+  assert.deepEqual(rearmed.goals.ops('resume'), [{ op: 'resume', agentId: 'session-old', id: 'goal-old', revision: 1 }])
+  assert.deepEqual(auditOf(rearmed.world, 'goal.rearmed')[0].detail, { sessionId: 'session-old', goalId: 'goal-old' })
+  assert.equal(setup(goalView({ activation: 'disarmed' }), 'goal-someone-else').goals.ops('resume').length, 0, 'a user goal is left alone')
+  assert.equal(setup(goalView({ activation: 'disarmed' }), undefined).goals.ops('resume').length, 0, 'no recorded goal id')
+  assert.equal(
+    setup(goalView({ activation: 'disarmed' }), 'goal-old', record => { record.wrapupAt = new Date().toISOString() }).goals.ops('resume').length,
+    0,
+    'no re-arm during a wrap-up',
+  )
+  assert.equal(setup(goalView({ activation: 'disarmed', roundsStarted: 10 }), 'goal-old').goals.ops('resume').length, 0, 'no rounds left')
+  assert.equal(setup(goalView({ activation: 'armed' }), 'goal-old').goals.ops('resume').length, 0, 'already armed')
+})
+
+await checkAsync('evaluating the chain head re-arms its plugin-created goal', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView({ activation: 'disarmed' }) })
+  markGoal(world, 'goal-old')
+  world.setRatio(0.3)
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(goals.ops('resume').length, 1)
+})
+
+await checkAsync('finish completes the goal the plugin created', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  markGoal(world, 'goal-old')
+  world.local.patchFeatures(world.chain.chainId, [{ id: 'F001', passes: true, evidence: 'npm test -> exit 0, 3/3 passed' }])
+  const result = world.engine.finish({ agent: world.oldAgent, evidence: 'done' })
+  assert.equal(result.ok, true)
+  assert.deepEqual(goals.ops('complete'), [{ op: 'complete', agentId: 'session-old', id: 'goal-old', revision: 1 }])
+  assert.deepEqual(auditOf(world, 'goal.completed')[0].detail, { sessionId: 'session-old', goalId: 'goal-old' })
+
+  const foreign = fakeWorld()
+  const foreignGoals = withGoals(foreign, { 'session-old': goalView() })
+  foreign.local.patchFeatures(foreign.chain.chainId, [{ id: 'F001', passes: true, evidence: 'npm test -> exit 0, 3/3 passed' }])
+  assert.equal(foreign.engine.finish({ agent: foreign.oldAgent, evidence: 'done' }).ok, true)
+  assert.equal(foreignGoals.ops('complete').length, 0, 'a goal the user created is not completed')
+})
+
+await checkAsync('a Host pause pauses the goal and a resume restores it', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  const chainId = world.chain.chainId
+  world.engine.setPaused({ chainId, paused: true })
+  assert.equal(goals.ops('pause').length, 1)
+  assert.deepEqual(world.local.readChain(chainId).goalPausedByRelay, { sessionId: 'session-old', goalId: 'goal-old' })
+  assert.equal(auditOf(world, 'goal.paused').length, 1)
+  world.engine.setPaused({ chainId, paused: false })
+  assert.equal(goals.ops('resume').length, 1)
+  assert.equal(goals.views.get('session-old').phase, 'active')
+  assert.equal(world.local.readChain(chainId).goalPausedByRelay, null)
+  assert.equal(auditOf(world, 'goal.resumed').length, 1)
+  world.engine.dispose()
+})
+
+await checkAsync('a pause the session asks for leaves its goal alone, and a resume does not touch a goal the user paused', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  const chainId = world.chain.chainId
+  world.engine.setPaused({ agent: world.oldAgent, chainId, paused: true })
+  assert.equal(goals.ops('pause').length, 0)
+  assert.equal(world.local.readChain(chainId).goalPausedByRelay ?? null, null)
+  goals.views.get('session-old').phase = 'paused'
+  world.engine.setPaused({ agent: world.oldAgent, chainId, paused: false })
+  assert.equal(goals.ops('resume').length, 0, 'the plugin did not pause this goal')
+  world.engine.dispose()
+})
+
+await checkAsync('the retired session ends with a paused goal even though the handoff disarmed it first', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  await handOffOnce(world)
+  assert.equal(goals.ops('pause').filter(entry => entry.agentId === 'session-old').length, 1, 'the retired goal stayed active')
+  assert.equal(goals.views.get('session-old').phase, 'paused')
+})
+
+await checkAsync('resuming a chain that was wrapping up does not hand the goal rounds back', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  const chainId = world.chain.chainId
+  world.local.update(chainId, record => { record.wrapupAt = new Date().toISOString() })
+  world.engine.setPaused({ chainId, paused: true })
+  world.engine.setPaused({ chainId, paused: false })
+  assert.equal(goals.ops('resume').length, 1)
+  assert.equal(goals.views.get('session-old').phase, 'active')
+  assert.equal(goals.views.get('session-old').activation, 'disarmed', 'a session waiting for its handoff got its goal rounds back')
+  world.engine.dispose()
+})
+
+await checkAsync('a goal is not re-armed while a handoff of its chain is in flight', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView({ activation: 'disarmed' }) })
+  markGoal(world, 'goal-old')
+  const chain = world.local.readChain(world.chain.chainId)
+  world.engine.busyChains.add(chain.chainId)
+  world.engine.rearmGoal(chain, world.local, world.oldAgent, chain.sessions[0])
+  assert.equal(goals.ops('resume').length, 0, 'the goal was re-armed in the middle of a handoff')
+  world.engine.busyChains.delete(chain.chainId)
+  world.engine.rearmGoal(chain, world.local, world.oldAgent, chain.sessions[0])
+  assert.equal(goals.ops('resume').length, 1)
+})
+
+await checkAsync('plan mode is carried to the successor on handoff', async () => {
+  const world = fakeWorld()
+  const plan = withPlanMode(world, { 'session-old': { active: false, pending: true } })
+  await handOffOnce(world)
+  assert.deepEqual(plan.sets, [{ sessionId: 'session-new', active: true }])
+  assert.deepEqual(auditOf(world, 'plan.inherited')[0].detail, { sessionId: 'session-new', from: 'session-old' })
+
+  const outside = fakeWorld()
+  const outsidePlan = withPlanMode(outside, { 'session-old': { active: false } })
+  await handOffOnce(outside)
+  assert.equal(outsidePlan.sets.length, 0, 'the source is not in plan mode')
+
+  const off = fakeWorld({ inheritPlanMode: false })
+  const offPlan = withPlanMode(off, { 'session-old': { active: true } })
+  await handOffOnce(off)
+  assert.equal(offPlan.sets.length, 0, 'inheritPlanMode is off')
+})
+
+await checkAsync('plan mode is carried to a spawned child', async () => {
+  const world = spawnWorld()
+  const plan = withPlanMode(world, { 'session-parent': { active: true } })
+  await world.engine.spawn({ agent: world.parent, features: ['F002'] })
+  assert.deepEqual(plan.sets, [{ sessionId: 'session-child', active: true }])
+
+  const quiet = spawnWorld()
+  const quietPlan = withPlanMode(quiet, { 'session-parent': { active: false } })
+  await quiet.engine.spawn({ agent: quiet.parent, features: ['F002'] })
+  assert.equal(quietPlan.sets.length, 0)
+})
+
+/** A session in a fresh workspace that belongs to no chain yet. */
+function outsiderIn(world, id) {
+  const dir = mkdtempSync(join(tmpdir(), 'relay-plan-'))
+  const agent = {
+    id,
+    session: { id, header: { cwd: dir } },
+    status: 'idle',
+    inbox: { nextTurn: [], nextStep: [] },
+    followup() {},
+    inject() {},
+  }
+  return { agent, dir }
+}
+
+check('relay_start is refused in plan mode and writes nothing', () => {
+  const world = fakeWorld()
+  withPlanMode(world, { 'session-planner': { active: false, pending: true } })
+  const { agent, dir } = outsiderIn(world, 'session-planner')
+  assert.throws(
+    () => world.engine.start({ agent, objective: 'planned work' }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.invalid && /plan mode is active/.test(error.message),
+  )
+  assert.equal(existsSync(join(dir, '.relay')), false, 'nothing may be written before the plan is approved')
+})
+
+check('start writes PLAN.md, doc reads it and recall searches it', () => {
+  const world = fakeWorld()
+  withPlanMode(world, { 'session-planner': { active: false } })
+  const { agent } = outsiderIn(world, 'session-planner')
+  const started = world.engine.start({ agent, objective: 'planned work' })
+  const store = world.engine.storeFor(world.engine.members.get('session-planner').truthDir)
+  const planFile = store.paths(started.chainId).plan
+  assert.match(readFileSync(planFile, 'utf8'), /^# PLAN/)
+  assert.match(world.engine.doc(started.chainId, 'plan').text, /^# PLAN/)
+  writeFileSync(planFile, '# PLAN\n\nmigrate the zebrafish table first\n')
+  const found = world.engine.recall({ agent, query: 'zebrafish' })
+  assert.deepEqual(found.matches.map(match => match.file), ['PLAN.md'])
 })
 
 rmSync(workspace, { recursive: true, force: true })
