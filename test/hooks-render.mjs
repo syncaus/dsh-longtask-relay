@@ -133,7 +133,7 @@ function createFakeReact() {
  * components plus the RPC stub.
  * @returns {{ registrations: object[], calls: object[] }}
  */
-function boot({ failSessionViewOnce = false } = {}) {
+function boot({ failSessionViewOnce = false, headPlanMode = true } = {}) {
   const react = createFakeReact()
   const registrations = []
   const calls = []
@@ -141,12 +141,14 @@ function boot({ failSessionViewOnce = false } = {}) {
 
   const chainView = {
     chain: { chainId: 'chain-1', status: 'active', title: 'demo', objective: 'ship it', featuresTotal: 2, featuresDone: 1, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null },
+    head: { goal: null, planMode: headPlanMode, goalHeld: false, goalPausedByRelay: false },
     self: {
       sessionId: 'session-1',
       role: 'worker',
       running: false,
       pressureRatio: 0.1,
       compactions: 0,
+      planMode: true,
       goal: { phase: 'blocked', activation: 'disarmed', roundsStarted: 16, maxGoalRounds: 16, blockedCode: 'round-limit', blockedMessage: 'round cap reached' },
     },
     parent: { sessionId: 'session-parent', running: false },
@@ -162,10 +164,17 @@ function boot({ failSessionViewOnce = false } = {}) {
       // The same text lands in lastError; the panel must not show it twice.
       lastError: 'external blocker: grant access',
       sessionsDetail: [{ sessionId: 'session-1', role: 'initializer', running: false, loaded: true, peakRatio: 0.4, pressureRatio: 0.23 }],
+      head: { goal: { phase: 'active', activation: 'armed', roundsStarted: 3, maxGoalRounds: 10, blockedCode: null, blockedMessage: null }, planMode: true, goalHeld: false, goalPausedByRelay: false },
     }],
   }
   const panelDetail = {
     chain: chainSummary,
+    head: {
+      goal: { phase: 'active', activation: 'disarmed', roundsStarted: 3, maxGoalRounds: 10, blockedCode: null, blockedMessage: null },
+      planMode: true,
+      goalHeld: true,
+      goalPausedByRelay: false,
+    },
     features: [],
     sessions: [{ sessionId: 'session-1', role: 'initializer', running: false, loaded: true, pressureRatio: 0.2, peakRatio: 0.4 }],
     handoff: null,
@@ -276,6 +285,17 @@ function collectText(node, parts = []) {
   return parts
 }
 
+// Plan mode must be visible on the tab: a planning session has no feature list
+// and would otherwise look stuck.
+const tasksTab = tabs.find(entry => entry.options.id === 'relay-tasks')
+const tasksText = collectText(await react.settle(tasksTab.component, { sessionId: 'session-1' }))
+assert.ok(tasksText.includes('planModeChip'), 'the tasks tab must show the plan mode chip')
+// With the head quiet, only the position card (self) can still show the chip.
+const selfOnly = boot({ headPlanMode: false })
+const selfOnlyEntry = selfOnly.registrations.find(entry => entry.options.id === 'relay-tasks')
+const selfOnlyText = collectText(await selfOnly.react.settle(selfOnlyEntry.component, { sessionId: 'session-1' }))
+assert.ok(selfOnlyText.includes('planModeChip'), 'the position card must show the plan mode chip of its own session')
+
 // A transient RPC failure must not pin the tab on its error state: the next
 // poll succeeds and the tab has to render the recovered data.
 for (const tab of tabs) {
@@ -299,5 +319,9 @@ assert.ok(panelText.includes('40%'), 'the chain card must show the peak context 
 assert.ok(!panelText.includes('23%'), 'the chain row must show the peak, not the current reading')
 const viewChainButtons = panelText.filter(text => text === 'viewChain').length
 assert.equal(viewChainButtons, 1, 'a blocker echoed in lastError must produce one attention row, not two')
+assert.ok(panelText.includes('planModeChip'), 'the panel must show the plan mode chip')
+assert.ok(panelText.includes('goalRow'), 'the panel must show the goal row')
+assert.ok(panelText.includes('goalBudget'), 'the chain detail must label the goal rounds as a chain-wide budget')
+assert.ok(panelText.includes('goalHeld'), 'the chain detail must explain a held goal')
 
 console.log('session tab render check passed: hook order holds, a read error clears after recovery, and the panel shows the peak ratio')

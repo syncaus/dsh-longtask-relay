@@ -2165,6 +2165,79 @@ check('start writes PLAN.md, doc reads it and recall searches it', () => {
   assert.deepEqual(found.matches.map(match => match.file), ['PLAN.md'])
 })
 
+check('detail reports the head goal, plan mode, and a held goal only during a wrap-up', () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView({ activation: 'disarmed' }) })
+  const plan = withPlanMode(world, { 'session-old': { active: false } })
+  const chainId = world.chain.chainId
+  const before = world.engine.detail(chainId).head
+  assert.deepEqual(before.goal, {
+    phase: 'active',
+    activation: 'disarmed',
+    roundsStarted: 3,
+    maxGoalRounds: 10,
+    blockedCode: null,
+    blockedMessage: null,
+  })
+  assert.equal(before.planMode, false)
+  assert.equal(before.goalHeld, false, 'a disarmed goal outside a wrap-up is not held by the plugin')
+  assert.equal(before.goalPausedByRelay, false)
+  plan.states.set('session-old', { active: false, pending: true })
+  assert.equal(world.engine.detail(chainId).head.planMode, true)
+  world.local.update(chainId, record => { record.wrapupAt = new Date().toISOString() })
+  assert.equal(world.engine.detail(chainId).head.goalHeld, true)
+  world.local.update(chainId, record => { record.wrapupAt = null; record.readyAt = new Date().toISOString() })
+  assert.equal(world.engine.detail(chainId).head.goalHeld, true, 'a ready session is waiting for its handoff too')
+  goals.views.get('session-old').activation = 'armed'
+  assert.equal(world.engine.detail(chainId).head.goalHeld, false, 'an armed goal is not held')
+  goals.views.get('session-old').activation = 'disarmed'
+  goals.views.get('session-old').phase = 'paused'
+  assert.equal(world.engine.detail(chainId).head.goalHeld, false, 'only an active goal counts as held')
+})
+
+check('status carries the head and notices a Host pause of the goal', () => {
+  const world = fakeWorld()
+  withGoals(world, { 'session-old': goalView() })
+  const chainId = world.chain.chainId
+  const first = world.engine.status()[0]
+  assert.ok(first.head !== undefined, 'status items need a head')
+  assert.equal(first.head.goal.roundsStarted, 3)
+  assert.equal(first.head.goalPausedByRelay, false)
+  world.engine.setPaused({ chainId, paused: true })
+  assert.equal(world.engine.status()[0].head.goalPausedByRelay, true)
+  world.engine.setPaused({ chainId, paused: false })
+  assert.equal(world.engine.status()[0].head.goalPausedByRelay, false)
+  world.engine.dispose()
+})
+
+await checkAsync('sessionView carries the head and each session plan mode', async () => {
+  const world = spawnWorld()
+  const states = new Map([['session-parent', { active: true }], ['session-child', { active: false }]])
+  const original = world.engine.ctx.get
+  world.engine.ctx.get = name => (name === 'planMode' ? { get: agent => states.get(agent.id) } : original(name))
+  await world.engine.spawn({ agent: world.parent, features: ['F002'] })
+  const parentView = world.engine.sessionView('session-parent')
+  assert.equal(parentView.head.planMode, true)
+  assert.equal(parentView.self.planMode, true)
+  assert.equal(parentView.children[0].planMode, false)
+  states.set('session-child', { pending: true })
+  const childView = world.engine.sessionView('session-child')
+  assert.equal(childView.self.planMode, true)
+  assert.equal(childView.parent.planMode, true)
+  assert.equal(parentView.head.goal, null, 'no goal service view: no goal')
+  assert.equal(world.engine.sessionView('session-parent').children[0].planMode, true)
+})
+
+check('headState survives a chain whose current session is not loaded', () => {
+  const world = fakeWorld()
+  withGoals(world, { 'session-old': goalView() })
+  withPlanMode(world, { 'session-old': { active: true } })
+  world.local.update(world.chain.chainId, record => { record.currentSessionId = 'session-gone' })
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.deepEqual(world.engine.headState(chain), { goal: null, planMode: false, goalHeld: false, goalPausedByRelay: false })
+  assert.equal(world.engine.detail(world.chain.chainId).head.planMode, false)
+})
+
 rmSync(workspace, { recursive: true, force: true })
 
 console.log(`\n${checks - failures.length}/${checks} checks passed`)

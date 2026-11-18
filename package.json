@@ -3,7 +3,7 @@
   "version": "1.2.0",
   "private": true,
   "type": "module",
-  "description": "Long-task relay: keep one task moving across fresh sessions through a workspace truth source (features + evidence + decisions + traps), with automatic handoff, blocker-aware pausing, and a monitoring panel.",
+  "description": "Long-task relay: keep one task moving across fresh sessions through a workspace truth source (plan + features + evidence + decisions + traps), with automatic handoff that carries the permission preset, goal, and plan mode, blocker-aware pausing, and a panel to monitor and steer every chain.",
   "scripts": {
     "test": "node test/smoke.mjs && node test/client-boot.mjs && node test/hooks-render.mjs"
   },
