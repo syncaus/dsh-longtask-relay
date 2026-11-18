@@ -15,7 +15,7 @@
  * crashed write from leaving a half-parsed truth source behind.
  */
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
@@ -273,6 +273,19 @@ export class ChainStore {
       throw new RelayError(RELAY_CODES.invalid, 'index.json needs a chains array')
     }
     return index.chains.filter(chainId => typeof chainId === 'string')
+  }
+
+  /**
+   * Delete one chain's truth source and drop it from this directory's index.
+   * @param {string} chainId - chain identity.
+   * @returns {string} the removed directory.
+   */
+  remove(chainId) {
+    const paths = this.paths(chainId)
+    rmSync(paths.dir, { recursive: true, force: true })
+    const known = this.listChainIds().filter(id => id !== chainId)
+    writeAtomic(join(this.truthDir, 'index.json'), `${JSON.stringify({ version: 1, chains: known }, null, 2)}\n`)
+    return paths.dir
   }
 
   /**
@@ -645,6 +658,21 @@ export class ChainIndex {
       title: chain.title ?? '',
       updatedAt: chain.updatedAt ?? new Date().toISOString(),
     })
+    try {
+      mkdirSync(dirname(this.file), { recursive: true })
+    } catch (error) {
+      throw new RelayError(RELAY_CODES.io, `cannot create ${dirname(this.file)}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    writeAtomic(this.file, `${JSON.stringify({ version: 1, chains: known }, null, 2)}\n`)
+  }
+
+  /**
+   * Drop one chain from the index, keeping every other entry.
+   * @param {string} chainId - chain identity.
+   * @returns {void}
+   */
+  forget(chainId) {
+    const known = this.entries().filter(entry => entry.chainId !== chainId)
     try {
       mkdirSync(dirname(this.file), { recursive: true })
     } catch (error) {
