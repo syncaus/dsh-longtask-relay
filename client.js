@@ -88,6 +88,28 @@ window.__ModuleLoader__.load({
       acceptCoverage: '接受',
       revokeCoverage: '撤销接受',
       raiseHandoffLimit: '调高交接上限',
+      paused_manual: '手动暂停',
+      paused_blocker: '因阻塞暂停',
+      paused_handoff_failed: '交接失败后暂停',
+      paused_handoff_limit: '交接次数到顶',
+      clearBlocker: '已处理，解除阻塞',
+      goalBlockerHint: '这个阻塞来自被阻塞的目标：在对应会话里恢复目标后会自动解除。',
+      reclaim: '收回',
+      confirmReclaim: '确认收回',
+      reclaimNote: '未完成的功能交还主线，子会话会收到停止通知。',
+      finishChain: '结束这条链',
+      finishReady: '功能已全部通过，可以结束这条链。',
+      finishEvidence: '整体是怎么验证的（一段话）',
+      search: '搜索',
+      searchPlaceholder: '在交接、进度、决策、踩坑、审计里搜索',
+      searchNone: '没有匹配的内容',
+      searchCount: '{n} 处匹配',
+      searchClear: '清除',
+      handoffStale: '交接说明还是上一棒写的，当前会话没有更新过。',
+      handoffMissing: '交接说明里没有状态块，交接前会先让会话收尾补写。',
+      filterChains: '筛选任务链',
+      actionFailed: '操作没有成功',
+      dismiss: '知道了',
       configTitle: '长任务接力设置',
       configNote: '修改会写进当前 profile 的 cordis.patch.yml，保存后插件按新配置重载。',
       save: '保存',
@@ -226,6 +248,7 @@ window.__ModuleLoader__.load({
       audit_blocker_set: '记录阻塞',
       audit_blocker_cleared: '阻塞解除',
       audit_session_ready: '会话收尾完成',
+      audit_session_permission: '继承权限预设',
       audit_goal_seeded: '建立目标',
       audit_supervisor_decision: '监督判定',
       audit_handoff_started: '交接开始',
@@ -303,6 +326,28 @@ window.__ModuleLoader__.load({
       acceptCoverage: 'Accept',
       revokeCoverage: 'Revoke',
       raiseHandoffLimit: 'Raise handoff limit',
+      paused_manual: 'Paused by hand',
+      paused_blocker: 'Paused by a blocker',
+      paused_handoff_failed: 'Paused after a failed handoff',
+      paused_handoff_limit: 'Handoff limit reached',
+      clearBlocker: 'Done; clear the blocker',
+      goalBlockerHint: 'This blocker follows a blocked goal: it clears once the goal is resumed in its session.',
+      reclaim: 'Reclaim',
+      confirmReclaim: 'Confirm reclaim',
+      reclaimNote: 'Unfinished features return to the main line and the child is told to stop.',
+      finishChain: 'Finish this chain',
+      finishReady: 'Every feature passes; the chain can be finished.',
+      finishEvidence: 'How the whole objective was verified (one paragraph)',
+      search: 'Search',
+      searchPlaceholder: 'Search handoffs, progress, decisions, traps, and the audit log',
+      searchNone: 'Nothing matches',
+      searchCount: '{n} matches',
+      searchClear: 'Clear',
+      handoffStale: 'The handoff brief was written by the previous leg; the current session has not updated it.',
+      handoffMissing: 'The handoff brief has no state block; the session is asked to wrap up before a handoff.',
+      filterChains: 'Filter chains',
+      actionFailed: 'The action did not go through',
+      dismiss: 'Dismiss',
       configTitle: 'Long-task relay settings',
       configNote: 'Saving writes the active profile cordis.patch.yml and reloads the plugin with the new values.',
       save: 'Save',
@@ -441,6 +486,7 @@ window.__ModuleLoader__.load({
       audit_blocker_set: 'Blocker set',
       audit_blocker_cleared: 'Blocker cleared',
       audit_session_ready: 'Session wrapped up',
+      audit_session_permission: 'Permission preset carried over',
       audit_goal_seeded: 'Goal seeded',
       audit_supervisor_decision: 'Supervisor decision',
       audit_handoff_started: 'Handoff started',
@@ -508,7 +554,8 @@ window.__ModuleLoader__.load({
           { key: 'requireStrongEvidence', label: '要求命令输出作证据', kind: 'boolean', hint: '功能通过必须附带像命令结果的证据；验证输出是自由文本的项目可以关掉' },
           { key: 'requireHumanAcceptedCoverage', label: '部分验证需人工接受', kind: 'boolean', hint: '只做到部分验证的功能，要人工接受后链才能完成' },
           { key: 'pauseOnExternalBlocker', label: '等待人工时暂停', kind: 'boolean', hint: '遇到只有人能解决的阻塞时暂停这条链，不再消耗交接次数' },
-          { key: 'workerApproval', label: '自建会话的审批', kind: 'select', options: ['inherit', 'ask', 'never'], hint: '插件自己创建的会话（子会话、接力会话）的审批策略；无人值守时 ask 会一直等，never 直接失败并记为阻塞' },
+          { key: 'inheritPermission', label: '新会话继承权限预设', kind: 'boolean', hint: '接力会话和子会话沿用上一个会话的权限预设（沙箱模式 + 审批策略）；关掉后新会话用 DSH 设置里的默认预设' },
+          { key: 'workerApproval', label: '自建会话的审批', kind: 'select', options: ['inherit', 'ask', 'never'], hint: '在继承预设之后再覆盖审批策略：inherit 不覆盖；ask 每次询问，无人值守时会一直等；never 不询问，需要升级权限的操作直接失败并记为阻塞' },
         ],
       },
       {
@@ -532,7 +579,6 @@ window.__ModuleLoader__.load({
 .relay-head-actions { display: flex; align-items: center; gap: 6px; flex: none; }
 
 .relay-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
-.relay-tab .relay-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .relay-kpi { display: flex; flex-direction: column; gap: 1px; min-width: 0; padding: 9px 12px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; }
 body:not([data-ds-dark-theme]) .relay-kpi { box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06); }
 .relay-kpi-label { color: var(--dsw-alias-label-secondary); font-size: 12px; font-weight: 600; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -677,6 +723,23 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-leg-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .relay-leg-no { flex: 1; min-width: 0; overflow: hidden; font-size: 12.5px; font-weight: 600; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
 .relay-leg-line { display: block; overflow: hidden; color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 15px; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.relay-kid-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.relay-kid-row > .relay-kid { flex: 1; }
+.relay-search { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.relay-search .relay-input { flex: 1 1 220px; width: auto; }
+.relay-hit { display: grid; grid-template-columns: 132px minmax(0, 1fr); align-items: baseline; column-gap: 10px; padding: 5px 0; border-top: 1px solid var(--dsw-alias-border-l1); font-size: 12px; line-height: 17px; }
+.relay-hit:first-child { border-top: none; padding-top: 0; }
+.relay-hit-where { overflow: hidden; padding: 0; border: 0; background: transparent; color: var(--dsw-alias-brand-primary); font-family: var(--dsw-font-family-mono, ui-monospace, monospace); font-size: 11px; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.relay-hit-text { color: var(--dsw-alias-label-primary); overflow-wrap: anywhere; }
+.relay-finish { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--dsw-alias-state-success-primary) 40%, var(--dsw-alias-border-l2)); border-radius: 8px; background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 7%, var(--dsw-alias-bg-layer-1)); }
+.relay-finish-note { flex: none; color: var(--dsw-alias-state-success-primary); font-size: 12px; font-weight: 600; }
+.relay-finish .relay-input { flex: 1 1 220px; width: auto; }
+.relay-blocker-text { flex: 1 1 200px; min-width: 0; }
+.relay-blocker-hint { flex-basis: 100%; color: var(--dsw-alias-label-tertiary); }
+.relay-rail-tools { display: flex; flex-direction: column; gap: 6px; margin: 0 4px 8px; }
+.relay-rail-tools .relay-seg { align-self: flex-start; }
+.relay-section-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 14px; margin: 0 2px 10px; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; }
+.relay-section-line b { color: var(--dsw-alias-label-primary); font-size: 13px; }
 .relay-kids { display: flex; flex-direction: column; gap: 3px; margin: 0 0 0 10px; padding: 0 0 0 8px; border-left: 1px dashed var(--dsw-alias-border-l3); list-style: none; }
 .relay-kid { box-sizing: border-box; display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; padding: 3px 6px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11px; line-height: 16px; text-align: left; cursor: pointer; }
 .relay-kid:hover { border-color: var(--dsw-alias-border-l2); background: var(--dsw-alias-interactive-bg-hover); }
@@ -785,7 +848,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
   .relay-task-grid { grid-template-columns: minmax(0, 1fr); }
 }
 @container relay (max-width: 620px) {
-  .relay-kpis, .relay-tab .relay-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .relay-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .relay-page .relay-kpi:first-child { grid-column: 1 / -1; }
 }
 @container relay (max-width: 520px) {
@@ -1185,7 +1248,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
          * Button that asks once more before a consequential action.
          * The second step replaces the first in place and steps back on its own.
          */
-        function ConfirmButton({ children, confirmLabel, note, onConfirm, disabled, title, primary = false }) {
+        function ConfirmButton({ children, confirmLabel, note, onConfirm, disabled, title, primary = false, small = false }) {
           const [armed, setArmed] = useState(false)
           useEffect(() => {
             if (!armed) return undefined
@@ -1195,7 +1258,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           if (!armed || disabled) {
             return h('button', {
               type: 'button',
-              className: `relay-btn${primary ? ' is-primary' : ''}`,
+              className: `relay-btn${primary ? ' is-primary' : ''}${small ? ' is-small' : ''}`,
               disabled,
               title,
               onClick: () => setArmed(true),
@@ -1204,10 +1267,10 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           return h(React.Fragment, {},
             h('button', {
               type: 'button',
-              className: 'relay-btn is-danger',
+              className: `relay-btn is-danger${small ? ' is-small' : ''}`,
               onClick: () => { setArmed(false); onConfirm() },
             }, confirmLabel),
-            h('button', { type: 'button', className: 'relay-btn', onClick: () => setArmed(false) }, t('cancel')),
+            h('button', { type: 'button', className: `relay-btn${small ? ' is-small' : ''}`, onClick: () => setArmed(false) }, t('cancel')),
             note === undefined ? null : h('span', { className: 'relay-confirm-note' }, note),
           )
         }
@@ -1261,7 +1324,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             },
               h('span', { className: 'relay-row-head' },
                 h('span', { className: 'relay-row-title' }, chain.title || chain.chainId),
-                h('span', { className: 'relay-row-status' }, phase === null ? label('status', chain.status) : t(phase)),
+                h('span', { className: 'relay-row-status' },
+                  phase !== null ? t(phase) : (chain.status === 'paused' && typeof chain.pausedBy === 'string' ? label('paused', chain.pausedBy) : label('status', chain.status))),
               ),
               h('span', { className: 'relay-row-where' },
                 h('span', { title: chain.cwd }, folderOf(chain.cwd)),
@@ -1293,7 +1357,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
          * The chain as a relay: main-line sessions in handoff order, each with
          * the child sessions it delegated to hanging below it.
          */
-        function RelayTrack({ sessions, features, currentSessionId, waiting }) {
+        function RelayTrack({ sessions, features, currentSessionId, waiting, onReclaim, busy }) {
           const known = new Set(sessions.map(session => session.sessionId))
           const isChild = session => typeof session.parentSessionId === 'string' && known.has(session.parentSessionId)
           const mainline = sessions.filter(session => !isChild(session))
@@ -1340,7 +1404,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 ),
                 kids.length === 0 ? null : h('ul', { className: 'relay-kids' }, kids.map((kid) => {
                   const mine = owned(kid.sessionId)
-                  return h('li', { key: kid.sessionId },
+                  const pending = mine.some(feature => !feature.passes)
+                  return h('li', { key: kid.sessionId, className: 'relay-kid-row' },
                     h('button', {
                       type: 'button',
                       className: 'relay-kid',
@@ -1351,7 +1416,17 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                       h('span', { className: 'relay-mono' }, shortId(kid.sessionId)),
                       mine.length === 0 ? null : h('b', {}, `${mine.filter(feature => feature.passes).length}/${mine.length}`),
                       h('span', {}, label('state', stateOf(kid) ?? 'idle')),
-                    ))
+                    ),
+                    pending && onReclaim !== undefined
+                      ? h(ConfirmButton, {
+                        small: true,
+                        disabled: busy,
+                        title: t('reclaimNote'),
+                        confirmLabel: t('confirmReclaim'),
+                        onConfirm: () => onReclaim(kid.sessionId),
+                      }, t('reclaim'))
+                      : null,
+                  )
                 })),
               )
             })),
@@ -1431,8 +1506,32 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const [name, setName] = useState('handoff')
           const [fetched, setFetched] = useState(() => docCache.get(`${chainId}:handoff`) ?? null)
           const [error, setError] = useState(null)
+          const [query, setQuery] = useState('')
+          const [hits, setHits] = useState(null)
           const stamp = detail.chain?.updatedAt ?? ''
           const inline = DOCS.find(doc => doc.id === name)?.inline === true
+          const search = () => {
+            const words = query.trim()
+            if (words.length === 0) {
+              setHits(null)
+              return
+            }
+            call('relay/recall', { chainId, query: words })
+              .then((value) => {
+                setError(null)
+                setHits({ total: value?.total ?? 0, matches: Array.isArray(value?.matches) ? value.matches : [] })
+              })
+              .catch((failure) => { setError(messageOf(failure)) })
+          }
+          /** Open the document a search hit came from. */
+          const openHit = (file) => {
+            const target = DOCS.find(doc => `${doc.id}.md` === String(file).toLowerCase())
+            if (target === undefined) return
+            setHits(null)
+            setName(target.id)
+          }
+          const freshness = detail.handoffFreshness ?? null
+          const openChain = detail.chain?.status !== 'done'
           useEffect(() => {
             let live = true
             setError(null)
@@ -1455,12 +1554,43 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             if (text.trim().length === 0) return h('div', { className: 'relay-text' }, t('docEmpty'))
             return h('pre', { className: 'relay-doc', tabIndex: 0 }, text)
           })()
+          const results = hits === null ? null : (hits.matches.length === 0
+            ? h('div', { className: 'relay-text' }, t('searchNone'))
+            : h('ul', { className: 'relay-list' }, hits.matches.map((hit, index) => h('li', { key: `${hit.file}:${hit.line}:${index}`, className: 'relay-hit' },
+              h('button', { type: 'button', className: 'relay-hit-where', onClick: () => openHit(hit.file) }, `${hit.file}:${hit.line}`),
+              h('span', { className: 'relay-hit-text' }, hit.text),
+            ))))
           return h('section', { className: 'relay-card' },
             h(CardTitle, {
-              tools: h(Seg, { options: DOCS.map(doc => ({ id: doc.id, label: t(doc.label) })), value: name, onChange: setName }),
+              tools: h(Seg, {
+                options: DOCS.map(doc => ({ id: doc.id, label: t(doc.label) })),
+                value: hits === null ? name : null,
+                onChange: (next) => { setHits(null); setName(next) },
+              }),
             }, t('docs')),
-            !inline && fetched?.truncated === true ? h('div', { className: 'relay-text', style: { marginBottom: '6px' } }, t('docTruncated')) : null,
-            body,
+            h('form', {
+              className: 'relay-search',
+              onSubmit: (event) => { event.preventDefault(); search() },
+            },
+              h('input', {
+                className: 'relay-input',
+                type: 'search',
+                value: query,
+                placeholder: t('searchPlaceholder'),
+                'aria-label': t('searchPlaceholder'),
+                onChange: event => setQuery(event.target.value),
+              }),
+              h('button', { type: 'submit', className: 'relay-btn', disabled: query.trim().length === 0 }, t('search')),
+              hits === null
+                ? null
+                : h('button', { type: 'button', className: 'relay-btn', onClick: () => { setHits(null); setQuery('') } }, t('searchClear')),
+              hits === null ? null : h('span', { className: 'relay-tag' }, t('searchCount').replace('{n}', String(hits.total))),
+            ),
+            hits === null && name === 'handoff' && openChain && freshness !== null && freshness.fresh === false
+              ? h('div', { className: 'relay-blocker', style: { margin: '0 0 8px' } }, freshness.reason === 'missing' ? t('handoffMissing') : t('handoffStale'))
+              : null,
+            hits === null && !inline && fetched?.truncated === true ? h('div', { className: 'relay-text', style: { marginBottom: '6px' } }, t('docTruncated')) : null,
+            hits === null ? body : (error !== null ? h('div', { className: 'relay-error' }, `${t('failed')}: ${error}`) : results),
             typeof detail.truthDir === 'string'
               ? h('div', { className: 'relay-doc-foot' },
                 h('span', {}, t('docLocation')),
@@ -1486,6 +1616,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             case 'delegation.failed': return detail.error ?? ''
             case 'blocker.set': return joined([label('blocker', detail.kind), detail.action])
             case 'goal.seeded': return `${detail.rounds ?? '?'} ${t('rounds')}`
+            case 'session.permission': return `${shortId(detail.sessionId)}: ${detail.preset ?? ''}`
             case 'supervisor.decision': return joined([
               label('act', detail.action),
               label('reason', detail.reason ?? detail.by),
@@ -1563,6 +1694,25 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           )
         }
 
+        /** Closes a chain whose features all pass; the Host re-checks the evidence. */
+        function FinishForm({ onFinish, busy }) {
+          const [evidence, setEvidence] = useState('')
+          return h('form', {
+            className: 'relay-finish',
+            onSubmit: (event) => { event.preventDefault(); if (evidence.trim().length > 0) onFinish(evidence.trim()) },
+          },
+            h('span', { className: 'relay-finish-note' }, t('finishReady')),
+            h('input', {
+              className: 'relay-input',
+              value: evidence,
+              placeholder: t('finishEvidence'),
+              'aria-label': t('finishEvidence'),
+              onChange: event => setEvidence(event.target.value),
+            }),
+            h('button', { type: 'submit', className: 'relay-btn is-primary', disabled: busy || evidence.trim().length === 0 }, t('finishChain')),
+          )
+        }
+
         /** Everything about the selected chain. */
         function ChainDetail({ detail, onAct, busy, waiting }) {
           const [section, setSection] = useState('features')
@@ -1580,6 +1730,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const deletable = chain.status !== 'active' && chain.status !== 'initializing'
           const blocker = chain.blocker ?? null
           const phase = phaseOf(chain)
+          const goalOwned = blocker !== null && typeof blocker.action === 'string' && blocker.action.startsWith('goal blocked:')
+          const finishable = total > 0 && done === total && !isDone
           const handoffCap = chain.maxHandoffs ?? 0
           const handoffTone = handoffCap > 0 && (chain.handoffCount ?? 0) >= Math.max(1, Math.floor(handoffCap * 0.7)) ? 'warn' : 'brand'
           const metas = [
@@ -1603,7 +1755,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 h('div', { className: 'relay-detail-main' },
                   h('h3', { className: 'relay-detail-title' }, chain.title || chain.chainId),
                   h('div', { className: 'relay-pills' },
-                    h('span', { className: `relay-status is-${chain.status}` }, label('status', chain.status)),
+                    h('span', { className: `relay-status is-${chain.status}` },
+                      isPaused && typeof chain.pausedBy === 'string' ? label('paused', chain.pausedBy) : label('status', chain.status)),
                     phase === null ? null : h('span', { className: 'relay-status is-warn' }, t(phase)),
                     blocker === null
                       ? null
@@ -1655,9 +1808,20 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 ? null
                 : h('div', { className: `relay-blocker is-${blocker.kind}` },
                   h('span', { className: 'relay-blocker-kind' }, label('blocker', blocker.kind)),
-                  h('span', {}, blocker.action ?? ''),
+                  h('span', { className: 'relay-blocker-text' }, blocker.action ?? ''),
                   blocker.who ? h('span', { className: 'relay-tag' }, blocker.who) : null,
+                  goalOwned
+                    ? h('span', { className: 'relay-blocker-hint' }, t('goalBlockerHint'))
+                    : h('button', {
+                      type: 'button',
+                      className: 'relay-btn is-small',
+                      disabled: busy,
+                      onClick: () => { void onAct('relay/clearBlocker', { chainId: chain.chainId }) },
+                    }, t('clearBlocker')),
                 ),
+              finishable
+                ? h(FinishForm, { busy, onFinish: (evidence) => { void onAct('relay/finishChain', { chainId: chain.chainId, evidence }) } })
+                : null,
               h('div', { className: 'relay-metas' },
                 metas.map(meta => h('div', { key: meta.label, className: `relay-meta is-${meta.tone}` },
                   h('span', { className: 'relay-meta-value' }, meta.value),
@@ -1694,7 +1858,14 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
               h(CardTitle, { icon: true, sub: `${chain.handoffCount ?? 0}/${handoffCap} ${t('statHandoffs')}` }, t('track')),
               sessions.length === 0
                 ? h('div', { className: 'relay-text' }, t('none'))
-                : h(RelayTrack, { sessions, features, currentSessionId: chain.currentSessionId, waiting }),
+                : h(RelayTrack, {
+                  sessions,
+                  features,
+                  currentSessionId: chain.currentSessionId,
+                  waiting,
+                  busy,
+                  onReclaim: (sessionId) => { void onAct('relay/reclaimWorker', { chainId: chain.chainId, sessionId }) },
+                }),
             ),
             h('div', { style: { marginBottom: '8px' } }, h(Seg, { options: sections, value: section, onChange: setSection })),
             section === 'features'
@@ -1823,7 +1994,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
         }
 
         /** One delegated child session card. */
-        function ChildCard({ child, waiting }) {
+        function ChildCard({ child, waiting, onReclaim }) {
           const state = stateOf(child) ?? 'idle'
           const owned = Array.isArray(child.featureList)
             ? child.featureList
@@ -1835,6 +2006,14 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
               waiting ? h('span', { className: 'relay-status is-warn' }, t('decisionShort')) : null,
               h(StatePill, { session: child }),
               h('button', { type: 'button', className: 'relay-btn is-small', onClick: () => openSession(child.sessionId) }, t('open')),
+              onReclaim !== undefined && state !== 'retired' && owned.some(feature => !feature.passes)
+                ? h(ConfirmButton, {
+                  small: true,
+                  title: t('reclaimNote'),
+                  confirmLabel: t('confirmReclaim'),
+                  onConfirm: () => onReclaim(child.sessionId),
+                }, t('reclaim'))
+                : null,
             ),
             h(GaugeRow, { session: child }),
             h('div', { className: 'relay-metas' },
@@ -1871,6 +2050,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           // Every hook runs before the early returns below: a render that
           // gains a hook after the data arrives throws in React.
           const decisions = usePendingDecisions()
+          const [actionError, setActionError] = useState(null)
           if (error !== null) return h(TabShell, {}, h(TabEmpty, { title: t('failed'), body: error }))
           if (view === undefined) return h(TabShell, {}, h('div', { className: 'relay-text' }, t('loading')))
           if (view === null || view.chain === null) return h(TabShell, {}, h(TabEmpty, { title: t('noChainTitle'), body: t('noChainBody') }))
@@ -1878,12 +2058,11 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const running = children.filter(child => stateOf(child) === 'running').length
           const owned = children.reduce((sum, child) => sum + (Array.isArray(child.features) ? child.features.length : 0), 0)
           const passed = children.reduce((sum, child) => sum + (child.featuresPassed ?? 0), 0)
-          const kpis = [
-            { label: t('childCount'), value: children.length, tone: 'brand' },
-            { label: t('statRunning'), value: running, tone: 'success' },
-            { label: t('featuresLabel'), value: owned, tone: 'business' },
-            { label: t('statPassed'), value: passed, tone: 'success' },
-          ]
+          const reclaim = (childId) => {
+            setActionError(null)
+            call('relay/reclaimWorker', { chainId: view.chain.chainId, sessionId: childId })
+              .catch((failure) => { setActionError(messageOf(failure)) })
+          }
           const waiting = new Set(decisions.map(decision => decision.sessionId).filter(id => typeof id === 'string'))
           const isCurrent = view.chain.currentSessionId === sessionId
           return h(TabShell, {},
@@ -1891,12 +2070,18 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             children.length === 0
               ? h(TabEmpty, { title: t('noChildrenTitle'), body: isCurrent ? t('noChildrenBody') : t('noChildrenNotCurrent') })
               : h(React.Fragment, {},
-                h(Kpis, { items: kpis }),
+                h('div', { className: 'relay-section-line' },
+                  h('b', {}, `${t('childCount')} ${children.length}`),
+                  h('span', {}, `${running} ${t('statRunning')}`),
+                  h('span', {}, `${t('featuresLabel')} ${passed}/${owned}`),
+                ),
+                actionError === null ? null : h('div', { className: 'relay-error' }, actionError),
                 h('div', { className: 'relay-children' },
                   children.map(child => h(ChildCard, {
                     key: child.sessionId,
                     child,
                     waiting: waiting.has(child.sessionId),
+                    onReclaim: reclaim,
                   }))),
               ),
           )
@@ -1918,20 +2103,12 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             : (Array.isArray(view.openFeatures) ? view.openFeatures : [])
           const done = features.filter(feature => feature.passes).length
           const state = stateOf(self)
-          const reading = state === 'retired' ? (self.peakRatio ?? 0) : (self.pressureRatio ?? 0)
-          const kpis = [
-            { label: t('featuresLabel'), value: features.length, tone: 'brand' },
-            { label: t('statPassed'), value: done, tone: 'success' },
-            { label: state === 'retired' ? t('statContext') : t('pressure'), value: `${pct(reading)}%`, tone: toneOf(reading) },
-            { label: t('compactions'), value: self.compactions ?? 0, tone: (self.compactions ?? 0) > 0 ? 'warn' : 'brand' },
-          ]
           const currentId = view.chain.currentSessionId
           const isCurrent = currentId === sessionId
           const handedOver = !delegated && state === 'retired' && typeof currentId === 'string' && !isCurrent
           const goal = self.goal ?? null
           return h(TabShell, {},
             h(ChainBanner, { chain: view.chain }),
-            h(Kpis, { items: kpis }),
             h('div', { className: 'relay-task-grid' },
               h('div', { className: 'relay-task-side' },
                 h('section', { className: 'relay-card' },
@@ -1942,6 +2119,12 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                     isCurrent ? h('span', { className: 'relay-chip is-human' }, t('posCurrent')) : null,
                     h(StatePill, { session: self }),
                   ),
+                  state === null
+                    ? null
+                    : h('div', { style: { marginTop: '10px' } },
+                      h(GaugeRow, { session: self }),
+                      h('div', { className: 'relay-tag', style: { marginTop: '4px' } }, `${t('compactions')} ${self.compactions ?? 0}`),
+                    ),
                   delegated
                     ? h('dl', { className: 'relay-facts' },
                       h('dt', {}, t('parentTitle')),
@@ -2171,6 +2354,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const [loading, setLoading] = useState(() => panelCache.chains === null)
           const [busy, setBusy] = useState(false)
           const [filter, setFilter] = useState('all')
+          const [needle, setNeedle] = useState('')
+          const [actionError, setActionError] = useState(null)
           const selectedRef = useRef(focus.chainId ?? panelCache.selectedId)
           const decisions = usePendingDecisions()
 
@@ -2226,13 +2411,18 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             setBusy(true)
             let failure = null
             try {
-              await call(endpoint, args)
+              const value = await call(endpoint, args)
+              if (value !== null && typeof value === 'object' && value.ok === false) {
+                failure = value.message ?? value.code ?? endpoint
+              }
             } catch (caught) {
               failure = messageOf(caught)
             }
             setBusy(false)
+            // Kept apart from the read error: the next poll clears that one,
+            // and a refused action has to stay until the reader has seen it.
+            setActionError(failure)
             await refresh()
-            if (failure !== null) setError(failure)
           }, [refresh])
 
           const sessionsOf = chain => (Array.isArray(chain.sessionsDetail) ? chain.sessionsDetail : [])
@@ -2301,7 +2491,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             { id: 'stopped', label: t('statPaused'), count: paused },
             { id: 'done', label: t('statDone'), count: doneChains },
           ]
+          const needleText = needle.trim().toLowerCase()
           const shown = chains.filter((chain) => {
+            if (needleText !== '' && ![chain.title, chain.objective, chain.cwd].some(text => typeof text === 'string' && text.toLowerCase().includes(needleText))) return false
             if (filter === 'active') return isActive(chain)
             if (filter === 'stopped') return chain.status === 'paused' || chain.status === 'failed'
             if (filter === 'done') return chain.status === 'done'
@@ -2322,6 +2514,10 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 ),
                 chains.length === 0 ? null : h(Kpis, { items: kpis }),
                 error === null ? null : h('div', { className: 'relay-error' }, `${t('failed')}: ${error}`),
+                actionError === null ? null : h('div', { className: 'relay-error', role: 'alert' },
+                  h('span', { style: { flex: 1, minWidth: 0 } }, `${t('actionFailed')}: ${actionError}`),
+                  h('button', { type: 'button', className: 'relay-btn is-small', onClick: () => setActionError(null) }, t('dismiss')),
+                ),
                 attention.length === 0 ? null : h('section', { className: 'relay-card is-attn' },
                   h(CardTitle, { sub: String(attention.length) }, t('attention')),
                   h('ul', { className: 'relay-attn' }, attention.map(item => h('li', {
@@ -2345,7 +2541,19 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 chains.length === 0 ? null : h('div', { className: 'relay-split' },
                   h('section', { className: 'relay-card relay-rail' },
                     h(CardTitle, { sub: String(chains.length) }, t('chains')),
-                    h('div', { style: { margin: '0 4px 8px' } }, h(Seg, { options: filters, value: filter, onChange: setFilter })),
+                    h('div', { className: 'relay-rail-tools' },
+                      h(Seg, { options: filters, value: filter, onChange: setFilter }),
+                      chains.length > 5
+                        ? h('input', {
+                          className: 'relay-input',
+                          type: 'search',
+                          value: needle,
+                          placeholder: t('filterChains'),
+                          'aria-label': t('filterChains'),
+                          onChange: event => setNeedle(event.target.value),
+                        })
+                        : null,
+                    ),
                     shown.length === 0
                       ? h('div', { className: 'relay-text', style: { padding: '0 4px 4px' } }, t('filterEmpty'))
                       : h('ul', { className: 'relay-rows' }, shown.map(chain => h(ChainRow, {

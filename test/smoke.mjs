@@ -406,6 +406,57 @@ await checkAsync('a ready session hands off and creates the next session', async
   assert.ok(world.calls.some(call => call.kind === 'inject' && /<relay_retired>/.test(call.text)))
 })
 
+/** Mount a stand-in for the Host's permission preset service on a fake world. */
+function withPresets(world, initial) {
+  const current = new Map(Object.entries(initial))
+  const switches = []
+  const original = world.engine.ctx.get
+  world.engine.ctx.get = name => (name === 'permissionPresets'
+    ? {
+      current: session => current.get(session.id) ?? 'workspace-write',
+      set: (session, preset) => { current.set(session.id, preset); switches.push({ sessionId: session.id, preset }) },
+    }
+    : original(name))
+  return { current, switches }
+}
+
+/** Drive the fake world through one automatic handoff. */
+async function handOffOnce(world) {
+  world.setRatio(0.7)
+  await world.engine.evaluate(world.oldAgent)
+  world.engine.statsFor('session-old').ready = true
+  await world.engine.evaluate(world.oldAgent)
+}
+
+await checkAsync('a handoff carries the permission preset to the successor', async () => {
+  const world = fakeWorld()
+  const presets = withPresets(world, { 'session-old': 'danger-full-access' })
+  await handOffOnce(world)
+  assert.deepEqual(presets.switches, [{ sessionId: 'session-new', preset: 'danger-full-access' }])
+  const record = world.engine.audit(world.chain.chainId, 50).find(entry => entry.kind === 'session.permission')
+  assert.deepEqual(record.detail, { sessionId: 'session-new', from: 'session-old', preset: 'danger-full-access' })
+})
+
+await checkAsync('a successor already on the same preset is not switched', async () => {
+  const world = fakeWorld()
+  const presets = withPresets(world, { 'session-old': 'workspace-write' })
+  await handOffOnce(world)
+  assert.deepEqual(presets.switches, [])
+  assert.equal(world.local.readChain(world.chain.chainId).currentSessionId, 'session-new')
+})
+
+await checkAsync('inheritPermission=false and a custom combination leave the successor alone', async () => {
+  const off = fakeWorld({ inheritPermission: false })
+  const offPresets = withPresets(off, { 'session-old': 'danger-full-access' })
+  await handOffOnce(off)
+  assert.deepEqual(offPresets.switches, [])
+  const custom = fakeWorld()
+  const customPresets = withPresets(custom, { 'session-old': 'custom' })
+  await handOffOnce(custom)
+  assert.deepEqual(customPresets.switches, [])
+  assert.equal(custom.local.readChain(custom.chain.chainId).currentSessionId, 'session-new', 'the handoff itself must still complete')
+})
+
 await checkAsync('a handoff seeds a goal on the successor when configured', async () => {
   const world = fakeWorld({ seedGoalOnHandoff: true, goalRoundsPerHandoff: 9 })
   world.setRatio(0.7)
@@ -677,6 +728,41 @@ await checkAsync('an external blocker pauses the chain and names the human actio
   assert.equal(cleared.lastError, null)
 })
 
+await checkAsync('a human clears an external blocker from the panel', async () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  assert.equal(world.engine.clearBlocker({ chainId }).cleared, false, 'nothing to clear yet')
+  world.engine.checkpoint({ agent: world.oldAgent, blocker: { kind: 'external', action: 'open port 5985' } })
+  assert.equal(world.local.readChain(chainId).status, 'paused')
+  const result = world.engine.clearBlocker({ chainId })
+  assert.equal(result.cleared, true)
+  assert.equal(result.status, 'active', 'clearing the blocker must release the pause it caused')
+  assert.equal(world.local.readChain(chainId).blocker, null)
+  const kinds = world.engine.audit(chainId, 20).map(record => `${record.kind}:${record.actor}`)
+  assert.ok(kinds.includes('blocker.cleared:host'), 'the human action must be audited')
+})
+
+await checkAsync('a goal-owned blocker cannot be cleared from the panel', async () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  world.local.update(chainId, record => {
+    record.blocker = { kind: 'external', who: 'human', action: 'goal blocked: round cap reached' }
+  })
+  assert.throws(
+    () => world.engine.clearBlocker({ chainId }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.invalid,
+  )
+  assert.notEqual(world.local.readChain(chainId).blocker, null)
+})
+
+await checkAsync('chain detail reports whether the handoff brief is fresh', async () => {
+  const world = fakeWorld()
+  const freshness = world.engine.detail(world.chain.chainId).handoffFreshness
+  assert.equal(typeof freshness.fresh, 'boolean')
+  world.local.writeHandoff(world.chain.chainId, 'no state block here')
+  assert.deepEqual(world.engine.detail(world.chain.chainId).handoffFreshness, { fresh: false, reason: 'missing' })
+})
+
 await checkAsync('clearing a blocker keeps an unrelated pause', async () => {
   const world = fakeWorld()
   world.local.update(world.chain.chainId, record => {
@@ -860,6 +946,13 @@ await checkAsync('spawn delegates features to a child session', async () => {
   const prompt = world.calls.find(call => call.kind === 'prompt')
   assert.match(prompt.text, /<relay_delegation>/)
   assert.ok(prompt.text.includes('F002'))
+})
+
+await checkAsync('spawn carries the parent permission preset to the child', async () => {
+  const world = spawnWorld()
+  const presets = withPresets(world, { 'session-parent': 'danger-full-access' })
+  await world.engine.spawn({ agent: world.parent, features: ['F002'] })
+  assert.deepEqual(presets.switches, [{ sessionId: 'session-child', preset: 'danger-full-access' }])
 })
 
 await checkAsync('spawn refuses a feature that already passes', async () => {
