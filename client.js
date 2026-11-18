@@ -92,6 +92,7 @@ window.__ModuleLoader__.load({
       paused_blocker: '因阻塞暂停',
       paused_handoff_failed: '交接失败后暂停',
       paused_handoff_limit: '交接次数到顶',
+      paused_blocked: '会话报告受阻',
       clearBlocker: '已处理，解除阻塞',
       goalBlockerHint: '这个阻塞来自被阻塞的目标：在对应会话里恢复目标后会自动解除。',
       reclaim: '收回',
@@ -330,6 +331,7 @@ window.__ModuleLoader__.load({
       paused_blocker: 'Paused by a blocker',
       paused_handoff_failed: 'Paused after a failed handoff',
       paused_handoff_limit: 'Handoff limit reached',
+      paused_blocked: 'Reported blocked by a session',
       clearBlocker: 'Done; clear the blocker',
       goalBlockerHint: 'This blocker follows a blocked goal: it clears once the goal is resumed in its session.',
       reclaim: 'Reclaim',
@@ -511,10 +513,14 @@ window.__ModuleLoader__.load({
       complete: 'done',
     }
 
-    /** Documents the reader offers; the first two arrive with the chain detail. */
+    /**
+     * Documents the reader offers. Only the handoff brief arrives with the chain
+     * detail: it is rewritten whole and stays short. The others are append-only
+     * and are fetched on demand so the reader gets their newest part.
+     */
     const DOCS = [
       { id: 'handoff', label: 'handoff', inline: true },
-      { id: 'progress', label: 'docProgress', inline: true },
+      { id: 'progress', label: 'docProgress', inline: false },
       { id: 'history', label: 'docHistory', inline: false },
       { id: 'decisions', label: 'docDecisions', inline: false },
       { id: 'traps', label: 'docTraps', inline: false },
@@ -952,7 +958,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
         /** Switch to the relay panel with one chain selected. */
         const showChainInPanel = (chainId) => {
           if (typeof chainId !== 'string' || chainId.length === 0) return
-          focus.chainId = chainId
+          // A mounted panel takes the request through its listener; only an
+          // unmounted one has to find it waiting when it mounts.
+          focus.chainId = focus.listeners.size === 0 ? chainId : null
           for (const listener of focus.listeners) {
             try {
               listener(chainId)
@@ -1044,6 +1052,18 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           if (session.loaded === false) return 'unloaded'
           if (session.running === undefined) return null
           return session.running ? 'running' : 'idle'
+        }
+
+        /**
+         * The chain error worth showing next to its blocker.
+         * A pause the blocker caused writes the same sentence into `lastError`,
+         * so only a failed handoff is a second, separate problem.
+         */
+        const errorOf = (chain) => {
+          if (typeof chain.lastError !== 'string' || chain.lastError.length === 0) return null
+          const hasBlocker = chain.blocker !== null && chain.blocker !== undefined
+          if (hasBlocker && chain.pausedBy !== 'handoff-failed') return null
+          return chain.lastError
         }
 
         /** The step between working and handed off that an active chain is in. */
@@ -1314,7 +1334,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const peak = sessions.reduce((max, session) => Math.max(max, session.peakRatio ?? 0), 0)
           const phase = phaseOf(chain)
           const hasBlocker = chain.blocker !== null && chain.blocker !== undefined
-          const hasError = typeof chain.lastError === 'string' && chain.lastError.length > 0
+          const hasError = errorOf(chain) !== null
           return h('li', {},
             h('button', {
               type: 'button',
@@ -1502,30 +1522,40 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
          * The handoff brief and progress arrive with the chain detail; the
          * ledgers are fetched when their tab is opened.
          */
-        function DocsCard({ chainId, detail }) {
+        function DocsCard({ chainId, detail, onSection }) {
           const [name, setName] = useState('handoff')
           const [fetched, setFetched] = useState(() => docCache.get(`${chainId}:handoff`) ?? null)
           const [error, setError] = useState(null)
           const [query, setQuery] = useState('')
           const [hits, setHits] = useState(null)
+          const [searchError, setSearchError] = useState(null)
           const stamp = detail.chain?.updatedAt ?? ''
           const inline = DOCS.find(doc => doc.id === name)?.inline === true
           const search = () => {
             const words = query.trim()
+            setSearchError(null)
             if (words.length === 0) {
               setHits(null)
               return
             }
             call('relay/recall', { chainId, query: words })
               .then((value) => {
-                setError(null)
                 setHits({ total: value?.total ?? 0, matches: Array.isArray(value?.matches) ? value.matches : [] })
               })
-              .catch((failure) => { setError(messageOf(failure)) })
+              .catch((failure) => { setSearchError(messageOf(failure)) })
           }
           /** Open the document a search hit came from. */
           const openHit = (file) => {
-            const target = DOCS.find(doc => `${doc.id}.md` === String(file).toLowerCase())
+            const lower = String(file).toLowerCase()
+            if (lower === 'features.json') {
+              onSection('features')
+              return
+            }
+            if (lower === 'audit.jsonl') {
+              onSection('audit')
+              return
+            }
+            const target = DOCS.find(doc => `${doc.id}.md` === lower)
             if (target === undefined) return
             setHits(null)
             setName(target.id)
@@ -1557,7 +1587,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const results = hits === null ? null : (hits.matches.length === 0
             ? h('div', { className: 'relay-text' }, t('searchNone'))
             : h('ul', { className: 'relay-list' }, hits.matches.map((hit, index) => h('li', { key: `${hit.file}:${hit.line}:${index}`, className: 'relay-hit' },
-              h('button', { type: 'button', className: 'relay-hit-where', onClick: () => openHit(hit.file) }, `${hit.file}:${hit.line}`),
+              h('button', { type: 'button', className: 'relay-hit-where', onClick: () => openHit(hit.file) },
+                typeof hit.line === 'number' ? `${hit.file}:${hit.line}` : hit.file),
               h('span', { className: 'relay-hit-text' }, hit.text),
             ))))
           return h('section', { className: 'relay-card' },
@@ -1583,14 +1614,15 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
               h('button', { type: 'submit', className: 'relay-btn', disabled: query.trim().length === 0 }, t('search')),
               hits === null
                 ? null
-                : h('button', { type: 'button', className: 'relay-btn', onClick: () => { setHits(null); setQuery('') } }, t('searchClear')),
+                : h('button', { type: 'button', className: 'relay-btn', onClick: () => { setHits(null); setQuery(''); setSearchError(null) } }, t('searchClear')),
               hits === null ? null : h('span', { className: 'relay-tag' }, t('searchCount').replace('{n}', String(hits.total))),
             ),
+            searchError === null ? null : h('div', { className: 'relay-error', style: { margin: '0 0 8px' } }, `${t('search')}: ${searchError}`),
             hits === null && name === 'handoff' && openChain && freshness !== null && freshness.fresh === false
               ? h('div', { className: 'relay-blocker', style: { margin: '0 0 8px' } }, freshness.reason === 'missing' ? t('handoffMissing') : t('handoffStale'))
               : null,
             hits === null && !inline && fetched?.truncated === true ? h('div', { className: 'relay-text', style: { marginBottom: '6px' } }, t('docTruncated')) : null,
-            hits === null ? body : (error !== null ? h('div', { className: 'relay-error' }, `${t('failed')}: ${error}`) : results),
+            hits === null ? body : results,
             typeof detail.truthDir === 'string'
               ? h('div', { className: 'relay-doc-foot' },
                 h('span', {}, t('docLocation')),
@@ -1801,8 +1833,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 ),
               ),
               h('p', { className: 'relay-text' }, chain.objective),
-              typeof chain.lastError === 'string' && chain.lastError.length > 0
-                ? h('div', { className: 'relay-error' }, chain.lastError)
+              errorOf(chain) !== null
+                ? h('div', { className: 'relay-error' }, errorOf(chain))
                 : null,
               blocker === null
                 ? null
@@ -1876,7 +1908,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 },
               })
               : null,
-            section === 'docs' ? h(DocsCard, { chainId: chain.chainId, detail }) : null,
+            section === 'docs' ? h(DocsCard, { chainId: chain.chainId, detail, onSection: setSection }) : null,
             section === 'audit' ? h(AuditCard, { chainId: chain.chainId }) : null,
           )
         }
@@ -2465,12 +2497,12 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 action: { label: t('viewChain'), run: () => select(chain.chainId) },
               })
             }
-            if (typeof chain.lastError === 'string' && chain.lastError.length > 0) {
+            if (errorOf(chain) !== null) {
               attention.push({
                 key: `error:${chain.chainId}`,
                 tone: 'error',
                 kind: t('attnError'),
-                text: chain.lastError,
+                text: errorOf(chain),
                 meta: chain.title ?? '',
                 action: { label: t('viewChain'), run: () => select(chain.chainId) },
               })
