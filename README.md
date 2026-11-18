@@ -44,7 +44,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 
 **并行与续跑**：`relay_spawn` 把一部分功能交给子会话并行做；子会话上下文吃紧时，插件让它收尾并把未完成的功能交还链（清掉分配、写 PROGRESS），而不是只能压缩。父会话可以用 `relay_control(action="reclaim")` 随时收回。打开 `autoContinue` 后，链头空闲且没有 goal 驱动时会自动续跑下一个未委派的功能，超过 `maxAutoContinues` 记阻塞并暂停链。
 
-交接前会检查 `HANDOFF.md` 是否新鲜：没有 `relay:state` 块、或不是当前会话写的，就先收尾并给 `staleHandoffMinutes` 的宽限；仍不新鲜才交接，交接说明里会明确写"上一份已陈旧，以 PROGRESS / features / git 为准"。
+交接前会检查 `HANDOFF.md` 是否新鲜：没有 `relay:state` 块、或内容还是当前会话接手时的那一份（按内容比对，不看文件时间，所以切分支、拷贝工作区不会被当成重写），就先收尾并给 `staleHandoffMinutes` 的宽限；仍不新鲜才交接，交接说明里会明确写"上一份已陈旧，以 PROGRESS / features / git 为准"。
 
 ## 工具
 
