@@ -64,7 +64,12 @@ function chainSummary(chain, progress) {
     currentSessionId: chain.currentSessionId,
     currentRole: current?.role ?? null,
     sessions: chain.sessions.length,
+    createdAt: chain.createdAt ?? null,
     updatedAt: chain.updatedAt,
+    // Where the current session stands between "working" and "handed off".
+    wrapupAt: chain.wrapupAt ?? null,
+    readyAt: chain.readyAt ?? null,
+    handoffPending: chain.pendingHandoff !== null && chain.pendingHandoff !== undefined,
     lastError: chain.lastError,
     blocker: chain.blocker ?? null,
     pausedBy: chain.pausedBy ?? null,
@@ -1429,15 +1434,28 @@ export class RelayEngine {
       return {
         sessionId: session.sessionId,
         role: session.role,
+        index: session.index,
+        parentSessionId: session.parentSessionId ?? null,
+        joinedAt: session.joinedAt ?? null,
         running: live?.status === 'running',
         loaded: live !== undefined,
         retiredAt: session.retiredAt ?? null,
         retireReason: session.retireReason ?? null,
         compactions: stats?.compactions ?? session.compactions ?? 0,
+        peakRatio: Number(Math.max(stats?.peakRatio ?? 0, session.peakPressureRatio ?? 0).toFixed(3)),
         pressureRatio: live === undefined ? 0 : Number(this.pressure(live.session).ratio.toFixed(3)),
         goal: this.goalViewOf(live),
       }
     }
+    const brief = feature => ({
+      id: feature.id,
+      title: feature.title,
+      passes: feature.passes,
+      evidence: feature.evidence,
+      verify: feature.verify,
+      coverage: feature.coverage ?? null,
+      acceptedBy: feature.acceptedBy ?? null,
+    })
     const children = chain.sessions
       .filter(session => session.parentSessionId === sessionId)
       .map(session => {
@@ -1446,6 +1464,8 @@ export class RelayEngine {
           ...describe(session),
           features: owned.map(feature => feature.id),
           featuresPassed: owned.filter(feature => feature.passes).length,
+          // Titles and pass state, so the tab does not show bare ids.
+          featureList: owned.map(feature => ({ id: feature.id, title: feature.title, passes: feature.passes })),
         }
       })
     return {
@@ -1459,16 +1479,35 @@ export class RelayEngine {
       children,
       assignedFeatures: features
         .filter(feature => feature.assignedSessionId === sessionId)
-        .map(feature => ({
-          id: feature.id,
-          title: feature.title,
-          passes: feature.passes,
-          evidence: feature.evidence,
-          verify: feature.verify,
-          coverage: feature.coverage ?? null,
-          acceptedBy: feature.acceptedBy ?? null,
-        })),
+        .map(brief),
+      // Features nobody was delegated: the chain's main-line session works on these.
+      openFeatures: features
+        .filter(feature => typeof feature.assignedSessionId !== 'string' || feature.assignedSessionId.length === 0)
+        .map(brief),
     }
+  }
+
+  /**
+   * One truth-source document of a chain, for the panel's document reader.
+   * Long ledgers return their newest part: the tail is what a reader wants from
+   * an append-only file.
+   * @param {string} chainId - chain identity.
+   * @param {'handoff'|'progress'|'history'|'decisions'|'traps'} name - which document.
+   * @returns {{ name: string, text: string, truncated: boolean }} document text.
+   */
+  doc(chainId, name) {
+    if (!['handoff', 'progress', 'history', 'decisions', 'traps'].includes(name)) {
+      throw new RelayError(RELAY_CODES.invalid, `unknown document ${String(name)}`)
+    }
+    const { store } = this.findChain(chainId)
+    let text = ''
+    try {
+      text = readFileSync(store.paths(chainId)[name], 'utf8')
+    } catch {
+      /* a document that was never written reads as empty */
+    }
+    const limit = 16000
+    return { name, text: text.length > limit ? text.slice(-limit) : text, truncated: text.length > limit }
   }
 
   /**
