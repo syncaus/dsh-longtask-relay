@@ -100,6 +100,10 @@ window.__ModuleLoader__.load({
       decisionNone: '没有待处理的人工决策',
       questions: '个问题',
       decisionShort: '待决策',
+      goalTitle: '当前目标',
+      noGoal: '这个会话没有目标',
+      goalArmed: '自动继续',
+      goalDisarmed: '不自动继续',
     }
 
     const STRINGS_EN = {
@@ -181,6 +185,10 @@ window.__ModuleLoader__.load({
       decisionNone: 'No pending human decisions',
       questions: 'questions',
       decisionShort: 'decide',
+      goalTitle: 'Goal',
+      noGoal: 'This session has no goal',
+      goalArmed: 'armed',
+      goalDisarmed: 'not continuing',
     }
 
     const STATUS_LABELS = {
@@ -211,6 +219,21 @@ window.__ModuleLoader__.load({
       decision: '待决策',
     }
 
+    const GOAL_PHASE_LABELS = {
+      active: '进行中',
+      paused: '已暂停',
+      blocked: '被阻塞',
+      complete: '已完成',
+    }
+
+    /** Status classes reused by the goal pill. */
+    const GOAL_TONES = {
+      active: 'active',
+      paused: 'paused',
+      blocked: 'failed',
+      complete: 'done',
+    }
+
     /** Editable settings, grouped for the plugin page card. */
     const CONFIG_GROUPS = [
       {
@@ -231,6 +254,8 @@ window.__ModuleLoader__.load({
           { key: 'autoHandoff', kind: 'boolean', hint: '允许自动收尾与交接；关掉后只能手动操作' },
           { key: 'maxHandoffs', kind: 'int', min: 1, hint: '单条链的交接次数上限' },
           { key: 'pauseGoalOnRetire', kind: 'boolean', hint: '交接后暂停旧会话的 goal' },
+          { key: 'seedGoalOnHandoff', kind: 'boolean', hint: '交接后给新会话建一个 goal，让它按目标轮次自动继续；需要目标功能可用' },
+          { key: 'goalRoundsPerHandoff', kind: 'int', min: 1, hint: '给新会话 goal 分配的续轮上限' },
           { key: 'notifyOldSession', kind: 'boolean', hint: '交接后给旧会话留一条退役说明' },
           { key: 'truthDir', kind: 'text', hint: '真理源目录，相对工作区' },
           { key: 'agentPreset', kind: 'text', hint: '新会话使用的 preset；留空继承当前会话' },
@@ -778,6 +803,7 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
             case 'blocker.set': return `${BLOCKER_LABELS[detail.kind] ?? detail.kind ?? ''} · ${detail.action ?? ''}`
             case 'blocker.cleared': return 'cleared'
             case 'session.ready': return 'wrapped up'
+            case 'goal.seeded': return `${detail.rounds ?? '?'} rounds`
             case 'supervisor.decision': return `${detail.action} · ${detail.reason ?? detail.by ?? ''} · ${Math.round((detail.ratio ?? 0) * 100)}%`
             case 'handoff.started': return `${detail.from} → …`
             case 'handoff.completed': return `${detail.from} → ${detail.to}`
@@ -1039,6 +1065,9 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
         /** Session tab: the children this session delegated work to. */
         function ChildrenTab({ sessionId }) {
           const { view, error } = useSessionView(sessionId)
+          // Every hook runs before the early returns below: a render that
+          // gains a hook after the data arrives throws in React.
+          const decisions = usePendingDecisions()
           const open = id => { try { ctx.uiWorkspace.openSession(id) } catch { /* navigation unavailable */ } }
           const frame = (kpis, body) => h(TabShell, { kpis }, body)
           if (error !== null) return frame(null, h(TabEmpty, { title: t('failed'), body: error }))
@@ -1054,7 +1083,6 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
             { label: t('featuresLabel'), value: owned, tone: 'business' },
             { label: t('statDone'), value: passed, tone: 'success' },
           ]
-          const decisions = usePendingDecisions()
           const waiting = new Set(decisions.map(decision => decision.sessionId).filter(id => typeof id === 'string'))
           return frame(kpis,
             children.length === 0
@@ -1089,8 +1117,26 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
             { label: t('compactions'), value: self.compactions ?? 0, tone: 'warn' },
           ]
           const parent = view.parent
+          const goal = self.goal ?? null
+          const goalCard = h('section', { className: 'relay-card', style: { gridColumn: '1 / -1' } },
+            h(CardTitle, { sub: goal === null ? null : `${goal.roundsStarted ?? 0}/${goal.maxGoalRounds ?? 0}` }, t('goalTitle')),
+            goal === null
+              ? h('div', { className: 'relay-text' }, t('noGoal'))
+              : h('div', {},
+                h('span', { className: `relay-status is-${GOAL_TONES[goal.phase] ?? 'paused'}` },
+                  GOAL_PHASE_LABELS[goal.phase] ?? goal.phase),
+                h('span', { className: `relay-chip${goal.activation === 'armed' ? '' : ' is-warn'}`, style: { marginLeft: '6px' } },
+                  goal.activation === 'armed' ? t('goalArmed') : t('goalDisarmed')),
+                goal.blockedMessage === null || goal.blockedMessage === undefined
+                  ? null
+                  : h('div', { className: 'relay-text', style: { marginTop: '6px' } }, goal.blockedMessage),
+              ),
+          )
           if (parent === null) {
-            return frame(kpis, h(TabEmpty, { title: t('noParentTitle'), body: t('noParentBody') }))
+            return frame(kpis, h('div', { className: 'relay-task-grid' },
+              h(TabEmpty, { title: t('noParentTitle'), body: t('noParentBody') }),
+              goalCard,
+            ))
           }
           return frame(kpis, h('div', { className: 'relay-task-grid' },
             h('section', { className: 'relay-card' },
@@ -1112,6 +1158,7 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
                 ? h('div', { className: 'relay-text' }, t('none'))
                 : h('ul', { className: 'relay-rows' }, features.map(feature => h(FeatureRow, { key: feature.id, feature }))),
             ),
+            goalCard,
           ))
         }
 

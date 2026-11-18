@@ -53,7 +53,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 
 ## 面板
 
-侧栏「长任务接力」：链列表（状态、进度、当前会话） + 展开后的会话时间线、功能清单、交接说明，以及暂停 / 恢复 / 立即交接。
+侧栏「长任务接力」：链列表（状态、进度、当前会话） + 展开后的会话时间线、功能清单、交接说明，以及暂停 / 恢复 / 立即交接。会话里另有「下游」「我的任务」两个标签页：「下游」列出本会话派发的子会话；「我的任务」列出分配给本会话的功能，以及它当前的 goal 阶段、轮次和是否会自动继续。
 
 ## 配置
 
@@ -82,6 +82,8 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 | `wrapupTimeoutMinutes` | `10` | 收尾后空闲多久仍然强制交接 |
 | `agentPreset` | 空 | 新会话使用的 preset；空表示继承当前会话 |
 | `pauseGoalOnRetire` | `true` | 交接后暂停旧会话的 goal |
+| `seedGoalOnHandoff` | `false` | 交接后给新会话建一个 goal，让目标轮驱动继续跑；需要目标服务可用 |
+| `goalRoundsPerHandoff` | `16` | 给新会话 goal 分配的续轮上限 |
 | `notifyOldSession` | `true` | 交接后给旧会话留一条退役说明 |
 | `pauseOnExternalBlocker` | `true` | 遇到「只有人能解」的阻塞（`kind=external`）时暂停该链 |
 | `requireStrongEvidence` | `true` | 通过的功能是否必须带「像命令结果」的证据；输出是自由文本的项目可关掉 |
@@ -94,6 +96,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 - **`passes` 必须有可用证据**：`evidence` 里要出现命令、退出码或计数。`relay_finish` 会拒绝「通过但证据不足 8 个字符或缺数字」的条目；`relay_checkpoint` 在写入 `passes=true` 时先挡一道（`evidence_too_weak`）。
 - **数字不许手写**：真理源里的计数必须来自 `statusCheck` 的输出引用，否则下一棒会把过时数字当事实。
 - **阻塞分三类**：`external`（等人：账号、机器、只有 owner 能做的决定）、`code`（等自己修）、`decision`（等一个选择）。`external` 会暂停链并写下「谁要做哪件事才解开」，避免继续开新会话空转。
+- **与桌面端目标功能的关系**：目标（goal）管一个会话内的自动续轮，接力管换会话，两者串行互补。开启 `seedGoalOnHandoff` 后，交接会给新会话按链目标和当前进度建一个 goal，新会话由目标轮驱动继续，而不是跑完交接说明就停住。反过来，链头会话的 goal 进入 `blocked` 时（例如轮次耗尽），链会被记为 external 阻塞并暂停；在目标条里恢复或清除 goal 后，链的这条阻塞会自动解除。把 `pauseOnExternalBlocker` 关掉时只记录阻塞、继续交接，让新会话重新拿到轮次预算。
 - **发现新工作只能追加**：`relay_checkpoint` 的 `addFeatures` 需要 `reason`，追加动作会写进 `PROGRESS.md`，让「初始化时没想到」这件事留下痕迹。
 
 ## 已知限制
