@@ -15,6 +15,7 @@
 ├── features.json   任务清单，JSON（根部含 statusCheck / verifyFast / verifyFull）
 ├── PROGRESS.md     Done / In progress / Next / Errors / Notes
 ├── HANDOFF.md      给下一个会话的短交接（≤ 60 行，开头是 relay:state 状态块）
+├── history.md      交接历史：插件每次交接自动追加上一份 HANDOFF 全文
 ├── decisions.md    决策台账，追加式
 ├── traps.md        坑台账，追加式
 └── relay.json      插件维护的链元数据：会话列表、交接次数、状态、当前 blocker
@@ -63,10 +64,10 @@
 
 1. 会话空闲且上下文比例越过 `handoffRatio`（或压缩次数达到 `handoffAfterCompactions`）。
 2. 插件注入一条收尾指令：做完当前功能、重写 `PROGRESS.md`、跑一次验证、重写 `HANDOFF.md`，不要开始新功能。
-3. 收尾轮结束、会话再次空闲（或模型调用 `relay_checkpoint(ready=true)`）。
+3. 收尾轮结束、会话再次空闲（或模型调用 `relay_checkpoint(ready=true)`；`ready` 要求 `HANDOFF.md` 里已经有 `relay:state` 块，否则被拒绝，避免空交接）。
 4. 插件创建新会话：同一工作目录、同一 preset，命名成「任务 · 接力 N」，加入同一工作区。
 5. 投递交接说明：目标、链 id、交接序号、真理源绝对路径、当前进度、下一件事、热身步骤（读三份文件、跑验证）、以及「一次只做一个功能」的规则。开启 `seedGoalOnHandoff` 时，还会按链目标和当前进度给新会话建一个 goal，交给目标轮驱动继续。
-6. 旧会话收到退役说明，其 goal 被暂停，不再参与判定。
+6. 旧会话收到退役说明，其 goal 被暂停，不再参与判定。插件同时把旧会话写的 `HANDOFF.md` 全文追加到 `history.md`（带会话 id、交接原因、时间），所以更早的交接不会因为 `HANDOFF.md` 被覆盖而丢失；新会话用 `relay_recall` 按关键词检索这些历史，而不是全量读。
 
 链头会话的 goal 如果进入 `blocked`（例如轮次耗尽），插件把它记成 external 阻塞并暂停链；在目标条里恢复或清除 goal 后，这条阻塞会自动解除。`pauseOnExternalBlocker=false` 时只记录阻塞、继续交接，让新会话拿到新的轮次预算。
 

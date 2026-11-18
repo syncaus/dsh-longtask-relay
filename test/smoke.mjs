@@ -134,7 +134,7 @@ function fakeWorld({ goalService = true, ...overrides } = {}) {
     objective: 'engine objective',
     features: [{ id: 'F001', title: 'a', passes: false, verify: 'npm test' }],
   })
-  local.writeHandoff(chain.chainId, '# HANDOFF\n\nstart F001')
+  local.writeHandoff(chain.chainId, '# HANDOFF\n\n<!-- relay:state -->\n- step: start F001\n<!-- /relay:state -->\n')
 
   const calls = []
   const newSessionId = 'session-new'
@@ -294,6 +294,41 @@ await checkAsync('deleting an unknown chain is refused', async () => {
     () => world.engine.deleteChain('chain-missing'),
     error => error instanceof RelayError && error.code === RELAY_CODES.notFound,
   )
+})
+
+await checkAsync('a handoff appends the previous brief to history', async () => {
+  const world = fakeWorld()
+  world.setRatio(0.7)
+  await world.engine.evaluate(world.oldAgent)
+  world.engine.statsFor('session-old').ready = true
+  await world.engine.evaluate(world.oldAgent)
+  const history = world.local.readHistory(world.chain.chainId)
+  assert.match(history, /## Handoff #1/)
+  assert.ok(history.includes('start F001'), 'the previous brief was not copied into the history')
+  assert.ok(history.includes('session-old'), 'the history does not name the retiring session')
+})
+
+check('recall searches the chain ledgers', () => {
+  const world = fakeWorld()
+  world.local.appendLedger(world.chain.chainId, 'decisions', '- chose the clone site because the live one is the only baseline')
+  world.local.appendLedger(world.chain.chainId, 'traps', '- EOL CRLF broke the PowerShell script')
+  const result = world.engine.recall({ chainId: world.chain.chainId, query: 'crlf script' })
+  assert.equal(result.total, 1)
+  assert.equal(result.matches[0].file, 'traps.md')
+  assert.match(result.matches[0].text, /EOL CRLF/)
+  assert.equal(world.engine.recall({ chainId: world.chain.chainId, query: 'nonexistent' }).total, 0)
+  assert.equal(world.engine.recall({ chainId: world.chain.chainId, query: 'clone baseline' }).total, 1)
+})
+
+await checkAsync('ready is refused without a structured handoff brief', async () => {
+  const world = fakeWorld()
+  world.local.writeHandoff(world.chain.chainId, 'no structured block here')
+  const result = world.engine.checkpoint({ agent: world.oldAgent, ready: true })
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'handoff_missing')
+  const withBlock = fakeWorld()
+  const accepted = withBlock.engine.checkpoint({ agent: withBlock.oldAgent, ready: true })
+  assert.notEqual(accepted.ok, false, 'a structured brief must be accepted')
 })
 
 await checkAsync('below every threshold the engine does nothing', async () => {
@@ -622,6 +657,22 @@ await checkAsync('a code blocker does not pause the chain', async () => {
   })
   assert.equal(result.paused, false)
   assert.equal(result.blocker.who, 'model')
+})
+
+check('relay_recall forwards the query to the engine', () => {
+  const registered = new Map()
+  registerTools(
+    { tools: { register: definition => registered.set(definition.name, definition) } },
+    {
+      recall: input => ({ ok: true, total: 1, matches: [{ file: 'traps.md', line: 2, text: input.query }] }),
+    },
+  )
+  const definition = registered.get('relay_recall')
+  const exec = { agent: { session: { header: {} } } }
+  const result = definition.execute({ query: 'crlf script' }, exec)
+  assert.equal(result.ok, true)
+  assert.equal(result.matches[0].file, 'traps.md')
+  assert.equal(definition.execute({ query: '  ' }, exec).code, 'invalid_arguments')
 })
 
 check('relay_checkpoint refuses weak evidence and unexplained additions', () => {

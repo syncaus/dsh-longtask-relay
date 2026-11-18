@@ -23,6 +23,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 ├── features.json   任务清单（既有条目的 id/title 不可改；新工作只能追加）
 ├── PROGRESS.md     Done / In progress / Next / Errors / Notes
 ├── HANDOFF.md      给下一个会话的短交接（开头是 <!-- relay:state --> 状态块）
+├── history.md      交接历史：每次交接由插件自动追加上一份交接说明，可用 relay_recall 搜
 ├── decisions.md    决策台账（追加式：是什么 / 为什么 / 什么情况下算错）
 └── traps.md        坑台账（追加式：踩过又费时间的坑，带具体命令或语法）
 ```
@@ -39,7 +40,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 
 这三条命令和覆盖率取值都与技术栈无关：Rust 的 `cargo test`、Java 的 `mvn verify`、前端 `tsc --noEmit`、Python 的 `pytest -q` 都能当 `verifyFast`/`verifyFull`；输出被识别为证据的形态包括比例（`41/41`）、退出码（`exit 0`）、结论词（`ok`/`passed`/`BUILD SUCCESS`/`通过`）。
 
-之后每完成一个功能，模型调用 `relay_checkpoint` 记录进度。会话空闲且上下文比例越过阈值时，插件先发一条收尾指令（做完当前单元、写进度、跑验证），下一轮空闲创建新会话并投递交接说明；新会话从真理源重建上下文，而不是复制旧对话。
+之后每完成一个功能，模型调用 `relay_checkpoint` 记录进度。会话空闲且上下文比例越过阈值时，插件先发一条收尾指令（做完当前单元、写进度、跑验证），下一轮空闲创建新会话并投递交接说明；新会话从真理源重建上下文，而不是复制旧对话。每次交接，插件把上一份交接说明自动追加到 `history.md`，新会话可以用 `relay_recall` 检索更早的交接和台账，不必全量读文件。
 
 ## 工具
 
@@ -48,7 +49,10 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 | `relay_start` | 开始一条链，当前会话成为 initializer |
 | `relay_status` | 读出所有链的状态、进度、每个会话的上下文占用与压缩次数 |
 | `relay_checkpoint` | 更新功能状态 / 证据 / 覆盖率，追加发现的新功能，记录阻塞，标记 `ready` |
+| `relay_audit` | 读链的审计日志 |
+| `relay_recall` | 按关键词检索链内记忆（HANDOFF / history / PROGRESS / decisions / traps / features / audit） |
 | `relay_finish` | 结束链；功能没全部通过时会被拒绝并列出剩余项 |
+| `relay_spawn` | 把一部分功能交给新的子会话并行执行（仅链头会话可调用） |
 | `relay_control` | 暂停 / 恢复自动接力、立即交接，或删除已停止（paused / done / failed）的链 |
 
 ## 面板
