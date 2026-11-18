@@ -781,6 +781,14 @@ await checkAsync('sessionView rediscovers a chain after a reload', async () => {
   assert.equal(view.self.sessionId, 'session-parent')
 })
 
+await checkAsync('status reports the live pressure as a peak too', async () => {
+  const world = spawnWorld()
+  const [chain] = world.engine.status()
+  assert.equal(chain.sessionsDetail.length, 1)
+  assert.equal(chain.sessionsDetail[0].pressureRatio, 0.1)
+  assert.ok(chain.sessionsDetail[0].peakRatio >= 0.1, 'peakRatio ignored the loaded session\'s pressure')
+})
+
 await checkAsync('sessionView reports parent, children, and owned features', async () => {
   const world = spawnWorld()
   world.setGoal({ phase: 'active', activation: 'armed', roundsStarted: 2, maxGoalRounds: 16 })
