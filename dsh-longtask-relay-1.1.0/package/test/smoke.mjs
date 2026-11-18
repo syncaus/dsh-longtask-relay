@@ -437,6 +437,20 @@ await checkAsync('a handoff carries the permission preset to the successor', asy
   assert.deepEqual(record.detail, { sessionId: 'session-new', from: 'session-old', preset: 'danger-full-access' })
 })
 
+await checkAsync('the preset survives a second hop after the worker policy made it custom', async () => {
+  const world = fakeWorld()
+  const presets = withPresets(world, { 'session-old': 'read-only' })
+  await handOffOnce(world)
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.sessions.find(session => session.sessionId === 'session-new').permissionPreset, 'read-only')
+  // What `workerApproval` does to the successor: its bundle no longer matches a preset.
+  presets.current.set('session-new', 'custom')
+  const third = { id: 'session-third', session: { id: 'session-third' } }
+  const carried = world.engine.inheritPermission(chain, world.local, world.newAgent, third)
+  assert.equal(carried, 'read-only', 'the second hop fell back to the Host default preset')
+  assert.deepEqual(presets.switches.at(-1), { sessionId: 'session-third', preset: 'read-only' })
+})
+
 await checkAsync('a successor already on the same preset is not switched', async () => {
   const world = fakeWorld()
   const presets = withPresets(world, { 'session-old': 'workspace-write' })
@@ -742,6 +756,49 @@ await checkAsync('a human clears an external blocker from the panel', async () =
   assert.ok(kinds.includes('blocker.cleared:host'), 'the human action must be audited')
 })
 
+await checkAsync('clearing a blocker wakes the idle session up again', async () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  world.engine.checkpoint({ agent: world.oldAgent, blocker: { kind: 'external', action: 'open port 5985' } })
+  world.engine.clearChainTimers(world.local.readChain(chainId))
+  assert.equal(world.engine.timers.has('session-old'), false)
+  world.engine.clearBlocker({ chainId })
+  assert.equal(world.engine.timers.has('session-old'), true, 'nothing would evaluate the idle session after the blocker is cleared')
+  world.engine.clearChainTimers(world.local.readChain(chainId))
+})
+
+await checkAsync('clearing a blocker releases a pause the session reported itself', async () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  world.engine.checkpoint({
+    agent: world.oldAgent,
+    blocked: true,
+    note: 'need a decision on the queue',
+    blocker: { kind: 'decision', action: 'pick Redis Stream or RabbitMQ' },
+  })
+  const paused = world.local.readChain(chainId)
+  assert.equal(paused.status, 'paused')
+  assert.equal(paused.pausedBy, 'blocked')
+  const result = world.engine.clearBlocker({ chainId })
+  assert.equal(result.status, 'active', 'the chain stayed paused after its blocker was cleared')
+  const resumed = world.local.readChain(chainId)
+  assert.equal(resumed.pausedBy, null)
+  assert.equal(resumed.lastError, null)
+  world.engine.clearChainTimers(resumed)
+})
+
+await checkAsync('clearing the auto-continue limit grants a new budget', async () => {
+  const world = fakeWorld({ autoContinue: true, maxAutoContinues: 2 })
+  const chainId = world.chain.chainId
+  const stats = world.engine.statsFor('session-old')
+  stats.autoContinues = 2
+  world.engine.maybeAutoContinue(world.local.readChain(chainId), world.local, world.oldAgent, stats)
+  assert.match(world.local.readChain(chainId).blocker.action, /^auto-continue limit/)
+  world.engine.clearBlocker({ chainId })
+  assert.equal(stats.autoContinues, 0, 'the same blocker would be recorded again on the next idle')
+  world.engine.clearChainTimers(world.local.readChain(chainId))
+})
+
 await checkAsync('a goal-owned blocker cannot be cleared from the panel', async () => {
   const world = fakeWorld()
   const chainId = world.chain.chainId
@@ -1004,6 +1061,16 @@ await checkAsync('status reports the live pressure as a peak too', async () => {
   assert.equal(chain.sessionsDetail.length, 1)
   assert.equal(chain.sessionsDetail[0].pressureRatio, 0.1)
   assert.ok(chain.sessionsDetail[0].peakRatio >= 0.1, 'peakRatio ignored the loaded session\'s pressure')
+})
+
+await checkAsync('the list, the detail, and the session tab agree on a session peak', async () => {
+  const world = spawnWorld()
+  const [listed] = world.engine.status()
+  const detailed = world.engine.detail(world.chain.chainId).sessions[0]
+  const viewed = world.engine.sessionView('session-parent').self
+  assert.equal(listed.sessionsDetail[0].peakRatio, 0.1)
+  assert.equal(detailed.peakRatio, 0.1, 'the detail peak ignored the live reading')
+  assert.equal(viewed.peakRatio, 0.1, 'the session tab peak ignored the live reading')
 })
 
 await checkAsync('sessionView reports parent, children, and owned features', async () => {
