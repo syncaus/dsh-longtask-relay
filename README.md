@@ -60,6 +60,17 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 | `relay_spawn` | 把一部分功能交给新的子会话并行执行（仅链头会话可调用） |
 | `relay_control` | 暂停 / 恢复自动接力、立即交接，或收回某个 worker 的未完成功能（`reclaim`）；删除链只保留在面板 |
 
+## 斜杠命令
+
+| 命令 | 作用 |
+|---|---|
+| `/relay` | 列出各条链，并指出当前会话属于哪条 |
+| `/relay start <目标>` | 在当前会话开始一条链（等价于 `relay_start`） |
+| `/relay pause` / `/relay resume` | 暂停 / 恢复当前会话的链 |
+| `/relay handoff` | 立即交接一次；会话还在跑时会拒绝 |
+
+命令不经过模型，直接由 Host 执行。
+
 ## 面板
 
 三个页面是同一份数据的三个范围，互相可以跳转：

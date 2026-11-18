@@ -6,6 +6,7 @@
  * (client.js) adds the monitoring panel.
  */
 import { Config, resolveConfig } from './lib/config.js'
+import { handleRelayCommand } from './lib/command.js'
 import { RelayEngine } from './lib/engine.js'
 import { relaySessionProjection } from './lib/projection.js'
 import { RelayRemote, provideRelay } from './lib/remote.js'
@@ -68,6 +69,21 @@ export function apply(ctx, config) {
       engine.dispose()
     }
   }, 'longtask-relay lifecycle')
+
+  // `/relay` is the human entry point from the composer; the command itself
+  // never reaches the model, and stays optional so a composition without the
+  // command registry still runs.
+  ctx.inject(['commands'], (scope) => {
+    scope.effect(() => {
+      const dispose = scope.commands.register({
+        name: 'relay',
+        description: 'Start or inspect a long-task relay chain',
+        input: { hint: '[start <objective> | status | pause | resume | handoff]' },
+        handler: invocation => handleRelayCommand(engine, invocation),
+      })
+      return () => dispose()
+    }, 'longtask-relay command')
+  })
 
   // The panel needs per-session compaction counts on every list row; the
   // projection is optional so a composition without projections still runs.

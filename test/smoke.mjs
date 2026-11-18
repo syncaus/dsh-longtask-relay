@@ -10,6 +10,7 @@ import { ChainIndex, ChainStore, RELAY_CODES, RelayError } from '../lib/chain-st
 import { resolveConfig } from '../lib/config.js'
 import { RelayEngine } from '../lib/engine.js'
 import { ChainFingerprints } from '../lib/fingerprints.js'
+import { handleRelayCommand } from '../lib/command.js'
 import { sessionTitle } from '../lib/labels.js'
 import { renderHandoffPrompt, renderInitializerPrompt, renderWrapupPrompt, stateBlockLines } from '../lib/prompts.js'
 import { RelayRemote } from '../lib/remote.js'
@@ -2236,6 +2237,64 @@ check('headState survives a chain whose current session is not loaded', () => {
   const chain = world.local.readChain(world.chain.chainId)
   assert.deepEqual(world.engine.headState(chain), { goal: null, planMode: false, goalHeld: false, goalPausedByRelay: false })
   assert.equal(world.engine.detail(world.chain.chainId).head.planMode, false)
+})
+
+// --- the /relay command ---
+
+const commandInvocation = (agent, rawInput) => ({
+  agent,
+  rawInput,
+  attachments: [],
+  signal: new AbortController().signal,
+})
+
+await checkAsync('/relay status lists the chain this session belongs to', async () => {
+  const world = fakeWorld()
+  const result = await handleRelayCommand(world.engine, commandInvocation(world.oldAgent, ''))
+  assert.equal(result.kind, 'success')
+  assert.ok(result.text.includes(world.chain.chainId), 'status did not name the chain')
+  assert.match(result.text, /features/)
+})
+
+await checkAsync('/relay start begins a chain for a session without one', async () => {
+  const world = fakeWorld()
+  const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-command-'))
+  const outsider = {
+    id: 'session-command',
+    session: { id: 'session-command', header: { cwd: workspaceDir } },
+    status: 'idle',
+    inbox: { nextTurn: [], nextStep: [] },
+    followup() {},
+    inject() {},
+  }
+  const result = await handleRelayCommand(world.engine, commandInvocation(outsider, 'start ship the command'))
+  assert.equal(result.kind, 'success')
+  assert.ok(world.engine.locate(outsider.session) !== undefined, 'start did not register the chain')
+})
+
+await checkAsync('/relay pause and resume toggle the chain', async () => {
+  const world = fakeWorld()
+  const paused = await handleRelayCommand(world.engine, commandInvocation(world.oldAgent, 'pause'))
+  assert.equal(paused.kind, 'success')
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'paused')
+  const resumed = await handleRelayCommand(world.engine, commandInvocation(world.oldAgent, 'resume'))
+  assert.equal(resumed.kind, 'success')
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'active')
+})
+
+await checkAsync('/relay rejects an unknown sub-command', async () => {
+  const world = fakeWorld()
+  const result = await handleRelayCommand(world.engine, commandInvocation(world.oldAgent, 'explode'))
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /Unknown sub-command/)
+})
+
+await checkAsync('/relay handoff swaps the chain head', async () => {
+  const world = fakeWorld()
+  const result = await handleRelayCommand(world.engine, commandInvocation(world.oldAgent, 'handoff'))
+  assert.equal(result.kind, 'success')
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.currentSessionId, 'session-new')
 })
 
 rmSync(workspace, { recursive: true, force: true })
