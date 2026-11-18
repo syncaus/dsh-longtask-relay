@@ -100,7 +100,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "3c8716eb231aea0b52b1695d60355120fee3e745",
+            "commit": "cf39593bc2f4d72fb1f93167cff3b168e5612a85",
             "path": "dsh-longtask-relay-1.1.0/package"
           },
           "engines": {
