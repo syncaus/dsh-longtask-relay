@@ -81,8 +81,8 @@
         "zh": "长任务接力"
       },
       "description": {
-        "en": "Turn a long task into a session chain: the truth source lives in workspace files, and when context nears its limit the plugin wraps up, opens a fresh session, and hands the work over. A sidebar panel monitors every chain and session.",
-        "zh": "把长任务变成一条会话链：真理源落在工作区文件，上下文逼近上限时自动收尾、开新会话并交接，侧栏面板可监控每条链和每个会话。"
+        "en": "Turn a long task into a session chain: the truth source lives in workspace files, and when context nears its limit the plugin wraps up, opens a fresh session, and hands the work over. The new session keeps the permission preset, goal, and plan mode. The panel lists what needs a human, shows the relay track, features, and truth source, and can pause, hand off, clear a blocker, or finish a chain.",
+        "zh": "把长任务变成一条会话链：真理源落在工作区文件，上下文逼近上限时自动收尾、开新会话并交接，新会话沿用权限预设、目标和计划模式。面板集中列出需要人处理的事，可查看接力轨道、功能清单和真理源，并暂停、交接、解除阻塞或结束链。"
       },
       "icon": "https://raw.githubusercontent.com/syncaus/dsh-plugins/main/dsh-longtask-relay-1.1.0/package/icon.svg",
       "author": "syncaus",
@@ -94,6 +94,19 @@
         "keywords": ["relay", "handoff", "context", "long-running", "session"]
       },
       "versions": [
+        {
+          "version": "1.3.0",
+          "publishTimestamp": 1795004800,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/syncaus/dsh-plugins",
+            "commit": "fd2251d073ca03968fd39374d8f94be044826c1b",
+            "path": "dsh-longtask-relay-1.1.0/package"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.3"
+          }
+        },
         {
           "version": "1.1.0",
           "publishTimestamp": 1794979220,
