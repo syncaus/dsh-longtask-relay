@@ -5,7 +5,9 @@
  *
  * - `index.json`             — chain ids known in this directory
  * - `<chainId>/relay.json`   — plugin-owned chain metadata (sessions, status, counters)
- * - `<chainId>/features.json`— the task list; only `passes`, `evidence`, and `notes` may change
+ * - `<chainId>/features.json` — the task list; existing ids and titles are fixed, while
+ *   `passes`, `evidence`, `coverage`, `acceptedBy`, and `notes` may change; discovered work is
+ *   appended through `appendFeatures` with a reason
  * - `<chainId>/PROGRESS.md`  — Done / In progress / Next / Errors / Notes, rewritten every session
  * - `<chainId>/HANDOFF.md`   — the short brief the next session reads first
  *
@@ -13,7 +15,7 @@
  * crashed write from leaving a half-parsed truth source behind.
  */
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
@@ -44,6 +46,9 @@ const CHAIN_STATUSES = new Set(['initializing', 'active', 'paused', 'done', 'fai
 
 /** Session roles persisted in `relay.json`. */
 const SESSION_ROLES = new Set(['initializer', 'worker', 'reviewer', 'leader'])
+
+/** Tail window read from an oversized audit log; older lines stay on disk. */
+const AUDIT_TAIL_BYTES = 512 * 1024
 
 /**
  * Write UTF-8 text atomically.
@@ -108,10 +113,36 @@ function requireString(value, field) {
 }
 
 /**
+ * Accepted coverage values for one feature.
+ * `full` verifies the behaviour end to end; `partial` exercises only part of it
+ * (one branch, one platform, one viewport, one subcommand); `smoke` only proves it
+ * answers at all. Named for the depth of the check, so the values fit any project type.
+ */
+export const COVERAGES = new Set(['full', 'partial', 'smoke'])
+
+/**
+ * Coverage values written by earlier versions, mapped to the current names.
+ * Chains created before the rename must keep their honesty: a feature recorded as
+ * "error paths only" is partial coverage, never full.
+ */
+const LEGACY_COVERAGES = new Map([['error-path-only', 'partial']])
+
+/**
+ * Normalize one coverage value, accepting the current names and the legacy ones.
+ * @param {unknown} value - candidate value.
+ * @returns {string} a current coverage name.
+ */
+function normalizeCoverage(value) {
+  if (COVERAGES.has(value)) return value
+  const legacy = LEGACY_COVERAGES.get(value)
+  return legacy === undefined ? 'full' : legacy
+}
+
+/**
  * Normalize a feature list document, rejecting shapes the tools cannot trust.
  * Entries are preserved in order; unknown fields are dropped.
  * @param {unknown} document - parsed features.json.
- * @returns {{ version: 1, objective: string, features: Array<object> }} normalized document.
+ * @returns {{ version: 1, objective: string, statusCheck: string, verifyFast: string, verifyFull: string, features: Array<object> }} normalized document.
  */
 export function normalizeFeatures(document) {
   if (document === null || typeof document !== 'object') {
@@ -134,12 +165,20 @@ export function normalizeFeatures(document) {
       passes: entry.passes === true,
       evidence: typeof entry.evidence === 'string' ? entry.evidence : null,
       verify: typeof entry.verify === 'string' ? entry.verify : '',
+      coverage: normalizeCoverage(entry.coverage),
+      acceptedBy: typeof entry.acceptedBy === 'string' ? entry.acceptedBy : null,
+      // Session this feature is delegated to; null means the chain's own session.
+      assignedSessionId: typeof entry.assignedSessionId === 'string' ? entry.assignedSessionId : null,
       notes: typeof entry.notes === 'string' ? entry.notes : '',
     }
   })
   return {
     version: 1,
     objective: typeof document.objective === 'string' ? document.objective : '',
+    // The three project commands live at the document root so every feature can reuse them.
+    statusCheck: typeof document.statusCheck === 'string' ? document.statusCheck : '',
+    verifyFast: typeof document.verifyFast === 'string' ? document.verifyFast : '',
+    verifyFull: typeof document.verifyFull === 'string' ? document.verifyFull : '',
     features: normalized,
   }
 }
@@ -151,7 +190,14 @@ export function normalizeFeatures(document) {
  */
 export function featureProgress(document) {
   const pending = document.features.filter(feature => !feature.passes)
-  return { total: document.features.length, done: document.features.length - pending.length, pending }
+  // Partial coverage is work that passed but was not proven end to end.
+  const partial = document.features.filter(feature => feature.passes && feature.coverage !== 'full' && feature.acceptedBy !== 'human')
+  return {
+    total: document.features.length,
+    done: document.features.length - pending.length,
+    pending,
+    partial: partial.length,
+  }
 }
 
 /** Reject a chain record this version cannot read. */
@@ -201,6 +247,9 @@ export class ChainStore {
       features: join(dir, 'features.json'),
       progress: join(dir, 'PROGRESS.md'),
       handoff: join(dir, 'HANDOFF.md'),
+      decisions: join(dir, 'decisions.md'),
+      traps: join(dir, 'traps.md'),
+      audit: join(dir, 'audit.jsonl'),
     }
   }
 
@@ -320,10 +369,11 @@ export class ChainStore {
 
   /**
    * Change only the mutable fields of existing features.
-   * Adding, removing, or renaming an entry is refused, so a session cannot
-   * shrink the definition of done.
+   * Adding, removing, or renaming an entry is refused here, so a session cannot
+   * quietly shrink the definition of done; genuinely new work goes through
+   * `appendFeatures`, which records why the initializer missed it.
    * @param {string} chainId - chain identity.
-   * @param {Array<{ id: string, passes?: boolean, evidence?: string|null, notes?: string }>} updates - field patches.
+   * @param {Array<{ id: string, passes?: boolean, evidence?: string|null, notes?: string, coverage?: string, acceptedBy?: string|null }>} updates - field patches.
    * @returns {{ total: number, done: number, pending: Array<object> }} progress after the change.
    */
   patchFeatures(chainId, updates) {
@@ -333,13 +383,67 @@ export class ChainStore {
     for (const update of updates) {
       const feature = byId.get(update.id)
       if (feature === undefined) {
-        throw new RelayError(RELAY_CODES.invalid, `feature ${update.id} does not exist; entries cannot be added by a session`)
+        throw new RelayError(RELAY_CODES.invalid, `feature ${update.id} does not exist; use addFeatures to append new work`)
       }
       if (update.passes !== undefined) feature.passes = update.passes === true
       if (update.evidence !== undefined) feature.evidence = update.evidence === null ? null : String(update.evidence)
       if (update.notes !== undefined) feature.notes = String(update.notes)
+      if (update.coverage !== undefined) {
+        if (!COVERAGES.has(update.coverage)) {
+          throw new RelayError(RELAY_CODES.invalid, `coverage must be one of ${[...COVERAGES].join(', ')}`)
+        }
+        feature.coverage = update.coverage
+      }
+      if (update.acceptedBy !== undefined) {
+        feature.acceptedBy = update.acceptedBy === null ? null : String(update.acceptedBy)
+      }
+      if (update.assignedSessionId !== undefined) {
+        feature.assignedSessionId = update.assignedSessionId === null ? null : String(update.assignedSessionId)
+      }
     }
     return featureProgress(this.writeFeatures(chainId, document))
+  }
+
+  /**
+   * Append features the initializer did not know about.
+   * Appending is the only structural change a session may make: ids may never repeat,
+   * existing entries are never renamed or reordered, and the caller must say why the
+   * feature was missed, so the miss stays visible in the truth source.
+   * @param {string} chainId - chain identity.
+   * @param {Array<{ id: string, title: string, priority?: number, verify?: string, notes?: string }>} entries - new features.
+   * @param {string} reason - why these features were not in the initial list.
+   * @returns {{ appended: Array<string>, total: number, done: number, pending: Array<object> }} progress after the change.
+   */
+  appendFeatures(chainId, entries, reason) {
+    const document = this.readFeatures(chainId)
+    if (document === undefined) throw new RelayError(RELAY_CODES.notFound, `chain ${chainId} has no features.json`)
+    if (typeof reason !== 'string' || reason.trim().length === 0) {
+      throw new RelayError(RELAY_CODES.invalid, 'appending features needs a non-empty reason')
+    }
+    const known = new Set(document.features.map(feature => feature.id))
+    const appended = []
+    for (const entry of entries) {
+      const id = requireString(entry?.id, 'addFeatures[].id')
+      if (known.has(id)) throw new RelayError(RELAY_CODES.invalid, `feature ${id} already exists`)
+      known.add(id)
+      appended.push(id)
+      document.features.push({
+        id,
+        title: requireString(entry?.title, `addFeatures[${id}].title`),
+        priority: Number.isInteger(entry?.priority) ? entry.priority : document.features.length,
+        passes: false,
+        evidence: null,
+        verify: typeof entry?.verify === 'string' ? entry.verify : '',
+        coverage: normalizeCoverage(entry?.coverage),
+        acceptedBy: null,
+        assignedSessionId: null,
+        notes: typeof entry?.notes === 'string' ? entry.notes : '',
+      })
+    }
+    const progress = featureProgress(this.writeFeatures(chainId, document))
+    const stamp = new Date().toISOString()
+    this.writeProgress(chainId, `${this.readProgress(chainId).replace(/\s*$/, '\n')}- [${stamp}] added ${appended.join(', ')} — ${reason.trim()}\n`)
+    return { appended, ...progress }
   }
 
   /**
@@ -376,6 +480,101 @@ export class ChainStore {
    */
   writeHandoff(chainId, text) {
     writeAtomic(this.paths(chainId).handoff, String(text ?? ''))
+  }
+
+  /**
+   * Write one truth-source text file that the session owns (decisions, traps).
+   * @param {string} file - absolute path from `paths()`.
+   * @param {string} text - complete new content.
+   */
+  writeText(file, text) {
+    writeAtomic(file, String(text ?? ''))
+  }
+
+  /**
+   * Append one block to an append-only truth file, creating it when missing.
+   * @param {string} chainId - chain identity.
+   * @param {'decisions'|'traps'} kind - which ledger.
+   * @param {string} text - block text without the trailing newline.
+   * @returns {void}
+   */
+  appendLedger(chainId, kind, text) {
+    const file = this.paths(chainId)[kind]
+    if (typeof file !== 'string') throw new RelayError(RELAY_CODES.invalid, `unknown ledger ${String(kind)}`)
+    const body = text === undefined ? '' : String(text).trim()
+    if (body.length === 0) return
+    let current = ''
+    try {
+      current = readFileSync(file, 'utf8')
+    } catch {
+      current = `# ${kind === 'decisions' ? 'Decisions' : 'Traps'}\n`
+    }
+    writeAtomic(file, `${current.replace(/\s*$/, '\n\n')}${body}\n`)
+  }
+
+  /**
+   * Append one audit record.
+   * The log is append-only JSON Lines: one self-contained event per line, so a
+   * truncated tail cannot corrupt earlier history.
+   * @param {string} chainId - chain identity.
+   * @param {{ kind: string, actor?: string, detail?: object }} event - what happened.
+   * @returns {object} the written record, including its timestamp.
+   */
+  appendAudit(chainId, event) {
+    const record = {
+      at: new Date().toISOString(),
+      kind: requireString(event?.kind, 'audit.kind'),
+      ...(typeof event.actor === 'string' && event.actor.length > 0 ? { actor: event.actor } : {}),
+      ...(event.detail === undefined ? {} : { detail: event.detail }),
+    }
+    try {
+      appendFileSync(this.paths(chainId).audit, `${JSON.stringify(record)}\n`)
+    } catch (error) {
+      throw new RelayError(RELAY_CODES.io, `cannot append audit for ${chainId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return record
+  }
+
+  /**
+   * Read the newest audit records.
+   * A very large log is read from the tail only; an incomplete first line from
+   * that read is skipped rather than failing the whole call.
+   * @param {string} chainId - chain identity.
+   * @param {number} [limit] - newest records to return.
+   * @returns {Array<object>} records, oldest first within the returned window.
+   */
+  readAudit(chainId, limit = 100) {
+    const path = this.paths(chainId).audit
+    if (!existsSync(path)) return []
+    const take = Number.isInteger(limit) && limit > 0 ? limit : 100
+    let text
+    try {
+      const size = statSync(path).size
+      if (size <= AUDIT_TAIL_BYTES) {
+        text = readFileSync(path, 'utf8')
+      } else {
+        const fd = openSync(path, 'r')
+        try {
+          const buffer = Buffer.alloc(AUDIT_TAIL_BYTES)
+          readSync(fd, buffer, 0, AUDIT_TAIL_BYTES, size - AUDIT_TAIL_BYTES)
+          text = buffer.toString('utf8')
+        } finally {
+          closeSync(fd)
+        }
+      }
+    } catch (error) {
+      throw new RelayError(RELAY_CODES.io, `cannot read audit for ${chainId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    const records = []
+    for (const line of text.split('\n')) {
+      if (line.trim().length === 0) continue
+      try {
+        records.push(JSON.parse(line))
+      } catch {
+        /* a truncated head line from a tail read */
+      }
+    }
+    return records.slice(-take)
   }
 
   /**
@@ -470,7 +669,16 @@ export class ChainIndex {
  */
 export function skeletonTruth(objective) {
   return {
-    features: { version: 1, objective, features: [] },
+    features: {
+      version: 1,
+      objective,
+      statusCheck: '',
+      verifyFast: '',
+      verifyFull: '',
+      features: [],
+    },
+    decisions: '# Decisions\n\nAppend-only. One block per decision: what was decided, why, and what would make it wrong.\n',
+    traps: '# Traps\n\nAppend-only. One line per trap that cost real time; include the exact command or syntax that bit.\n',
     progress: [
       '# PROGRESS',
       '',

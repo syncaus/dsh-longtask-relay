@@ -12,8 +12,12 @@ export const DEFAULT_CONFIG = Object.freeze({
   truthDir: '.relay',
   /** Whether the supervisor may hand off on its own. */
   autoHandoff: true,
-  /** Pressure ratio the session is wrapped up at. Must stay below the compaction threshold. */
-  wrapupRatio: 0.55,
+  /**
+   * Pressure ratio the session is wrapped up at. Must stay below the compaction threshold.
+   * Long tasks lose the most work when a wrap-up starts after the session already spent its
+   * remaining budget inside one long read, so the default leaves half the window for the wrap-up.
+   */
+  wrapupRatio: 0.50,
   /** Pressure ratio that forces a handoff even if the session did not wrap up yet. */
   handoffRatio: 0.70,
   /** Successful compactions after which the floor ratio also triggers a wrapup. */
@@ -30,10 +34,33 @@ export const DEFAULT_CONFIG = Object.freeze({
   wrapupTimeoutMinutes: 10,
   /** Agent preset for the next session; empty inherits the creator's preset. */
   agentPreset: '',
+  /**
+   * Approval policy applied to sessions this plugin creates on its own
+   * (delegated workers and handoff successors). An unattended session's
+   * approval request has no timeout, so `ask` can park a chain forever;
+   * `never` fails closed instead and surfaces as a blocker.
+   */
+  workerApproval: 'never',
   /** Whether to pause an armed goal on the retired session. */
   pauseGoalOnRetire: true,
+  /**
+   * Whether a blocker of kind `external` pauses the chain.
+   * An external blocker means only a human can unblock it, so spending fresh sessions on
+   * handoffs makes the chain churn through its handoff budget without making progress.
+   */
+  pauseOnExternalBlocker: true,
   /** Whether to leave a retirement notice in the old session. */
   notifyOldSession: true,
+  /**
+   * Whether a passing feature must carry evidence that looks like a command result.
+   * Turn it off for projects whose verification prints free-form prose.
+   */
+  requireStrongEvidence: true,
+  /**
+   * Whether partial coverage must be accepted by a human before the chain can finish.
+   * Turn it off for projects where partial coverage is the normal outcome.
+   */
+  requireHumanAcceptedCoverage: true,
 })
 
 /**
@@ -77,7 +104,12 @@ function issueFor(name, value) {
     if (typeof value !== 'string') return 'agentPreset must be a string'
     return undefined
   }
-  if (name === 'autoHandoff' || name === 'pauseGoalOnRetire' || name === 'notifyOldSession') {
+  if (name === 'workerApproval') {
+    if (!['inherit', 'ask', 'never'].includes(value)) return 'workerApproval must be inherit, ask, or never'
+    return undefined
+  }
+  if (name === 'autoHandoff' || name === 'pauseGoalOnRetire' || name === 'pauseOnExternalBlocker'
+    || name === 'notifyOldSession' || name === 'requireStrongEvidence' || name === 'requireHumanAcceptedCoverage') {
     if (typeof value !== 'boolean') return `${name} must be a boolean`
     return undefined
   }

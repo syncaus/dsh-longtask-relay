@@ -12,10 +12,12 @@
 
 ```
 <workspace>/.relay/<chainId>/
-├── features.json   任务清单，JSON
+├── features.json   任务清单，JSON（根部含 statusCheck / verifyFast / verifyFull）
 ├── PROGRESS.md     Done / In progress / Next / Errors / Notes
-├── HANDOFF.md      给下一个会话的短交接（≤ 60 行）
-└── relay.json      插件维护的链元数据：会话列表、交接次数、状态
+├── HANDOFF.md      给下一个会话的短交接（≤ 60 行，开头是 relay:state 状态块）
+├── decisions.md    决策台账，追加式
+├── traps.md        坑台账，追加式
+└── relay.json      插件维护的链元数据：会话列表、交接次数、状态、当前 blocker
 ```
 
 `features.json` 的每条记录：
@@ -28,11 +30,34 @@
   "passes": false,
   "evidence": null,
   "verify": "pnpm test auth/redirect.spec.ts",
+  "coverage": "full",
+  "acceptedBy": null,
   "notes": ""
 }
 ```
 
-会话只能改 `passes`、`evidence`、`notes`；不能新增、删除或重命名条目——否则「完成」的定义会被会话自己改写。这条约束由 `relay_checkpoint` 强制执行，`relay_finish` 在还有未通过条目时直接拒绝。
+既有条目的 `id`、`title` 不可改，会话只能改 `passes`、`evidence`、`coverage`、`acceptedBy`、`notes`——否则「完成」的定义会被会话自己改写。这条约束由 `relay_checkpoint` 强制执行，`relay_finish` 在还有未通过条目、证据不足、或覆盖率偏低且没人确认时都会拒绝。
+
+**发现新工作时**用 `relay_checkpoint` 的 `addFeatures`（追加，附 `reason`）。初始清单再用心也一定会漏：子系统、依赖、环境限制往往做到一半才浮出来。追加会写进 `PROGRESS.md`，让「当初没想到」这件事留下痕迹，同时不允许借机删条目或改标题。
+
+### 三条项目级命令与两类台账
+
+- `statusCheck`：把真理源里的说法和代码对一遍。它是**反漂移闸门**——手工累加的计数迟早会和代码不一致，交接时被当成事实引用。
+- `verifyFast` / `verifyFull`：收尾跑前者，`relay_finish` 前跑后者。三条命令都来自项目自身，插件不假设语言或构建工具。
+- `decisions.md`：每一个会改变交付物的判断（跳过某项、接受一处差异、某个取舍）都记「是什么 / 为什么 / 什么情况下算错」。下个会话据此不再重开讨论，也不会好心把它「修」掉。
+- `traps.md`：踩过又费时间的坑，附确切命令或语法。同一类坑踩第二次的成本比写一条记录高得多。
+
+### 阻塞分三类
+
+| kind | 含义 | 插件行为 |
+|---|---|---|
+| `external` | 只有人能解（账号、机器、权限、只有 owner 能做的决定） | 链置为 `paused`，写下「谁、要做什么」，停止自动交接 |
+| `code` | 自己修 | 只记录，链继续 |
+| `decision` | 等一个选择 | 只记录，链继续 |
+
+覆盖率 `coverage` 同理与项目类型无关：`full` / `partial` / `smoke` 描述的是**验证的深度**，不是某种测试技术。API 里只验了拒绝分支、UI 里只验了一个视口、CLI 里只验了一个子命令，都属于 `partial`。
+
+外部阻塞如果不暂停，链会按压力继续开新会话，把交接预算烧在「换个会话再确认一次还是被挡住」上。
 
 ## 一次交接发生什么
 
@@ -49,7 +74,7 @@
 
 | 条件 | 动作 |
 |---|---|
-| 上下文比例 ≥ `wrapupRatio`（默认 0.55） | 只在压缩过之后才用来触发收尾 |
+| 上下文比例 ≥ `wrapupRatio`（默认 0.50） | 只在压缩过之后才用来触发收尾 |
 | 上下文比例 ≥ `handoffRatio`（默认 0.70） | 进入收尾 |
 | 成功压缩 ≥ `handoffAfterCompactions` 且比例 ≥ `compactedRatioFloor` | 进入收尾（压缩过说明吃紧过） |
 | 成功压缩 ≥ `hardCompactions`（默认 2） | 不等边界，直接交接 |

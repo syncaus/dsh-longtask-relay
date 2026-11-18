@@ -6,13 +6,37 @@
  * parameter names from the method signature, which is why every method here
  * takes plain identifiers and never a destructured object.
  */
+import { appendFileSync, mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { RelayError } from './chain-store.js'
+import { resolveConfig } from './config.js'
+
+/**
+ * Append one host-level audit record for an action that belongs to no chain.
+ * Failure is advisory: an audit gap must not block the action itself.
+ * @param {{ kind: string, actor?: string, detail?: object }} event - what happened.
+ */
+function appendHostAudit(event) {
+  const home = typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME.length > 0
+    ? process.env.DSH_HOME
+    : join(homedir(), '.dsh')
+  const file = join(home, 'longtask-relay', 'audit.jsonl')
+  try {
+    mkdirSync(dirname(file), { recursive: true })
+    appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`)
+  } catch {
+    /* the caller already succeeded; the log is best-effort */
+  }
+}
 
 /** Descriptor key the Gateway reads from the service prototype. */
 const REMOTE_METHOD_DESCRIPTOR = '@deepseek-ai/dsh-typert-protocol/remote-methods'
 
 /** Methods exposed to the browser. */
-const METHODS = ['listChains', 'chainDetail', 'setPaused', 'handoffNow', 'finishChain']
+const METHODS = [
+  'listChains', 'chainDetail', 'chainAudit', 'sessionView', 'setPaused', 'handoffNow', 'finishChain', 'getConfig', 'saveConfig',
+]
 
 /** Relay Remote over the engine. */
 export class RelayRemote {
@@ -38,6 +62,32 @@ export class RelayRemote {
       throw new RelayError('invalid', 'chainId is required')
     }
     return this.engine.detail(chainId)
+  }
+
+  /**
+   * One session's place in its chain: parent, children, and owned features.
+   * @param {string} sessionId - session to describe.
+   * @returns {object} view; `{ chain: null }` when the session is not in a chain.
+   */
+  sessionView(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throw new RelayError('invalid', 'sessionId is required')
+    }
+    return this.engine.sessionView(sessionId) ?? { chain: null }
+  }
+
+  /**
+   * Newest audit records for one chain.
+   * @param {string} chainId - chain identity.
+   * @param {number} limit - newest records to return.
+   * @returns {Array<object>} records.
+   */
+  chainAudit(chainId, limit) {
+    if (typeof chainId !== 'string' || chainId.length === 0) {
+      throw new RelayError('invalid', 'chainId is required')
+    }
+    const take = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 500) : 100
+    return this.engine.audit(chainId, take)
   }
 
   /**
@@ -80,6 +130,35 @@ export class RelayRemote {
       throw new RelayError('invalid', 'evidence is required')
     }
     return this.engine.finish({ chainId, evidence })
+  }
+
+  /** The running configuration plus whether this Host can persist a change. */
+  getConfig() {
+    return {
+      config: { ...this.engine.config },
+      editable: this.engine.ctx.get('configEditor') !== undefined,
+    }
+  }
+
+  /**
+   * Validate a full config object and persist it to the profile patch.
+   * The Loader reconciles the row, so the plugin reloads with the new values.
+   * @param {object} config - complete configuration.
+   * @returns {Promise<object>} the accepted configuration.
+   */
+  async saveConfig(config) {
+    const editor = this.engine.ctx.get('configEditor')
+    if (editor === undefined) {
+      throw new RelayError('invalid', 'this Host cannot edit profile configuration')
+    }
+    const entry = editor.entries().find(candidate => candidate.options.id === 'longtask-relay')
+    if (entry === undefined) {
+      throw new RelayError('notFound', 'the longtask-relay row is not a uniquely addressed profile entry')
+    }
+    const resolved = resolveConfig(config)
+    await editor.edit(entry, () => ({ ...resolved }))
+    appendHostAudit({ kind: 'config.saved', actor: 'host', detail: { config: resolved } })
+    return { config: resolved }
   }
 }
 

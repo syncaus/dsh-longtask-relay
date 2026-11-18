@@ -1,9 +1,9 @@
 {
   "name": "@local/longtask-relay",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "Long-task relay: keep one task moving across fresh sessions through a workspace truth source, with automatic handoff and a monitoring panel.",
+  "description": "Long-task relay: keep one task moving across fresh sessions through a workspace truth source (features + evidence + decisions + traps), with automatic handoff, blocker-aware pausing, and a monitoring panel.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -26,7 +26,7 @@
     },
     "client": {
       "platform": "web",
-      "immediately": false,
+      "immediately": true,
       "inject": [
         "@deepseek-ai/dsh-client-locale"
       ]
