@@ -631,6 +631,7 @@ export class RelayEngine {
             sessionsDetail: chain.sessions.map(session => {
               const live = this.ctx.get('agents')?.get(session.sessionId)
               const stats = this.stats.get(session.sessionId)
+              const pressure = live === undefined ? { ratio: 0 } : this.pressure(live.session)
               return {
                 sessionId: session.sessionId,
                 role: session.role,
@@ -639,8 +640,9 @@ export class RelayEngine {
                 loaded: live !== undefined,
                 retiredAt: session.retiredAt ?? null,
                 retireReason: session.retireReason ?? null,
-                compactions: stats?.compactions ?? 0,
-                peakRatio: Number((stats?.peakRatio ?? 0).toFixed(3)),
+                compactions: stats?.compactions ?? session.compactions ?? 0,
+                peakRatio: Number((stats?.peakRatio ?? session.peakPressureRatio ?? 0).toFixed(3)),
+                pressureRatio: Number(pressure.ratio.toFixed(3)),
               }
             }),
           })

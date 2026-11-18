@@ -701,7 +701,7 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
           const done = chain.featuresDone ?? 0
           const ratio = total === 0 ? 0 : done / total
           const sessions = Array.isArray(chain.sessionsDetail) ? chain.sessionsDetail : []
-          const peak = sessions.reduce((max, session) => Math.max(max, session.pressureRatio ?? 0), 0)
+          const peak = sessions.reduce((max, session) => Math.max(max, session.peakRatio ?? 0), 0)
           const folder = typeof chain.cwd === 'string'
             ? chain.cwd.split(/[\\/]/).filter(Boolean).pop() ?? chain.cwd
             : ''
@@ -1364,7 +1364,7 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
           const partial = chains.reduce((sum, chain) => sum + (chain.coveragePartial ?? 0), 0)
           const peak = chains.reduce((max, chain) => {
             const sessions = Array.isArray(chain.sessionsDetail) ? chain.sessionsDetail : []
-            return Math.max(max, ...sessions.map(session => session.pressureRatio ?? 0))
+            return Math.max(max, ...sessions.map(session => session.peakRatio ?? 0))
           }, 0)
           const peakPercent = Math.round(peak * 100)
           const kpis = [
