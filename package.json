@@ -1,9 +1,12 @@
 {
   "name": "@local/longtask-relay",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "description": "Long-task relay: keep one task moving across fresh sessions through a workspace truth source (features + evidence + decisions + traps), with automatic handoff, blocker-aware pausing, and a monitoring panel.",
+  "scripts": {
+    "test": "node test/smoke.mjs && node test/client-boot.mjs && node test/hooks-render.mjs"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

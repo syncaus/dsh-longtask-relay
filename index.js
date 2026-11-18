@@ -38,6 +38,8 @@ export function apply(ctx, config) {
     const offCreated = ctx.on('agent/created', ({ agent }) => {
       try {
         engine.locate(agent.session)
+        // A reload in the middle of a wrap-up re-attaches its deadline here.
+        engine.scheduleWrapupDeadline(agent)
       } catch (error) {
         engine.warn(`could not locate ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
       }
