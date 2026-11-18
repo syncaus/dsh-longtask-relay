@@ -68,6 +68,9 @@ function chainSummary(chain, progress) {
   }
 }
 
+/** Prefix that marks a blocker as owned by a blocked goal, not by the model. */
+const GOAL_BLOCKER_PREFIX = 'goal blocked:'
+
 /** Process-local per-session supervisor state. */
 function newStats() {
   return {
@@ -848,6 +851,29 @@ export class RelayEngine {
   }
 
   /**
+   * One session's goal, trimmed for the session tabs.
+   * @param {object|undefined} agent - live agent, or undefined when unloaded.
+   * @returns {object|null} goal summary, or null when the session has none.
+   */
+  goalViewOf(agent) {
+    if (agent === undefined) return null
+    try {
+      const view = this.ctx.get('goals')?.get?.(agent)
+      if (view === undefined) return null
+      return {
+        phase: view.phase,
+        activation: view.activation,
+        roundsStarted: view.roundsStarted,
+        maxGoalRounds: view.maxGoalRounds,
+        blockedCode: view.blockedReason?.code ?? null,
+        blockedMessage: view.blockedReason?.message ?? null,
+      }
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * One session's place in its chain, for the session-scoped tabs.
    * @param {string} sessionId - session to describe.
    * @returns {object|undefined} view, or undefined when the session is not in a chain.
@@ -889,6 +915,7 @@ export class RelayEngine {
         retireReason: session.retireReason ?? null,
         compactions: stats?.compactions ?? session.compactions ?? 0,
         pressureRatio: live === undefined ? 0 : Number(this.pressure(live.session).ratio.toFixed(3)),
+        goal: this.goalViewOf(live),
       }
     }
     const children = chain.sessions
@@ -949,15 +976,25 @@ export class RelayEngine {
    * @returns {Promise<void>} settles after any action.
    */
   async evaluate(agent) {
-    if (this.unloaded || !this.config.autoHandoff) return
+    if (this.unloaded) return
     if (agent.status !== 'idle') return
     if (this.busyAgents.has(agent.id)) return
     if (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) return
     const membership = this.locate(agent.session)
     if (membership === undefined) return
-    const { chain, store } = membership
+    const { store } = membership
+    let { chain } = membership
     if (chain.currentSessionId !== agent.id) return
+
+    // Goal state is synced before the handoff policy: a blocked goal means the
+    // session will not continue on its own, and that must reach the chain even
+    // when automatic handoff is off. The record may have just been rewritten.
+    if (this.syncGoalBlocker(chain, store, agent)) return
+    const refreshed = store.readChain(chain.chainId)
+    if (refreshed === undefined) return
+    chain = refreshed
     if (chain.status !== 'active' && chain.status !== 'initializing') return
+    if (!this.config.autoHandoff) return
 
     const stats = this.statsFor(agent.id)
     const now = Date.now()
@@ -1106,6 +1143,10 @@ export class RelayEngine {
         content: [{ type: 'text', text: prompt }],
       }, AbortSignal.timeout(60_000))
 
+      // Only after the handoff brief is queued: a failed prompt must retry
+      // cleanly, and a pre-created goal would then be an orphan on that session.
+      this.seedGoal(chain, store, newAgent)
+
       const retiredAt = new Date().toISOString()
       store.update(chain.chainId, record => {
         const previous = record.sessions.find(entry => entry.sessionId === oldAgent.session.id)
@@ -1197,6 +1238,82 @@ export class RelayEngine {
     } catch {
       return undefined
     }
+  }
+
+  /**
+   * Give the handoff successor a goal so the goal-round driver keeps it moving.
+   * The goal is per-session, so the objective carries the progress the successor
+   * would otherwise have to rediscover.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object|undefined} agent - the created successor session.
+   * @returns {void}
+   */
+  seedGoal(chain, store, agent) {
+    if (!this.config.seedGoalOnHandoff || agent === undefined) return
+    const goals = this.ctx.get('goals')
+    if (goals === undefined || typeof goals.create !== 'function') {
+      this.warn('seedGoalOnHandoff is on but the goals service is unavailable; the successor has no goal')
+      return
+    }
+    const document = store.readFeatures(chain.chainId)
+    const progress = document === undefined ? { total: 0, done: 0 } : featureProgress(document)
+    const objective = `${chain.objective} — relay chain ${chain.chainId}, ${progress.done}/${progress.total} features pass. Truth source: ${join(store.truthDir, chain.chainId)}.`
+    let view
+    try {
+      view = goals.create(agent, { objective, maxGoalRounds: this.config.goalRoundsPerHandoff })
+    } catch (error) {
+      this.warn(`could not seed a goal on ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    this.record(store, chain.chainId, {
+      kind: 'goal.seeded',
+      actor: 'system',
+      detail: { goalId: view?.id ?? null, rounds: view?.maxGoalRounds ?? this.config.goalRoundsPerHandoff },
+    })
+  }
+
+  /**
+   * Keep the chain honest about a blocked goal.
+   * A blocked goal stops automatic continuation, so an active chain would sit
+   * still while the panel claims it is running. The blocker is tagged so that
+   * resuming or clearing the goal releases the chain again.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object} agent - the chain's current session.
+   * @returns {boolean} true when a blocked goal stops this evaluation.
+   */
+  syncGoalBlocker(chain, store, agent) {
+    const goals = this.ctx.get('goals')
+    if (goals === undefined || typeof goals.get !== 'function') return false
+    let view
+    try {
+      view = goals.get(agent)
+    } catch (error) {
+      this.warn(`could not read the goal of ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+    const existing = chain.blocker
+    const goalOwned = existing !== null && existing !== undefined
+      && existing.kind === 'external'
+      && typeof existing.action === 'string'
+      && existing.action.startsWith(GOAL_BLOCKER_PREFIX)
+    if (view === undefined || view.phase !== 'blocked') {
+      if (goalOwned) this.recordBlocker(store, chain.chainId, null)
+      return false
+    }
+    const reason = view.blockedReason?.message ?? 'no explanation recorded'
+    const action = `${GOAL_BLOCKER_PREFIX} ${reason} Resume or clear the goal in the composer, then resume this chain.`
+    if (goalOwned && existing.action === action) return this.config.pauseOnExternalBlocker
+    this.record(store, chain.chainId, {
+      kind: 'supervisor.decision',
+      actor: 'system',
+      detail: { action: 'pause', reason: 'goal-blocked', goalId: view.id, code: view.blockedReason?.code ?? null },
+    })
+    this.recordBlocker(store, chain.chainId, { kind: 'external', who: 'human', action })
+    // With pauses disabled for external blockers the chain keeps handing off,
+    // which is how a successor gets a fresh goal-round budget.
+    return this.config.pauseOnExternalBlocker
   }
 
   /** Stop the retired session from continuing on its own. */

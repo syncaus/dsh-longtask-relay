@@ -116,7 +116,7 @@ check('the chain index remembers a chain across lifetimes', () => {
 })
 
 /** Build a fake agent and the services the engine reads. */
-function fakeWorld(overrides = {}) {
+function fakeWorld({ goalService = true, ...overrides } = {}) {
   const config = resolveConfig({
     cooldownMs: 0,
     wrapupRatio: 0.5,
@@ -154,6 +154,7 @@ function fakeWorld(overrides = {}) {
     inject() {},
   }
   let ratio = 0.2
+  let goal
   const services = {
     tokenMeter: {
       contextPressure: () => ({ pressureTokens: Math.round(ratio * 1000), contextWindow: 1000 }),
@@ -172,6 +173,26 @@ function fakeWorld(overrides = {}) {
       },
     },
   }
+  if (goalService) {
+    services.goals = {
+      create(agent, request) {
+        calls.push({ kind: 'goal-create', agentId: agent.id, objective: request.objective, maxGoalRounds: request.maxGoalRounds })
+        goal = {
+          id: 'goal-seeded',
+          revision: 1,
+          phase: 'active',
+          activation: 'armed',
+          objective: request.objective,
+          maxGoalRounds: request.maxGoalRounds,
+          roundsStarted: 0,
+        }
+        return goal
+      },
+      get() {
+        return goal
+      },
+    }
+  }
   const ctx = {
     logger: { warn: () => {} },
     get: name => services[name],
@@ -185,7 +206,7 @@ function fakeWorld(overrides = {}) {
   })
   engine.members.set('session-old', { chainId: chain.chainId, truthDir: local.truthDir })
   engine.remember(local.readChain(chain.chainId), local)
-  return { engine, calls, oldAgent, newAgent, local, chain, setRatio: value => { ratio = value } }
+  return { engine, calls, oldAgent, newAgent, local, chain, setRatio: value => { ratio = value }, setGoal: value => { goal = value } }
 }
 
 await checkAsync('below every threshold the engine does nothing', async () => {
@@ -221,6 +242,105 @@ await checkAsync('a ready session hands off and creates the next session', async
   assert.equal(chain.handoffCount, 1)
   assert.equal(chain.sessions.find(s => s.sessionId === 'session-old').retireReason, 'checkpoint')
   assert.ok(world.calls.some(call => call.kind === 'inject' && /<relay_retired>/.test(call.text)))
+})
+
+await checkAsync('a handoff seeds a goal on the successor when configured', async () => {
+  const world = fakeWorld({ seedGoalOnHandoff: true, goalRoundsPerHandoff: 9 })
+  world.setRatio(0.7)
+  await world.engine.evaluate(world.oldAgent)
+  world.engine.statsFor('session-old').ready = true
+  await world.engine.evaluate(world.oldAgent)
+  const seeded = world.calls.find(call => call.kind === 'goal-create')
+  assert.ok(seeded !== undefined, 'no goal was created on the successor')
+  assert.equal(seeded.agentId, 'session-new')
+  assert.equal(seeded.maxGoalRounds, 9)
+  assert.match(seeded.objective, /engine objective/)
+  assert.match(seeded.objective, /0\/1 features pass/)
+  assert.ok(world.local.readAudit(world.chain.chainId, 50).some(record => record.kind === 'goal.seeded'))
+})
+
+await checkAsync('the successor gets no goal by default', async () => {
+  const world = fakeWorld()
+  world.setRatio(0.7)
+  await world.engine.evaluate(world.oldAgent)
+  world.engine.statsFor('session-old').ready = true
+  await world.engine.evaluate(world.oldAgent)
+  assert.ok(!world.calls.some(call => call.kind === 'goal-create'))
+})
+
+await checkAsync('a blocked goal pauses the chain and is recorded once', async () => {
+  const world = fakeWorld({ seedGoalOnHandoff: true })
+  world.setGoal({
+    id: 'goal-1',
+    revision: 1,
+    phase: 'blocked',
+    activation: 'disarmed',
+    objective: 'engine objective',
+    maxGoalRounds: 16,
+    roundsStarted: 16,
+    blockedReason: { code: 'round-limit', message: 'round cap reached' },
+  })
+  await world.engine.evaluate(world.oldAgent)
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.status, 'paused')
+  assert.equal(chain.blocker.kind, 'external')
+  assert.match(chain.blocker.action, /round cap reached/)
+  const progress = world.local.readProgress(world.chain.chainId)
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.local.readProgress(world.chain.chainId), progress, 'the blocker was recorded twice')
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0, 'a blocked goal must not hand off')
+})
+
+await checkAsync('resuming the goal releases the chain blocker', async () => {
+  const world = fakeWorld()
+  const blocked = {
+    id: 'goal-1',
+    revision: 1,
+    phase: 'blocked',
+    activation: 'disarmed',
+    objective: 'engine objective',
+    maxGoalRounds: 16,
+    roundsStarted: 16,
+    blockedReason: { code: 'round-limit', message: 'round cap reached' },
+  }
+  world.setGoal(blocked)
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'paused')
+  world.setGoal({ ...blocked, phase: 'active', activation: 'armed', blockedReason: undefined })
+  await world.engine.evaluate(world.oldAgent)
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.blocker, null)
+  assert.equal(chain.status, 'active')
+})
+
+await checkAsync('pauseOnExternalBlocker=false keeps handing off past a blocked goal', async () => {
+  const world = fakeWorld({ pauseOnExternalBlocker: false })
+  world.setGoal({
+    id: 'goal-1',
+    revision: 1,
+    phase: 'blocked',
+    activation: 'disarmed',
+    objective: 'engine objective',
+    maxGoalRounds: 16,
+    roundsStarted: 16,
+    blockedReason: { code: 'round-limit', message: 'round cap reached' },
+  })
+  world.setRatio(0.7)
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.local.readChain(world.chain.chainId).blocker.kind, 'external')
+  assert.equal(world.calls.filter(call => /<relay_wrapup>/.test(call.text ?? '')).length, 1)
+  // The same blocked goal must not stop the succeeding handoff either.
+  world.engine.statsFor('session-old').ready = true
+  await world.engine.evaluate(world.oldAgent)
+  assert.ok(world.calls.some(call => call.kind === 'create'), 'the chain must keep handing off')
+})
+
+check('a host without a goals service is left alone', () => {
+  const world = fakeWorld({ goalService: false })
+  assert.equal(
+    world.engine.syncGoalBlocker(world.local.readChain(world.chain.chainId), world.local, world.oldAgent),
+    false,
+  )
 })
 
 await checkAsync('two compactions force a handoff without a wrap-up', async () => {
@@ -521,8 +641,10 @@ function spawnWorld() {
   const parent = makeAgent('session-parent')
   const child = makeAgent('session-child')
   const calls = []
+  let goal
   const services = {
     agents: { get: id => (id === 'session-parent' ? parent : id === 'session-child' ? child : undefined) },
+    goals: { get: agent => (agent.id === 'session-parent' ? goal : undefined) },
     sessionController: {
       async create() { return { sessionId: 'session-child' } },
       async prompt(request) {
@@ -540,7 +662,7 @@ function spawnWorld() {
   const engine = new RelayEngine(ctx, config, { chainIndex: new ChainIndex(indexHome) })
   engine.members.set('session-parent', { chainId: chain.chainId, truthDir: local.truthDir })
   engine.remember(local.readChain(chain.chainId), local)
-  return { engine, local, chain, parent, child, calls }
+  return { engine, local, chain, parent, child, calls, setGoal: value => { goal = value } }
 }
 
 await checkAsync('spawn delegates features to a child session', async () => {
@@ -593,6 +715,7 @@ await checkAsync('spawn refuses a session that is not the chain head', async () 
 
 await checkAsync('sessionView reports parent, children, and owned features', async () => {
   const world = spawnWorld()
+  world.setGoal({ phase: 'active', activation: 'armed', roundsStarted: 2, maxGoalRounds: 16 })
   await world.engine.spawn({ agent: world.parent, features: ['F002'] })
   const parentView = world.engine.sessionView('session-parent')
   assert.equal(parentView.chain.chainId, world.chain.chainId)
@@ -600,10 +723,19 @@ await checkAsync('sessionView reports parent, children, and owned features', asy
   assert.equal(parentView.children.length, 1)
   assert.equal(parentView.children[0].sessionId, 'session-child')
   assert.deepEqual(parentView.children[0].features, ['F002'])
+  assert.deepEqual(parentView.self.goal, {
+    phase: 'active',
+    activation: 'armed',
+    roundsStarted: 2,
+    maxGoalRounds: 16,
+    blockedCode: null,
+    blockedMessage: null,
+  })
   const childView = world.engine.sessionView('session-child')
   assert.equal(childView.parent.sessionId, 'session-parent')
   assert.equal(childView.children.length, 0)
   assert.deepEqual(childView.assignedFeatures.map(feature => feature.id), ['F002'])
+  assert.equal(childView.self.goal, null)
   assert.equal(world.engine.sessionView('session-unknown'), undefined)
 })
 

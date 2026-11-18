@@ -484,6 +484,8 @@ subagent 的路由、目录、命名都服务于「委派」语义，用户无�
     requireCleanGit: false      # true 时交接前检查 git 是否干净
     notifyOldSession: true      # 旧会话注入「已交接给 X」
     pauseGoalOnRetire: true     # 旧会话有 armed goal 时 pause
+    seedGoalOnHandoff: false    # 新会话按链目标建 goal，交给目标轮驱动
+    goalRoundsPerHandoff: 16    # 给新会话 goal 的续轮上限
 ```
 
 ---
@@ -503,6 +505,7 @@ subagent 的路由、目录、命名都服务于「委派」语义，用户无�
 | 无限接力烧钱 | 本地推演 | `maxHandoffs`；每次交接在链文件留审计记录 |
 | 冷会话读不到压力 | DSH 实现 | 面板对未加载会话显示「未加载」，不重放全日志 |
 | 旧会话的 goal 继续自动跑 | DSH goal-round-driver | 交接后 `ctx.goals.pause(agent, ref)`；旧会话标记 retired 后不参与判定 |
+| 目标阻塞后链仍显示「进行中」 | DSH goal | 判 idle 时读链头 goal；`blocked` 记 external 阻塞并暂停链（`pauseOnExternalBlocker=false` 时只记录、继续交接），goal 恢复后这条阻塞自动解除 |
 | 面板组件崩溃导致空面板 | DSH UI 约束 | 错误边界 + 空态文案 |
 
 ---

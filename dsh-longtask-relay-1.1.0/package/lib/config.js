@@ -44,6 +44,15 @@ export const DEFAULT_CONFIG = Object.freeze({
   /** Whether to pause an armed goal on the retired session. */
   pauseGoalOnRetire: true,
   /**
+   * Whether the handoff successor gets a goal of its own.
+   * A goal keeps the DSH goal-round driver continuing the session between turns;
+   * without one the successor runs the handoff prompt and then stops, which
+   * leaves an unattended chain idle until a human writes again.
+   */
+  seedGoalOnHandoff: false,
+  /** Goal-round cap given to a seeded goal. */
+  goalRoundsPerHandoff: 16,
+  /**
    * Whether a blocker of kind `external` pauses the chain.
    * An external blocker means only a human can unblock it, so spending fresh sessions on
    * handoffs makes the chain churn through its handoff budget without making progress.
@@ -79,7 +88,7 @@ function issueFor(name, value) {
     }
     return undefined
   }
-  if (name === 'handoffAfterCompactions' || name === 'hardCompactions') {
+  if (name === 'handoffAfterCompactions' || name === 'hardCompactions' || name === 'goalRoundsPerHandoff') {
     if (!Number.isInteger(value) || value < 1) return `${name} must be an integer of at least 1`
     return undefined
   }
@@ -109,7 +118,8 @@ function issueFor(name, value) {
     return undefined
   }
   if (name === 'autoHandoff' || name === 'pauseGoalOnRetire' || name === 'pauseOnExternalBlocker'
-    || name === 'notifyOldSession' || name === 'requireStrongEvidence' || name === 'requireHumanAcceptedCoverage') {
+    || name === 'notifyOldSession' || name === 'requireStrongEvidence' || name === 'requireHumanAcceptedCoverage'
+    || name === 'seedGoalOnHandoff') {
     if (typeof value !== 'boolean') return `${name} must be a boolean`
     return undefined
   }
