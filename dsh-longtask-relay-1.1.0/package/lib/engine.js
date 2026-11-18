@@ -7,11 +7,15 @@
  * rebuilds the same picture from the files on disk.
  */
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { ChainIndex, ChainStore, RELAY_CODES, RelayError, featureProgress, skeletonTruth } from './chain-store.js'
+import { readFileSync, statSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { ChainIndex, ChainStore, RELAY_CODES, RelayError, featureProgress, isChainId, skeletonTruth } from './chain-store.js'
+import { ChainFingerprints } from './fingerprints.js'
+import { evidenceIssue } from './evidence.js'
+import { sessionTitle } from './labels.js'
 import {
-  renderDelegationPrompt, renderHandoffPrompt, renderInitializerPrompt, renderRetireNotice, renderWrapupPrompt,
+  renderContinuePrompt, renderDelegationPrompt, renderHandoffPrompt, renderInitializerPrompt,
+  renderReclaimNotice, renderRetireNotice, renderWorkerWrapupPrompt, renderWrapupPrompt,
 } from './prompts.js'
 
 /** Freeze one value and everything below it. */
@@ -63,6 +67,7 @@ function chainSummary(chain, progress) {
     updatedAt: chain.updatedAt,
     lastError: chain.lastError,
     blocker: chain.blocker ?? null,
+    pausedBy: chain.pausedBy ?? null,
     // How much of the finished work is actually proven: a feature that only reached its
     // error paths still counts as done, but the panel and status must show the gap.
     coveragePartial: progress?.partial ?? 0,
@@ -81,6 +86,10 @@ function newStats() {
     peakRatio: 0,
     ready: false,
     blocked: false,
+    /** Automatic continuations sent to this session. */
+    autoContinues: 0,
+    /** When the last automatic continuation was sent. */
+    lastContinueAt: 0,
     /** Whether the durable compaction count was read into this counter. */
     hydrated: false,
   }
@@ -104,10 +113,18 @@ export class RelayEngine {
     this.stats = new Map()
     /** Sessions currently inside `evaluate`. @type {Set<string>} */
     this.busyAgents = new Set()
+    /** Pending re-evaluations keyed by session id. @type {Map<string, { handle: object, due: number }>} */
+    this.timers = new Map()
+    /** Sessions already known not to belong to any chain, so locate skips the scan. @type {Set<string>} */
+    this.misses = new Set()
+    /** Last `status()` payload and the file signature it was built from. */
+    this.statusCache = null
     /** Chains currently handing off. @type {Set<string>} */
     this.busyChains = new Set()
     /** Cross-lifetime chain index. */
     this.chainIndex = options.chainIndex ?? ChainIndex.default()
+    /** Host-level frozen feature lists. */
+    this.fingerprints = options.fingerprints ?? ChainFingerprints.default()
     this.unloaded = false
   }
 
@@ -178,6 +195,7 @@ export class RelayEngine {
    * @returns {{ chain: object, store: ChainStore }|undefined} membership.
    */
   locate(session) {
+    if (this.misses.has(session.id)) return undefined
     const known = this.members.get(session.id)
     if (known !== undefined) {
       const store = this.storeFor(known.truthDir)
@@ -209,8 +227,10 @@ export class RelayEngine {
       }
       if (chain === undefined) continue
       if (chain.sessions.some(entry => entry.sessionId === session.id)) {
-        this.remember(chain, store)
-        return { chain, store }
+        const normalized = this.normalizeLocation(chain, store)
+        this.remember(normalized, store)
+        this.misses.delete(session.id)
+        return { chain: normalized, store }
       }
     }
     // A chain may live in a different directory than the session that works on
@@ -222,13 +242,16 @@ export class RelayEngine {
         const indexed = this.storeFor(entry.truthDir)
         const chain = indexed.readChain(entry.chainId)
         if (chain !== undefined && chain.sessions.some(joined => joined.sessionId === session.id)) {
-          this.members.set(session.id, { chainId: chain.chainId, truthDir: indexed.truthDir })
-          return { chain, store: indexed }
+          const normalized = this.normalizeLocation(chain, indexed)
+          this.members.set(session.id, { chainId: normalized.chainId, truthDir: indexed.truthDir })
+          this.misses.delete(session.id)
+          return { chain: normalized, store: indexed }
         }
       }
     } catch (error) {
       this.warn(`cannot scan the chain index for ${session.id}: ${error instanceof Error ? error.message : String(error)}`)
     }
+    this.misses.add(session.id)
     return undefined
   }
 
@@ -240,6 +263,148 @@ export class RelayEngine {
     } catch (error) {
       this.warn(`cannot record chain ${chain.chainId} in the index: ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  /**
+   * Freeze the feature list the first time it is accepted.
+   * Before this point the chain stays `initializing` and the initializer may
+   * still edit freely; afterwards ids and titles are fixed.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {string} [actor] - session that triggered the freeze.
+   * @returns {boolean} whether this call froze the list.
+   */
+  freezeFeatures(chain, store, actor) {
+    const document = store.readFeatures(chain.chainId)
+    if (document === undefined || document.features.length === 0) return false
+    const snapshot = document.features.map(feature => ({ id: feature.id, title: feature.title }))
+    if (this.fingerprints.get(chain.chainId) !== undefined) return false
+    this.fingerprints.set(chain.chainId, snapshot)
+    if (chain.status === 'initializing') {
+      store.update(chain.chainId, record => { record.status = 'active' })
+    }
+    this.record(store, chain.chainId, {
+      kind: 'features.frozen',
+      actor: actor ?? 'system',
+      detail: { features: snapshot.length },
+    })
+    return true
+  }
+
+  /**
+   * Refresh the fingerprint after an announced append.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @returns {void}
+   */
+  updateFingerprint(chain, store) {
+    const document = store.readFeatures(chain.chainId)
+    if (document === undefined) return
+    this.fingerprints.set(chain.chainId, document.features.map(feature => ({ id: feature.id, title: feature.title })))
+  }
+
+  /**
+   * Refuse an operation when features.json no longer matches the frozen list.
+   * Deletions, renames, and unannounced additions are the three ways a session
+   * can quietly change what "done" means, so all three are reported.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @returns {void}
+   */
+  verifyFrozen(chain, store) {
+    const stored = this.fingerprints.get(chain.chainId)
+    if (stored === undefined) return
+    const document = store.readFeatures(chain.chainId)
+    if (document === undefined) return
+    const current = new Map(document.features.map(feature => [feature.id, feature.title]))
+    const expected = new Map(stored.features.map(feature => [feature.id, feature.title]))
+    const missing = [...expected.keys()].filter(id => !current.has(id))
+    const renamed = [...expected.entries()]
+      .filter(([id, title]) => current.has(id) && current.get(id) !== title)
+      .map(([id]) => id)
+    const added = [...current.keys()].filter(id => !expected.has(id))
+    if (missing.length === 0 && renamed.length === 0 && added.length === 0) return
+    const detail = { missing, renamed, added }
+    try {
+      this.record(store, chain.chainId, { kind: 'features.drift', actor: 'system', detail })
+    } catch {
+      /* the audit is advisory; the refusal below is the contract */
+    }
+    throw new RelayError(
+      RELAY_CODES.drift,
+      `features.json no longer matches the frozen list (missing: ${missing.join(', ') || '-'}; `
+      + `renamed: ${renamed.join(', ') || '-'}; added: ${added.join(', ') || '-'}); `
+      + 'new work must be appended with relay_checkpoint addFeatures',
+    )
+  }
+
+  /**
+   * Schedule one later evaluation for a session, keeping only the earliest.
+   * The timer is unref'd so a pending re-check never keeps the process alive.
+   * @param {string} sessionId - session to re-check.
+   * @param {number} delayMs - milliseconds until the check.
+   * @returns {void}
+   */
+  scheduleEvaluate(sessionId, delayMs) {
+    const delay = Math.max(0, Number.isFinite(delayMs) ? delayMs : 0)
+    const existing = this.timers.get(sessionId)
+    if (existing !== undefined) {
+      if (existing.due <= Date.now() + delay) return
+      clearTimeout(existing.handle)
+      this.timers.delete(sessionId)
+    }
+    const handle = setTimeout(() => {
+      this.timers.delete(sessionId)
+      if (this.unloaded) return
+      const agent = this.ctx.get('agents')?.get(sessionId)
+      if (agent === undefined) return
+      void this.evaluate(agent).catch(error => this.warn(`scheduled evaluation failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`))
+    }, delay)
+    handle.unref?.()
+    this.timers.set(sessionId, { handle, due: Date.now() + delay })
+  }
+
+  /**
+   * Drop one session's pending re-check.
+   * @param {string} sessionId - session identity.
+   * @returns {void}
+   */
+  clearTimer(sessionId) {
+    const existing = this.timers.get(sessionId)
+    if (existing === undefined) return
+    clearTimeout(existing.handle)
+    this.timers.delete(sessionId)
+  }
+
+  /**
+   * Drop every pending re-check of one chain.
+   * @param {object} chain - chain record.
+   * @returns {void}
+   */
+  clearChainTimers(chain) {
+    for (const session of chain.sessions) this.clearTimer(session.sessionId)
+  }
+
+  /**
+   * Re-attach the wrap-up deadline after a plugin reload.
+   * Without this the persisted `wrapupAt` would only be noticed by the next idle
+   * event, which never comes for a session that is already idle.
+   * @param {object} agent - live agent.
+   * @returns {void}
+   */
+  scheduleWrapupDeadline(agent) {
+    if (agent === undefined) return
+    const membership = this.locate(agent.session)
+    if (membership === undefined) return
+    const { chain } = membership
+    if (chain.currentSessionId !== agent.session.id) return
+    if (typeof chain.wrapupAt !== 'string') return
+    const at = Date.parse(chain.wrapupAt)
+    if (!Number.isFinite(at)) return
+    // Re-check at whichever deadline comes first: the wrap-up timeout or the
+    // shorter stale-brief grace.
+    const minutes = Math.min(this.config.wrapupTimeoutMinutes, this.config.staleHandoffMinutes)
+    this.scheduleEvaluate(agent.session.id, at + minutes * 60_000 - Date.now())
   }
 
   /** Per-session supervisor state. */
@@ -303,6 +468,7 @@ export class RelayEngine {
     store.writeText(store.paths(chain.chainId).decisions, skeleton.decisions)
     store.writeText(store.paths(chain.chainId).traps, skeleton.traps)
     store.writeText(store.paths(chain.chainId).history, skeleton.history)
+    store.ensureGitignore(chain.chainId)
     const joinedAt = new Date().toISOString()
     const updated = store.update(chain.chainId, record => {
       record.sessions.push({
@@ -314,10 +480,12 @@ export class RelayEngine {
         parentSessionId: null,
       })
       record.currentSessionId = agent.session.id
-      record.status = 'active'
+      // The list is not frozen yet; the first accepted checkpoint flips this.
+      record.status = 'initializing'
     })
     this.remember(updated, store)
     this.members.set(agent.session.id, { chainId: chain.chainId, truthDir: store.truthDir })
+    this.misses.delete(agent.session.id)
     this.statsFor(agent.session.id)
     this.record(store, chain.chainId, {
       kind: 'chain.started',
@@ -330,6 +498,7 @@ export class RelayEngine {
       agent.followup(relayMessage(renderInitializerPrompt({
         truthDir: join(store.truthDir, chain.chainId),
         objective,
+        commitTruth: this.config.commitTruth,
       })))
     } catch (error) {
       this.warn(`could not queue the initializer prompt: ${error instanceof Error ? error.message : String(error)}`)
@@ -354,6 +523,33 @@ export class RelayEngine {
   checkpoint({ agent, chainId, features, ready, blocked, note, addFeatures, reason, blocker }) {
     const resolved = this.resolveChain(agent, chainId)
     const { chain, store } = resolved
+    const self = this.memberSession(chain, agent)
+    const worker = this.isWorker(self)
+    if (worker) {
+      if (ready === true) throw new RelayError(RELAY_CODES.workerReadOnly, 'a delegated worker cannot mark the session ready')
+      if (Array.isArray(addFeatures) && addFeatures.length > 0) {
+        throw new RelayError(RELAY_CODES.workerReadOnly, 'a delegated worker cannot add features')
+      }
+    }
+    // acceptedBy is the human's signature, never the model's.
+    if (Array.isArray(features) && features.some(update => update !== null && typeof update === 'object' && 'acceptedBy' in update)) {
+      throw new RelayError(RELAY_CODES.invalid, 'acceptedBy is human-only; accept partial coverage in the panel')
+    }
+    if (worker && Array.isArray(features) && features.length > 0) {
+      const document = store.readFeatures(chain.chainId)
+      for (const update of features) {
+        if (update !== null && typeof update === 'object' && 'assignedSessionId' in update) {
+          throw new RelayError(RELAY_CODES.workerReadOnly, 'a delegated worker cannot reassign features')
+        }
+        const feature = document?.features.find(entry => entry.id === update?.id)
+        if (feature !== undefined && feature.assignedSessionId !== self.sessionId) {
+          throw new RelayError(RELAY_CODES.workerReadOnly, `feature ${update.id} is not assigned to this worker`)
+        }
+      }
+    }
+    // Structural edits are checked before any write, so a drifted file never
+    // gets a partial patch applied on top of it.
+    this.verifyFrozen(chain, store)
     // Ready is the gate the next session depends on: without a structured
     // brief it starts blind, so refuse before writing anything.
     if (ready === true && !/<!--\s*relay:state\s*-->/.test(store.readHandoff(chain.chainId))) {
@@ -381,6 +577,10 @@ export class RelayEngine {
       const document = store.readFeatures(chain.chainId)
       progress = document === undefined ? progress : featureProgress(document)
     }
+    // The initializer's first accepted list freezes it; an announced append
+    // refreshes the fingerprint so it stays the frozen contract.
+    this.freezeFeatures(chain, store, agent?.session?.id)
+    if (appended.length > 0) this.updateFingerprint(chain, store)
     if (typeof note === 'string' && note.trim().length > 0) {
       const stamp = new Date().toISOString()
       store.writeProgress(chain.chainId, `${store.readProgress(chain.chainId).replace(/\s*$/, '\n')}- [${stamp}] ${note.trim()}\n`)
@@ -398,6 +598,9 @@ export class RelayEngine {
     if (blocked === true) {
       store.update(chain.chainId, record => {
         record.status = 'paused'
+        // A blocker and blocked=true usually arrive together; the blocker owns
+        // the pause so clearing it can release the chain.
+        record.pausedBy = record.blocker?.kind === 'external' ? 'blocker' : 'blocked'
         record.lastError = typeof note === 'string' && note.trim().length > 0 ? note.trim() : 'blocked by a session'
       })
     }
@@ -461,10 +664,14 @@ export class RelayEngine {
     if (blocker === null) {
       store.update(chainId, record => {
         record.blocker = null
-        // A chain paused only because of this blocker resumes when it is cleared;
-        // an unrelated pause (a failed handoff, a manual pause) must survive.
-        if (record.status === 'paused' && typeof record.lastError === 'string' && record.lastError.startsWith('external blocker:')) {
+        // Only a pause this blocker caused may be released here; a manual pause
+        // or a failed handoff keeps its own reason. Records written before
+        // `pausedBy` existed fall back to the old lastError prefix.
+        const legacyBlocked = (record.pausedBy === undefined || record.pausedBy === null)
+          && typeof record.lastError === 'string' && record.lastError.startsWith('external blocker:')
+        if (record.status === 'paused' && (record.pausedBy === 'blocker' || legacyBlocked)) {
           record.status = 'active'
+          record.pausedBy = null
           record.lastError = null
         }
       })
@@ -484,6 +691,7 @@ export class RelayEngine {
       record.blocker = description
       if (kind === 'external' && this.config.pauseOnExternalBlocker) {
         record.status = 'paused'
+        record.pausedBy = 'blocker'
         record.lastError = `external blocker: ${description.action || 'waiting for a human'}`
       }
     })
@@ -513,10 +721,16 @@ export class RelayEngine {
     } catch (error) {
       this.warn(`chain ${chain.chainId} was deleted but its index entry remains: ${error instanceof Error ? error.message : String(error)}`)
     }
+    try {
+      this.fingerprints.remove(chain.chainId)
+    } catch (error) {
+      this.warn(`chain ${chain.chainId} was deleted but its fingerprint remains: ${error instanceof Error ? error.message : String(error)}`)
+    }
     for (const sessionId of sessionIds) {
       this.members.delete(sessionId)
       this.stats.delete(sessionId)
     }
+    this.clearChainTimers(chain)
     return { chainId: chain.chainId, status: chain.status, sessions: sessionIds.length }
   }
 
@@ -527,8 +741,10 @@ export class RelayEngine {
    */
   finish({ agent, chainId, evidence }) {
     const { chain, store } = this.resolveChain(agent, chainId)
+    this.assertChainHeadWriter(chain, agent)
     const document = store.readFeatures(chain.chainId)
     if (document === undefined) throw new RelayError(RELAY_CODES.notFound, `chain ${chain.chainId} has no features.json`)
+    this.verifyFrozen(chain, store)
     const progress = featureProgress(document)
     if (progress.total === 0) {
       throw new RelayError(RELAY_CODES.incomplete, 'the chain has no features; list them before finishing')
@@ -541,14 +757,19 @@ export class RelayEngine {
         pending: progress.pending.slice(0, 20).map(feature => ({ id: feature.id, title: feature.title })),
       }
     }
-    // A passing feature with no recorded output is a claim, not evidence.
-    const unsupported = document.features.filter(feature => typeof feature.evidence !== 'string' || feature.evidence.trim().length < 8)
+    // A passing feature with no usable output is a claim, not evidence. The
+    // same rule the tool layer applies is re-checked here for the whole list.
+    const unsupported = []
+    for (const feature of document.features) {
+      const issue = evidenceIssue(feature.evidence, { requireStrong: this.config.requireStrongEvidence })
+      if (issue !== undefined) unsupported.push({ id: feature.id, issue })
+    }
     if (unsupported.length > 0) {
       return {
         ok: false,
         code: RELAY_CODES.incomplete,
         message: `${unsupported.length} features pass without usable evidence; record the command output first.`,
-        features: unsupported.slice(0, 20).map(feature => feature.id),
+        features: unsupported.slice(0, 20),
       }
     }
     // Partial coverage is allowed only when a human accepted it (policy configurable).
@@ -565,6 +786,7 @@ export class RelayEngine {
     }
     store.update(chain.chainId, record => {
       record.status = 'done'
+      record.pausedBy = null
       record.lastError = null
     })
     store.writeProgress(chain.chainId, `${store.readProgress(chain.chainId).replace(/\s*$/, '\n')}- [${new Date().toISOString()}] completed: ${evidence}\n`)
@@ -577,17 +799,59 @@ export class RelayEngine {
   }
 
   /**
+   * Accept or revoke a human's acceptance of reduced coverage.
+   * This is the only path that writes `acceptedBy`; model-facing tools refuse it.
+   * @param {{ chainId: string, featureId: string, accepted: boolean }} input - acceptance input.
+   * @returns {{ chainId: string, featureId: string, acceptedBy: string|null, total: number, done: number, partial: number }} result.
+   */
+  acceptCoverage({ chainId, featureId, accepted }) {
+    if (typeof chainId !== 'string' || chainId.length === 0) {
+      throw new RelayError(RELAY_CODES.invalid, 'chainId is required')
+    }
+    if (typeof featureId !== 'string' || featureId.length === 0) {
+      throw new RelayError(RELAY_CODES.invalid, 'featureId is required')
+    }
+    const { chain, store } = this.findChain(chainId)
+    const document = store.readFeatures(chain.chainId)
+    if (document === undefined) throw new RelayError(RELAY_CODES.notFound, `chain ${chain.chainId} has no features.json`)
+    const feature = document.features.find(entry => entry.id === featureId)
+    if (feature === undefined) throw new RelayError(RELAY_CODES.invalid, `feature ${featureId} does not exist`)
+    if (feature.passes !== true) {
+      throw new RelayError(RELAY_CODES.invalid, 'only a passing feature can have its coverage accepted')
+    }
+    const value = accepted === true ? 'human' : null
+    store.patchFeatures(chain.chainId, [{ id: featureId, acceptedBy: value }])
+    this.record(store, chain.chainId, {
+      kind: value === 'human' ? 'coverage.accepted' : 'coverage.revoked',
+      actor: 'human',
+      detail: { id: featureId, coverage: feature.coverage },
+    })
+    const progress = featureProgress(store.readFeatures(chain.chainId))
+    return {
+      chainId: chain.chainId,
+      featureId,
+      acceptedBy: value,
+      total: progress.total,
+      done: progress.done,
+      partial: progress.partial,
+    }
+  }
+
+  /**
    * Pause or resume automatic handoff for one chain.
    * @param {{ agent?: object, chainId?: string, paused: boolean }} input - toggle input.
    * @returns {object} new status.
    */
   setPaused({ agent, chainId, paused }) {
     const { chain, store } = this.resolveChain(agent, chainId)
+    this.assertWriter(chain, agent)
     store.update(chain.chainId, record => {
       if (paused) {
         record.status = 'paused'
+        record.pausedBy = 'manual'
       } else if (record.status === 'paused' || record.status === 'initializing') {
         record.status = 'active'
+        record.pausedBy = null
         record.lastError = null
       }
     })
@@ -595,6 +859,16 @@ export class RelayEngine {
       kind: paused ? 'chain.paused' : 'chain.resumed',
       actor: agent?.session?.id ?? 'host',
     })
+    if (paused) this.clearChainTimers(chain)
+    if (!paused) {
+      // A resumed chain may still carry a half-finished handoff or a wrap-up deadline.
+      const current = store.readChain(chain.chainId)
+      if (current !== undefined) {
+        this.reconcilePendingHandoff(current, store)
+        const live = current.currentSessionId === null ? undefined : this.ctx.get('agents')?.get(current.currentSessionId)
+        if (live !== undefined) this.scheduleWrapupDeadline(live)
+      }
+    }
     return { chainId: chain.chainId, status: store.readChain(chain.chainId)?.status ?? chain.status }
   }
 
@@ -605,11 +879,89 @@ export class RelayEngine {
    */
   async handoffNow({ agent, chainId }) {
     const { chain, store } = this.resolveChain(agent, chainId)
+    this.assertWriter(chain, agent)
     const current = chain.currentSessionId === null ? undefined : this.ctx.get('agents')?.get(chain.currentSessionId)
     if (current === undefined) {
       throw new RelayError(RELAY_CODES.notFound, `the current session of ${chain.chainId} is not loaded; open it first`)
     }
-    return this.handoff(chain, current, 'manual')
+    if (current.status === 'running') {
+      throw new RelayError(RELAY_CODES.busy, 'the current session is running; wait until it is idle before handing off')
+    }
+    const entry = chain.sessions.find(session => session.sessionId === current.session.id)
+    const freshness = this.handoffFreshness(chain, store, entry)
+    if (!freshness.fresh) {
+      const stats = this.statsFor(current.session.id)
+      if (stats.wrapupSentAt === 0) {
+        await this.wrapup(chain, store, current)
+        return {
+          ok: false,
+          code: 'handoff_not_ready',
+          message: 'HANDOFF.md is stale or missing; the session was asked to wrap up, retry when it is idle again',
+        }
+      }
+      const remaining = this.config.staleHandoffMinutes * 60_000 - (Date.now() - stats.wrapupSentAt)
+      if (remaining > 0) {
+        this.scheduleEvaluate(current.session.id, remaining)
+        return {
+          ok: false,
+          code: 'handoff_not_ready',
+          message: `HANDOFF.md is stale; the handoff retries in about ${Math.ceil(remaining / 1000)}s`,
+        }
+      }
+    }
+    return this.handoff(chain, current, 'manual', store, { stale: !freshness.fresh })
+  }
+
+  /**
+   * The chain session entry for one calling agent.
+   * @param {object} chain - chain record.
+   * @param {object|undefined} agent - calling agent, when any.
+   * @returns {object|undefined} session entry; undefined when no agent was given.
+   */
+  memberSession(chain, agent) {
+    if (agent === undefined || agent === null) return undefined
+    const sessionId = agent.session?.id
+    const session = chain.sessions.find(entry => entry.sessionId === sessionId)
+    if (session === undefined) {
+      throw new RelayError(RELAY_CODES.notMember, `session ${sessionId ?? '(unknown)'} does not belong to chain ${chain.chainId}`)
+    }
+    if (session.retiredAt !== null && session.retiredAt !== undefined) {
+      throw new RelayError(RELAY_CODES.retired, `session ${sessionId} is retired; this chain is read-only for it`)
+    }
+    return session
+  }
+
+  /** Whether a session entry is a delegated worker. */
+  isWorker(session) {
+    return session !== undefined && session.parentSessionId !== null && session.parentSessionId !== undefined
+  }
+
+  /**
+   * Refuse a write from a delegated worker.
+   * @param {object} chain - chain record.
+   * @param {object|undefined} agent - calling agent.
+   * @returns {object|undefined} the calling session entry.
+   */
+  assertWriter(chain, agent) {
+    const session = this.memberSession(chain, agent)
+    if (this.isWorker(session)) {
+      throw new RelayError(RELAY_CODES.workerReadOnly, 'a delegated worker cannot hand off, pause, finish, or delete a chain')
+    }
+    return session
+  }
+
+  /**
+   * Refuse a write from a session that is not a member, or is retired or a worker.
+   * @param {object} chain - chain record.
+   * @param {object|undefined} agent - calling agent.
+   * @returns {object|undefined} the calling session entry.
+   */
+  assertChainHeadWriter(chain, agent) {
+    const session = this.assertWriter(chain, agent)
+    if (session !== undefined && chain.currentSessionId !== session.sessionId) {
+      throw new RelayError(RELAY_CODES.notMember, 'only the chain\'s current session may do this')
+    }
+    return session
   }
 
   /**
@@ -635,8 +987,46 @@ export class RelayEngine {
     return membership
   }
 
+  /**
+   * File signature the panel payload was built from.
+   * Chain records and the host index change on every write, so their mtimes are
+   * enough to detect a stale cache without reading features.json again.
+   * @returns {string} signature.
+   */
+  statusSignature() {
+    const parts = []
+    try {
+      parts.push(String(statSync(this.chainIndex.file).mtimeMs))
+    } catch {
+      parts.push('0')
+    }
+    for (const [truthDir, store] of this.stores) {
+      parts.push(truthDir)
+      let ids = []
+      try {
+        ids = store.listChainIds()
+        parts.push(String(statSync(join(truthDir, 'index.json')).mtimeMs))
+      } catch {
+        parts.push('0')
+      }
+      for (const chainId of ids) {
+        try {
+          parts.push(`${chainId}:${statSync(store.paths(chainId).chain).mtimeMs}`)
+        } catch {
+          parts.push(`${chainId}:0`)
+        }
+      }
+    }
+    return parts.join('|')
+  }
+
   /** Snapshot every chain this Host knows about. */
   status() {
+    const signature = this.statusSignature()
+    if (this.statusCache !== null && this.statusCache.signature === signature
+      && Date.now() - this.statusCache.at < 1000) {
+      return this.statusCache.items
+    }
     // The index is the authority for which chains exist; the stores are only
     // the ones this lifetime has touched.
     let indexed = []
@@ -662,8 +1052,9 @@ export class RelayEngine {
         if (seen.has(chainId)) continue
         seen.add(chainId)
         try {
-          const chain = store.readChain(chainId)
-          if (chain === undefined) continue
+          const raw = store.readChain(chainId)
+          if (raw === undefined) continue
+          const chain = this.normalizeLocation(raw, store)
           const document = store.readFeatures(chainId)
           const progress = document === undefined ? undefined : featureProgress(document)
           items.push({
@@ -694,11 +1085,74 @@ export class RelayEngine {
       }
     }
     items.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+    this.statusCache = { signature, at: Date.now(), items }
     return items
+  }
+
+  /**
+   * Keep a chain record consistent with where it was actually found.
+   * A moved or renamed workspace leaves stale absolute paths in relay.json;
+   * the store that found the chain wins.
+   * @param {object} chain - chain record as read from its own file.
+   * @param {import('./chain-store.js').ChainStore} store - the store holding it.
+   * @returns {object} the normalized record.
+   */
+  normalizeLocation(chain, store) {
+    const actualTruthDir = store.truthDir
+    const actualCwd = typeof store.cwd === 'string' ? store.cwd : dirname(actualTruthDir)
+    if (chain.truthDir === actualTruthDir && chain.cwd === actualCwd) return chain
+    let updated
+    try {
+      updated = store.update(chain.chainId, record => {
+        record.truthDir = actualTruthDir
+        record.cwd = actualCwd
+      })
+    } catch (error) {
+      this.warn(`cannot normalize the location of ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
+      return chain
+    }
+    try {
+      this.chainIndex.remember(updated)
+    } catch (error) {
+      this.warn(`cannot refresh the index entry of ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return updated
+  }
+
+  /**
+   * Raise a chain's handoff cap after it ran out.
+   * @param {{ chainId: string, maxHandoffs: number }} input - the new cap.
+   * @returns {object} the new status.
+   */
+  raiseHandoffLimit({ chainId, maxHandoffs }) {
+    if (typeof chainId !== 'string' || chainId.length === 0) {
+      throw new RelayError(RELAY_CODES.invalid, 'chainId is required')
+    }
+    if (!Number.isInteger(maxHandoffs) || maxHandoffs < 1 || maxHandoffs > 1000) {
+      throw new RelayError(RELAY_CODES.invalid, 'maxHandoffs must be an integer from 1 to 1000')
+    }
+    const { chain, store } = this.findChain(chainId)
+    if (maxHandoffs <= chain.handoffCount) {
+      throw new RelayError(RELAY_CODES.invalid, `maxHandoffs must exceed the ${chain.handoffCount} handoffs already used`)
+    }
+    store.update(chain.chainId, record => {
+      record.maxHandoffs = maxHandoffs
+      if (record.pausedBy === 'handoff-limit') {
+        record.status = 'active'
+        record.pausedBy = null
+        record.lastError = null
+      }
+    })
+    if (chain.blocker?.kind === 'external') this.recordBlocker(store, chain.chainId, null)
+    this.record(store, chain.chainId, { kind: 'handoff.limit-raised', actor: 'host', detail: { maxHandoffs } })
+    return { chainId: chain.chainId, maxHandoffs, status: store.readChain(chain.chainId)?.status ?? chain.status }
   }
 
   /** Find one chain among the stores this Host has touched, then the index. */
   findChain(chainId) {
+    if (!isChainId(chainId)) {
+      throw new RelayError(RELAY_CODES.invalid, 'chainId must look like chain-<uuid>')
+    }
     for (const [, store] of this.stores) {
       let chain
       try {
@@ -706,7 +1160,7 @@ export class RelayEngine {
       } catch {
         continue
       }
-      if (chain !== undefined) return { chain, store }
+      if (chain !== undefined) return { chain: this.normalizeLocation(chain, store), store }
     }
     const truthDir = this.chainIndex.locate(chainId)
     if (truthDir !== undefined) {
@@ -714,7 +1168,7 @@ export class RelayEngine {
       const chain = store.readChain(chainId)
       if (chain !== undefined) {
         this.stores.set(truthDir, store)
-        return { chain, store }
+        return { chain: this.normalizeLocation(chain, store), store }
       }
     }
     throw new RelayError(RELAY_CODES.notFound, `chain ${chainId} is not known to this Host`)
@@ -843,13 +1297,14 @@ export class RelayEngine {
       const settled = store.readChain(chain.chainId)
       if (settled !== undefined) this.remember(settled, store)
       this.members.set(createdSessionId, { chainId: chain.chainId, truthDir: store.truthDir })
+      this.misses.delete(createdSessionId)
       this.statsFor(createdSessionId)
 
       const child = this.ctx.get('agents')?.get(createdSessionId)
       if (child !== undefined) {
         this.applyWorkerPolicy(child)
         try {
-          this.ctx.get('sessionTitle')?.rename(child.session, `${chain.title} · 子任务`)
+          this.ctx.get('sessionTitle')?.rename(child.session, sessionTitle('subtask', { title: chain.title }))
         } catch {
           /* naming is advisory */
         }
@@ -1082,30 +1537,73 @@ export class RelayEngine {
     const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
     const cap = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 30
     const paths = store.paths(chain.chainId)
-    const files = [
-      ['HANDOFF.md', paths.handoff],
-      ['history.md', paths.history],
-      ['PROGRESS.md', paths.progress],
-      ['decisions.md', paths.decisions],
-      ['traps.md', paths.traps],
-      ['features.json', paths.features],
-      ['audit.jsonl', paths.audit],
-    ]
     const matches = []
     let total = 0
-    for (const [name, file] of files) {
+
+    /** Match one line at a time; used for JSON where a paragraph has no meaning. */
+    const collectLines = (name, file) => {
       let text
       try {
         text = readFileSync(file, 'utf8')
       } catch {
-        continue
+        return
       }
       for (const [index, line] of text.split(/\r?\n/).entries()) {
-        const lower = line.toLowerCase()
-        if (!words.every(word => lower.includes(word))) continue
+        if (!words.every(word => line.toLowerCase().includes(word))) continue
         total += 1
         if (matches.length < cap) matches.push({ file: name, line: index + 1, text: line.trim().slice(0, 240) })
       }
+    }
+
+    /** Match a blank-line separated block and report the block's first line. */
+    const collectParagraphs = (name, file) => {
+      let text
+      try {
+        text = readFileSync(file, 'utf8')
+      } catch {
+        return
+      }
+      let start = -1
+      let buffer = []
+      const flush = () => {
+        if (buffer.length === 0) return
+        const body = buffer.join('\n')
+        if (words.every(word => body.toLowerCase().includes(word))) {
+          total += 1
+          if (matches.length < cap) {
+            matches.push({ file: name, line: start, text: body.trim().replace(/\s+/g, ' ').slice(0, 240) })
+          }
+        }
+        start = -1
+        buffer = []
+      }
+      for (const [index, line] of text.split(/\r?\n/).entries()) {
+        if (line.trim().length === 0) {
+          flush()
+          continue
+        }
+        if (buffer.length === 0) start = index + 1
+        buffer.push(line)
+      }
+      flush()
+    }
+
+    collectParagraphs('HANDOFF.md', paths.handoff)
+    collectParagraphs('history.md', paths.history)
+    collectParagraphs('PROGRESS.md', paths.progress)
+    collectParagraphs('decisions.md', paths.decisions)
+    collectParagraphs('traps.md', paths.traps)
+    collectLines('features.json', paths.features)
+    // The audit log can grow without bound; only its tail is searchable.
+    try {
+      for (const record of store.readAudit(chain.chainId, 500)) {
+        const body = JSON.stringify(record)
+        if (!words.every(word => body.toLowerCase().includes(word))) continue
+        total += 1
+        if (matches.length < cap) matches.push({ file: 'audit.jsonl', line: null, text: body.slice(0, 240) })
+      }
+    } catch {
+      /* the audit log is optional */
     }
     return {
       chainId: chain.chainId,
@@ -1120,8 +1618,22 @@ export class RelayEngine {
   /** Record one successful compaction for a session and persist the count. */
   noteCompaction(sessionId) {
     const stats = this.statsFor(sessionId)
-    stats.compactions += 1
     const known = this.members.get(sessionId)
+    // A compaction can arrive before the first evaluation; start from the
+    // durable count so a reload does not reset the budget.
+    if (!stats.hydrated) {
+      if (known !== undefined) {
+        try {
+          const chain = this.storeFor(known.truthDir).readChain(known.chainId)
+          const recorded = chain?.sessions.find(session => session.sessionId === sessionId)?.compactions
+          if (typeof recorded === 'number' && recorded > stats.compactions) stats.compactions = recorded
+        } catch {
+          /* the count restarts from this process */
+        }
+      }
+      stats.hydrated = true
+    }
+    stats.compactions += 1
     if (known === undefined) return
     try {
       this.storeFor(known.truthDir).update(known.chainId, record => {
@@ -1147,6 +1659,22 @@ export class RelayEngine {
     if (membership === undefined) return
     const { store } = membership
     let { chain } = membership
+    const entry = chain.sessions.find(session => session.sessionId === agent.id)
+    if (entry === undefined) return
+
+    // A delegated worker only supervises its own phase; the chain head owns handoff.
+    if (this.isWorker(entry)) {
+      await this.evaluateWorker(chain, store, entry, agent)
+      return
+    }
+    if (chain.currentSessionId !== agent.id) return
+
+    // A half-finished handoff is reconciled before any policy decision.
+    this.reconcilePendingHandoff(chain, store)
+    const reconciled = store.readChain(chain.chainId)
+    if (reconciled === undefined) return
+    chain = reconciled
+    // Resolving a leftover handoff can move the chain head; the old one must stop.
     if (chain.currentSessionId !== agent.id) return
 
     // Goal state is synced before the handoff policy: a blocked goal means the
@@ -1167,27 +1695,56 @@ export class RelayEngine {
       if (typeof recorded === 'number' && recorded > stats.compactions) stats.compactions = recorded
       if (chain.wrapupAt !== null && chain.wrapupAt !== undefined) {
         const at = Date.parse(chain.wrapupAt)
-        if (Number.isFinite(at)) stats.wrapupSentAt = at
+        // A timestamp in the future (clock skew) would stall both deadlines.
+        if (Number.isFinite(at)) stats.wrapupSentAt = Math.min(at, Date.now())
       }
       if (chain.readySessionId === agent.id && typeof chain.readyAt === 'string') stats.ready = true
       stats.hydrated = true
+      // A reload in the middle of a wrap-up must still hit the deadline.
+      this.scheduleWrapupDeadline(agent)
     }
     const now = Date.now()
-    if (now - stats.lastEvaluatedAt < this.config.cooldownMs) return
+    const wait = this.config.cooldownMs - (now - stats.lastEvaluatedAt)
+    if (wait > 0) {
+      // Do not drop a cooled-down check: run it when the window opens instead.
+      this.scheduleEvaluate(agent.id, wait)
+      return
+    }
     stats.lastEvaluatedAt = now
 
     const pressure = this.pressure(agent.session)
     if (pressure.ratio > stats.peakRatio) stats.peakRatio = pressure.ratio
+    const freshness = this.handoffFreshness(chain, store, entry)
 
     this.busyAgents.add(agent.id)
     try {
       if (stats.compactions >= this.config.hardCompactions) {
+        if (!freshness.fresh) {
+          const graceElapsed = stats.wrapupSentAt !== 0
+            && now - stats.wrapupSentAt >= this.config.staleHandoffMinutes * 60_000
+          if (!graceElapsed) {
+            // Compactions force a handoff, but a stale brief means the next
+            // session would start blind: wrap up first and give it the grace.
+            if (stats.wrapupSentAt === 0) {
+              this.record(store, chain.chainId, {
+                kind: 'supervisor.decision',
+                actor: 'system',
+                detail: { action: 'wrapup', by: 'stale-handoff', ratio: Number(pressure.ratio.toFixed(3)) },
+              })
+              await this.wrapup(chain, store, agent)
+              this.scheduleEvaluate(agent.id, this.config.staleHandoffMinutes * 60_000)
+            } else {
+              this.scheduleEvaluate(agent.id, this.config.staleHandoffMinutes * 60_000 - (now - stats.wrapupSentAt))
+            }
+            return
+          }
+        }
         this.record(store, chain.chainId, {
           kind: 'supervisor.decision',
           actor: 'system',
           detail: { action: 'handoff', reason: 'compactions', compactions: stats.compactions, ratio: Number(pressure.ratio.toFixed(3)) },
         })
-        await this.handoff(chain, agent, 'compactions')
+        await this.handoff(chain, agent, 'compactions', store, { stale: !freshness.fresh })
         return
       }
       if (stats.wrapupSentAt === 0) {
@@ -1203,27 +1760,246 @@ export class RelayEngine {
             detail: { action: 'wrapup', by: byPressure ? 'pressure' : 'compaction', ratio: Number(pressure.ratio.toFixed(3)) },
           })
           await this.wrapup(chain, store, agent)
+          return
         }
+        this.maybeAutoContinue(chain, store, agent, stats)
         return
       }
       const timedOut = now - stats.wrapupSentAt >= this.config.wrapupTimeoutMinutes * 60_000
-      if (stats.ready || pressure.ratio >= this.config.handoffRatio || timedOut) {
+      const stale = !freshness.fresh
+      const staleGrace = stale && now - stats.wrapupSentAt >= this.config.staleHandoffMinutes * 60_000
+      // A stale brief suppresses the pressure trigger until its grace passes;
+      // ready and timeout are stronger signals and keep their meaning.
+      const ratioTrigger = pressure.ratio >= this.config.handoffRatio && (!stale || staleGrace)
+      if (stats.ready || ratioTrigger || timedOut || staleGrace) {
+        const reason = stats.ready ? 'checkpoint' : timedOut ? 'timeout' : staleGrace ? 'stale' : 'pressure'
         this.record(store, chain.chainId, {
           kind: 'supervisor.decision',
           actor: 'system',
-          detail: {
-            action: 'handoff',
-            reason: stats.ready ? 'checkpoint' : timedOut ? 'timeout' : 'pressure',
-            ratio: Number(pressure.ratio.toFixed(3)),
-          },
+          detail: { action: 'handoff', reason, ratio: Number(pressure.ratio.toFixed(3)) },
         })
-        await this.handoff(chain, agent, stats.ready ? 'checkpoint' : 'pressure')
+        await this.handoff(chain, agent, reason, store, { stale })
+        return
       }
+      // Keep a re-check attached for whichever deadline comes first, so a
+      // wrapped-up session never waits for an idle event that will not come.
+      const wrapRemaining = this.config.wrapupTimeoutMinutes * 60_000 - (now - stats.wrapupSentAt)
+      const staleRemaining = stale
+        ? this.config.staleHandoffMinutes * 60_000 - (now - stats.wrapupSentAt)
+        : Number.POSITIVE_INFINITY
+      this.scheduleEvaluate(agent.id, Math.max(1000, Math.min(wrapRemaining, staleRemaining)))
     } catch (error) {
       this.warn(`evaluate failed for ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       this.busyAgents.delete(agent.id)
     }
+  }
+
+  /**
+   * Whether the handoff brief was written by the session that is retiring.
+   * A brief without a state block is missing; one older than this session's
+   * join time belongs to an earlier session.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object|undefined} entry - the retiring session entry.
+   * @returns {{ fresh: boolean, reason?: string }} freshness.
+   */
+  handoffFreshness(chain, store, entry) {
+    let text = ''
+    try {
+      text = store.readHandoff(chain.chainId)
+    } catch {
+      text = ''
+    }
+    if (!/<!--\s*relay:state\s*-->/.test(text)) return { fresh: false, reason: 'missing' }
+    let mtime = 0
+    try {
+      mtime = statSync(store.paths(chain.chainId).handoff).mtimeMs
+    } catch {
+      mtime = 0
+    }
+    const joined = typeof entry?.joinedAt === 'string' ? Date.parse(entry.joinedAt) : Number.NaN
+    if (Number.isFinite(joined) && mtime > 0 && mtime < joined) return { fresh: false, reason: 'stale' }
+    return { fresh: true }
+  }
+
+  /**
+   * Resolve a leftover `pendingHandoff` from a failed handoff.
+   * When the created session is already a chain member it becomes the current
+   * session; otherwise the pending record is dropped so the next handoff starts
+   * clean instead of leaving an orphan session in play.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @returns {void}
+   */
+  reconcilePendingHandoff(chain, store) {
+    const pending = chain.pendingHandoff
+    if (pending === null || pending === undefined || typeof pending.sessionId !== 'string') return
+    const sessionId = pending.sessionId
+    let live
+    try {
+      live = this.ctx.get('agents')?.get(sessionId)
+    } catch {
+      live = undefined
+    }
+    const entry = chain.sessions.find(session => session.sessionId === sessionId)
+    if (live !== undefined && entry !== undefined) {
+      store.update(chain.chainId, record => {
+        record.currentSessionId = sessionId
+        record.pendingHandoff = null
+        record.status = 'active'
+        record.pausedBy = null
+        record.lastError = null
+      })
+      this.record(store, chain.chainId, { kind: 'handoff.recovered', actor: 'system', detail: { sessionId } })
+      return
+    }
+    store.update(chain.chainId, record => { record.pendingHandoff = null })
+    this.record(store, chain.chainId, { kind: 'handoff.abandoned', actor: 'system', detail: { sessionId } })
+  }
+
+  /**
+   * Nudge an idle chain head when the automatic continuation is enabled.
+   * A goal that is already driving the session wins: two loops would double-run.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object} agent - live chain head.
+   * @param {object} stats - its supervisor state.
+   * @returns {void}
+   */
+  maybeAutoContinue(chain, store, agent, stats) {
+    if (!this.config.autoContinue) return
+    if (stats.ready || stats.wrapupSentAt !== 0) return
+    if (chain.blocker !== null && chain.blocker !== undefined) return
+    try {
+      const goals = this.ctx.get('goals')
+      const view = goals?.get?.(agent)
+      if (view !== undefined && view.phase === 'active') return
+    } catch {
+      /* the goal service is optional */
+    }
+    if (stats.autoContinues >= this.config.maxAutoContinues) {
+      this.recordBlocker(store, chain.chainId, {
+        kind: 'external',
+        who: 'human',
+        action: `auto-continue limit of ${this.config.maxAutoContinues} reached; resume or hand off manually`,
+      })
+      this.record(store, chain.chainId, {
+        kind: 'session.continue-limit',
+        actor: 'system',
+        detail: { continues: stats.autoContinues },
+      })
+      return
+    }
+    const document = store.readFeatures(chain.chainId)
+    if (document === undefined) return
+    const progress = featureProgress(document)
+    const next = document.features
+      .filter(feature => !feature.passes && (feature.assignedSessionId === null || feature.assignedSessionId === undefined))
+      .sort((a, b) => Number(a.priority ?? 0) - Number(b.priority ?? 0))[0]
+    if (next === undefined) return
+    try {
+      agent.followup(relayMessage(renderContinuePrompt({
+        truthDir: join(store.truthDir, chain.chainId),
+        feature: next,
+        done: progress.done,
+        total: progress.total,
+      })))
+    } catch (error) {
+      this.warn(`could not queue the continue prompt for ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    stats.autoContinues += 1
+    this.record(store, chain.chainId, {
+      kind: 'session.continued',
+      actor: 'system',
+      detail: { feature: next.id, count: stats.autoContinues },
+    })
+  }
+
+  /**
+   * Pressure supervision for a delegated worker: ask it to wrap up and take its
+   * unfinished features back to the chain instead of letting it compact.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object} entry - the worker's session entry.
+   * @param {object} agent - live worker.
+   * @returns {Promise<void>} settles after any action.
+   */
+  async evaluateWorker(chain, store, entry, agent) {
+    if (this.unloaded) return
+    if (chain.status !== 'active' && chain.status !== 'initializing') return
+    const stats = this.statsFor(agent.id)
+    const now = Date.now()
+    if (now - stats.lastEvaluatedAt < this.config.cooldownMs) return
+    stats.lastEvaluatedAt = now
+    if (stats.wrapupSentAt !== 0) return
+    const pressure = this.pressure(agent.session)
+    const byPressure = pressure.ratio >= this.config.wrapupRatio
+    const byCompaction = stats.compactions >= this.config.hardCompactions
+    if (!byPressure && !byCompaction) return
+    const document = store.readFeatures(chain.chainId)
+    if (document === undefined) return
+    const owned = document.features.filter(feature => feature.assignedSessionId === entry.sessionId && !feature.passes)
+    if (owned.length === 0) return
+    try {
+      agent.followup(relayMessage(renderWorkerWrapupPrompt({
+        truthDir: join(store.truthDir, chain.chainId),
+        features: owned,
+      })))
+    } catch (error) {
+      this.warn(`could not queue the worker wrap-up for ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    stats.wrapupSentAt = Date.now()
+    store.patchFeatures(chain.chainId, owned.map(feature => ({ id: feature.id, assignedSessionId: null })))
+    const stamp = new Date().toISOString()
+    store.writeProgress(chain.chainId, `${store.readProgress(chain.chainId).replace(/\s*$/, '\n')}- [${stamp}] returned ${owned.map(feature => feature.id).join(', ')} from worker ${entry.sessionId} (context ${Math.round(pressure.ratio * 100)}%)\n`)
+    this.record(store, chain.chainId, {
+      kind: 'delegation.returned',
+      actor: 'system',
+      detail: { sessionId: entry.sessionId, features: owned.map(feature => feature.id), ratio: Number(pressure.ratio.toFixed(3)) },
+    })
+  }
+
+  /**
+   * Take a worker's unfinished features back to the chain.
+   * Only the chain head may reclaim, and the worker is told to stop.
+   * @param {{ agent?: object, chainId?: string, sessionId: string }} input - reclaim input.
+   * @returns {object} reclaim result.
+   */
+  reclaimDelegation({ agent, chainId, sessionId }) {
+    const { chain, store } = this.resolveChain(agent, chainId)
+    this.assertChainHeadWriter(chain, agent)
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throw new RelayError(RELAY_CODES.invalid, 'sessionId is required')
+    }
+    const entry = chain.sessions.find(session => session.sessionId === sessionId)
+    if (entry === undefined || !this.isWorker(entry)) {
+      throw new RelayError(RELAY_CODES.invalid, `session ${sessionId} is not a delegated worker of this chain`)
+    }
+    const document = store.readFeatures(chain.chainId)
+    if (document === undefined) return { chainId: chain.chainId, sessionId, features: [] }
+    const owned = document.features.filter(feature => feature.assignedSessionId === sessionId && !feature.passes)
+    if (owned.length > 0) {
+      store.patchFeatures(chain.chainId, owned.map(feature => ({ id: feature.id, assignedSessionId: null })))
+    }
+    const stamp = new Date().toISOString()
+    store.writeProgress(chain.chainId, `${store.readProgress(chain.chainId).replace(/\s*$/, '\n')}- [${stamp}] reclaimed ${owned.map(feature => feature.id).join(', ') || '(nothing pending)'} from worker ${sessionId}\n`)
+    const live = this.ctx.get('agents')?.get(sessionId)
+    if (live !== undefined) {
+      try {
+        live.inject(relayMessage(renderReclaimNotice({ chainId: chain.chainId, features: owned.map(feature => feature.id) })))
+      } catch (error) {
+        this.warn(`could not notify the reclaimed worker ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    this.record(store, chain.chainId, {
+      kind: 'delegation.reclaimed',
+      actor: agent?.session?.id ?? 'host',
+      detail: { sessionId, features: owned.map(feature => feature.id) },
+    })
+    return { chainId: chain.chainId, sessionId, features: owned.map(feature => feature.id) }
   }
 
   /**
@@ -1240,6 +2016,7 @@ export class RelayEngine {
       truthDir: join(store.truthDir, chain.chainId),
       featuresTotal: progress.total,
       featuresDone: progress.done,
+      commitTruth: this.config.commitTruth,
     })
     try {
       agent.followup(relayMessage(prompt))
@@ -1253,6 +2030,8 @@ export class RelayEngine {
     } catch (error) {
       this.warn(`could not persist the wrap-up time for ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
     }
+    // The model may never call ready; re-check at the persisted deadline.
+    this.scheduleEvaluate(agent.id, this.config.wrapupTimeoutMinutes * 60_000)
     try {
       await this.ctx.get('sessions')?.flush(agent.session)
     } catch {
@@ -1265,9 +2044,11 @@ export class RelayEngine {
    * @param {object} chain - current chain record.
    * @param {object} oldAgent - agent being retired.
    * @param {string} reason - why the handoff happens.
+   * @param {import('./chain-store.js').ChainStore} [storeOverride] - the store the chain was found in.
+   * @param {{ stale?: boolean }} [options] - handoff options.
    * @returns {Promise<object>} handoff result.
    */
-  async handoff(chain, oldAgent, reason) {
+  async handoff(chain, oldAgent, reason, storeOverride, options = {}) {
     if (this.busyChains.has(chain.chainId)) {
       throw new RelayError(RELAY_CODES.limit, `chain ${chain.chainId} is already handing off`)
     }
@@ -1275,11 +2056,29 @@ export class RelayEngine {
     if (controller === undefined) {
       throw new RelayError(RELAY_CODES.invalid, 'this Host cannot create sessions; handoff is unavailable')
     }
-    const store = this.storeFor(chain.truthDir)
+    // Act on the store the chain was found in; relay.json may name a directory
+    // the workspace has since moved or renamed.
+    const store = storeOverride ?? this.storeFor(chain.truthDir)
+    try {
+      store.ensureGitignore(chain.chainId)
+    } catch {
+      /* the ignore file is advisory */
+    }
+    // Freeze an un-frozen list before handing over, then refuse a drifted one.
+    this.freezeFeatures(chain, store, 'system')
+    this.verifyFrozen(chain, store)
     const handoffNo = chain.handoffCount + 1
     if (handoffNo > chain.maxHandoffs) {
+      // Running out of handoffs is a human decision, not a dead chain.
+      this.recordBlocker(store, chain.chainId, {
+        kind: 'external',
+        who: 'human',
+        action: `raise maxHandoffs above ${chain.maxHandoffs}, then resume the chain`,
+      })
+      // The blocker may be configured not to pause; the cap always must.
       store.update(chain.chainId, record => {
-        record.status = 'failed'
+        record.status = 'paused'
+        record.pausedBy = 'handoff-limit'
         record.lastError = `handoff limit of ${record.maxHandoffs} reached`
       })
       throw new RelayError(RELAY_CODES.limit, `chain ${chain.chainId} reached its handoff limit`)
@@ -1293,12 +2092,28 @@ export class RelayEngine {
     })
     let createdSessionId
     try {
-      const preset = this.presetFor(oldAgent)
-      const created = await controller.create({
-        cwd: chain.cwd,
-        ...(preset === undefined ? {} : { agentPreset: preset }),
-      })
-      createdSessionId = created.sessionId
+      // A failed handoff may already have created the successor. Reuse it when
+      // it is still live instead of leaving an orphan and creating a second one.
+      const pending = this.ctx.get('agents')
+      if (chain.pendingHandoff !== null && chain.pendingHandoff !== undefined
+        && typeof chain.pendingHandoff.sessionId === 'string') {
+        const live = pending?.get(chain.pendingHandoff.sessionId)
+        if (live !== undefined) createdSessionId = chain.pendingHandoff.sessionId
+      }
+      if (createdSessionId !== undefined) {
+        const current = store.readChain(chain.chainId)
+        const known = current?.sessions.some(session => session.sessionId === createdSessionId) === true
+        if (known && current.currentSessionId === createdSessionId) {
+          return { chainId: chain.chainId, newSessionId: createdSessionId, handoffNo: current.handoffCount, reason: 'recovered' }
+        }
+      } else {
+        const preset = this.presetFor(oldAgent)
+        const created = await controller.create({
+          cwd: chain.cwd,
+          ...(preset === undefined ? {} : { agentPreset: preset }),
+        })
+        createdSessionId = created.sessionId
+      }
       const newAgent = this.ctx.get('agents')?.get(createdSessionId)
       const session = newAgent?.session
       if (newAgent !== undefined) this.applyWorkerPolicy(newAgent)
@@ -1319,6 +2134,7 @@ export class RelayEngine {
         handoffNo,
         previousSessionId: oldAgent.session.id,
         truthDir: join(store.truthDir, chain.chainId),
+        stale: options.stale === true,
       })
       await controller.prompt({
         requestId: `relay-${chain.chainId}-${handoffNo}-${randomUUID().slice(0, 8)}`,
@@ -1339,21 +2155,29 @@ export class RelayEngine {
           previous.retireReason = reason
           const stats = this.stats.get(oldAgent.session.id)
           if (stats !== undefined) previous.peakPressureRatio = Number(stats.peakRatio.toFixed(3))
-          previous.compactions = this.stats.get(oldAgent.session.id)?.compactions ?? 0
+          // Never shrink a durable count a reload has not hydrated yet.
+          previous.compactions = Math.max(
+            Number(previous.compactions ?? 0),
+            this.stats.get(oldAgent.session.id)?.compactions ?? 0,
+          )
         }
-        record.sessions.push({
-          sessionId: createdSessionId,
-          role: 'worker',
-          index: handoffNo,
-          joinedAt: retiredAt,
-          compactions: 0,
-          // A handoff continues the same delegation, so the next session keeps
-          // the previous session's parent rather than becoming a child of it.
-          parentSessionId: previous?.parentSessionId ?? null,
-        })
+        const alreadyJoined = record.sessions.some(session => session.sessionId === createdSessionId)
+        if (!alreadyJoined) {
+          record.sessions.push({
+            sessionId: createdSessionId,
+            role: 'worker',
+            index: handoffNo,
+            joinedAt: retiredAt,
+            compactions: 0,
+            // A handoff continues the same delegation, so the next session keeps
+            // the previous session's parent rather than becoming a child of it.
+            parentSessionId: previous?.parentSessionId ?? null,
+          })
+        }
         record.currentSessionId = createdSessionId
         record.handoffCount = handoffNo
         record.status = 'active'
+        record.pausedBy = null
         record.pendingHandoff = null
         record.lastError = null
         record.wrapupAt = null
@@ -1362,7 +2186,9 @@ export class RelayEngine {
       })
 
       this.members.set(createdSessionId, { chainId: chain.chainId, truthDir: store.truthDir })
+      this.misses.delete(createdSessionId)
       this.statsFor(createdSessionId)
+      this.clearTimer(oldAgent.session.id)
       const settled = store.readChain(chain.chainId)
       if (settled !== undefined) this.remember(settled, store)
       this.appendHistory(store, chain, {
@@ -1391,6 +2217,7 @@ export class RelayEngine {
             }
           }
           record.status = 'paused'
+          record.pausedBy = 'handoff-failed'
           record.lastError = message
         })
       } catch (updateError) {
@@ -1410,7 +2237,7 @@ export class RelayEngine {
   /** Name and place a freshly created session; failures are advisory. */
   decorateSession(chain, newAgent, handoffNo) {
     try {
-      this.ctx.get('sessionTitle')?.rename(newAgent.session, `${chain.title} · 接力 ${handoffNo}`)
+      this.ctx.get('sessionTitle')?.rename(newAgent.session, sessionTitle('handoff', { title: chain.title, index: handoffNo }))
     } catch (error) {
       this.warn(`could not name session ${newAgent.id}: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -1534,6 +2361,10 @@ export class RelayEngine {
   /** Stop every pending action on unload. */
   dispose() {
     this.unloaded = true
+    for (const timer of this.timers.values()) clearTimeout(timer.handle)
+    this.timers.clear()
+    this.misses.clear()
+    this.statusCache = null
     this.busyAgents.clear()
     this.busyChains.clear()
     this.stats.clear()

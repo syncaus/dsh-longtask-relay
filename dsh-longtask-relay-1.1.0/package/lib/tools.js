@@ -7,6 +7,7 @@
  * throwing, so the model can react without losing the call result.
  */
 import { RelayError } from './chain-store.js'
+import { evidenceIssue } from './evidence.js'
 
 /** Render one JSON value as the tool result text. */
 function renderJson(_args, value) {
@@ -37,36 +38,6 @@ function subagentRefusal(agent) {
     return { ok: false, code: 'subagent_caller', message: 'A delegated subagent cannot operate a relay chain.' }
   }
   return undefined
-}
-
-/**
- * Check that recorded evidence can actually prove a pass.
- * "all green" is a claim: a usable record carries the command and a result — an exit
- * code, a pass/fail count, or a ratio — and enough text that a later session can tell
- * what ran. The marker list spans common toolchains and both languages the prompts use,
- * so the rule does not assume one test runner.
- * @param {unknown} evidence - recorded evidence text.
- * @param {{ requireStrong?: boolean }} [options] - set requireStrong false to only check length and a number.
- * @returns {string|undefined} an issue message, or undefined when the record is usable.
- */
-function evidenceIssue(evidence, options = {}) {
-  const requireStrong = options.requireStrong !== false
-  if (typeof evidence !== 'string') return 'a passing feature needs evidence text'
-  const text = evidence.trim()
-  if (text.length < 8) return 'evidence is too short to prove anything'
-  // Only the strong policy demands machine-shaped output, so a project whose checks
-  // produce prose (a design review, a manual sign-off) can turn that off entirely.
-  if (!requireStrong) return undefined
-  if (!/[0-9]/.test(text)) return 'evidence must contain at least one number (a count, a case total, or an exit code)'
-  if (/\d+\s*\/\s*\d+/.test(text)) return undefined
-  const lower = text.toLowerCase()
-  const markers = [
-    'exit', 'pass', 'fail', 'ok', 'success', 'error', 'skip', 'test', 'check',
-    'diff', 'identical', 'match', 'result', 'build',
-    '通过', '失败', '错误', '成功', '跳过', '测试', '覆盖', '差异',
-  ]
-  if (markers.some(marker => lower.includes(marker))) return undefined
-  return 'evidence must include the result, such as "exit 0", "12/12 passed", or "BUILD SUCCESS"'
 }
 
 /**
@@ -158,9 +129,9 @@ export function registerTools(ctx, engine) {
   ctx.tools.register({
     name: 'relay_checkpoint',
     description: 'Record progress on a relay chain. Existing entries keep their id and title; only passes, '
-      + 'evidence, coverage, acceptedBy, and notes change. Work discovered after initialization is appended with '
+      + 'evidence, coverage, and notes change. Work discovered after initialization is appended with '
       + 'addFeatures plus a reason, never by rewriting the list. Call with ready=true once the session is wrapped '
-      + 'up and a handoff may proceed.',
+      + 'up and a handoff may proceed. Partial coverage can only be accepted by a human in the panel.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -182,10 +153,6 @@ export function registerTools(ctx, engine) {
                 enum: ['full', 'partial', 'smoke'],
                 description: 'How much of the behaviour was actually verified: full = end to end, '
                   + 'partial = only some branches/platforms/paths, smoke = it answers at all.',
-              },
-              acceptedBy: {
-                type: 'string',
-                description: 'Set to "human" when a person accepted partial coverage for this feature.',
               },
             },
             required: ['id'],
@@ -232,8 +199,12 @@ export function registerTools(ctx, engine) {
     execute(args, exec) {
       const refused = call(exec.agent)
       if (refused !== undefined) return refused
+      if (exec.agent === undefined) return { ok: false, code: 'no_agent', message: 'relay_checkpoint needs a calling agent.' }
       if (args?.features !== undefined && !Array.isArray(args.features)) {
         return { ok: false, code: 'invalid_arguments', message: 'features must be an array.' }
+      }
+      if (Array.isArray(args?.features) && args.features.some(update => update !== null && typeof update === 'object' && 'acceptedBy' in update)) {
+        return { ok: false, code: 'invalid_arguments', message: 'acceptedBy is human-only; accept partial coverage in the panel.' }
       }
       for (const update of args?.features ?? []) {
         if (update === null || typeof update !== 'object' || typeof update.id !== 'string') {
@@ -309,6 +280,7 @@ export function registerTools(ctx, engine) {
     execute(args, exec) {
       const refused = call(exec.agent)
       if (refused !== undefined) return refused
+      if (exec.agent === undefined) return { ok: false, code: 'no_agent', message: 'relay_finish needs a calling agent.' }
       if (typeof args?.evidence !== 'string' || args.evidence.trim().length === 0) {
         return { ok: false, code: 'invalid_arguments', message: 'evidence must be a non-empty string.' }
       }
@@ -442,9 +414,9 @@ export function registerTools(ctx, engine) {
 
   ctx.tools.register({
     name: 'relay_control',
-    description: 'Pause or resume automatic handoff for a relay chain, hand it off immediately, or delete a stopped '
-      + 'chain. Deleting removes its truth source and cannot be undone, so only a paused, done, or failed chain may '
-      + 'be deleted.',
+    description: 'Pause or resume automatic handoff for a relay chain, hand it off immediately, or take a delegated '
+      + 'worker\'s unfinished features back. Only a member of the chain may call it; deleting a chain is a human '
+      + 'action in the panel.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -452,9 +424,10 @@ export function registerTools(ctx, engine) {
         chainId: { type: 'string', description: 'Chain id; defaults to the chain this session belongs to.' },
         action: {
           type: 'string',
-          enum: ['pause', 'resume', 'handoff', 'delete'],
-          description: 'pause stops automatic handoff; resume restarts it; handoff runs one now; delete removes the chain permanently.',
+          enum: ['pause', 'resume', 'handoff', 'reclaim'],
+          description: 'pause stops automatic handoff; resume restarts it; handoff runs one now; reclaim returns a worker\'s unfinished features.',
         },
+        sessionId: { type: 'string', description: 'Worker session to reclaim when action=reclaim.' },
       },
       required: ['action'],
     },
@@ -462,16 +435,16 @@ export function registerTools(ctx, engine) {
     async execute(args, exec) {
       const refused = call(exec.agent)
       if (refused !== undefined) return refused
+      if (exec.agent === undefined) return { ok: false, code: 'no_agent', message: 'relay_control needs a calling agent.' }
       const action = args?.action
       try {
         if (action === 'pause') return { ok: true, ...engine.setPaused({ agent: exec.agent, chainId: args.chainId, paused: true }) }
         if (action === 'resume') return { ok: true, ...engine.setPaused({ agent: exec.agent, chainId: args.chainId, paused: false }) }
         if (action === 'handoff') return { ok: true, ...await engine.handoffNow({ agent: exec.agent, chainId: args.chainId }) }
-        if (action === 'delete') {
-          const resolved = engine.resolveChain(exec.agent, args.chainId)
-          return { ok: true, ...engine.deleteChain(resolved.chain.chainId) }
+        if (action === 'reclaim') {
+          return { ok: true, ...engine.reclaimDelegation({ agent: exec.agent, chainId: args.chainId, sessionId: args.sessionId }) }
         }
-        return { ok: false, code: 'invalid_arguments', message: 'action must be pause, resume, handoff, or delete.' }
+        return { ok: false, code: 'invalid_arguments', message: 'action must be pause, resume, handoff, or reclaim.' }
       } catch (error) {
         return refusal(error)
       }

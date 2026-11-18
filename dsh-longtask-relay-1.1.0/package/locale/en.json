@@ -3,5 +3,15 @@
     "title": "Long-task relay",
     "description": "Turn a long task into a session chain: the truth source lives in workspace files, and when context nears its limit the plugin wraps up, opens a fresh session, and hands the work over. A sidebar panel monitors every chain and session.",
     "detail": "docs/DETAIL.md"
+  },
+  "ui": {
+    "acceptCoverage": "Accept",
+    "revokeCoverage": "Revoke",
+    "delete": "Delete",
+    "confirmDelete": "Delete this chain? Its features, progress, handoff brief, and audit log are removed too; this cannot be undone.",
+    "deleteBlocked": "Pause the chain before deleting it",
+    "raiseHandoffLimit": "Raise handoff limit",
+    "handoffTitle": "{title} · handoff {n}",
+    "subtaskTitle": "{title} · subtask"
   }
 }

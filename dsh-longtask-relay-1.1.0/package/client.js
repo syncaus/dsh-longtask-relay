@@ -70,6 +70,8 @@ window.__ModuleLoader__.load({
       noHandoff: '还没有交接说明',
       partialCoverage: '部分验证',
       acceptedByHuman: '人工接受',
+      acceptCoverage: '接受',
+      revokeCoverage: '撤销接受',
       configTitle: '长任务接力设置',
       configNote: '修改会写进当前 profile 的 cordis.patch.yml，保存后插件按新配置重载。',
       save: '保存',
@@ -107,6 +109,7 @@ window.__ModuleLoader__.load({
       delete: '删除',
       confirmDelete: '删除这条链？功能清单、进度、交接说明和审计记录会一起删除，不能恢复。',
       deleteBlocked: '先暂停这条链才能删除',
+      raiseHandoffLimit: '调高交接上限',
     }
 
     const STRINGS_EN = {
@@ -158,6 +161,8 @@ window.__ModuleLoader__.load({
       noHandoff: 'No handoff brief yet',
       partialCoverage: 'Partial proof',
       acceptedByHuman: 'Accepted by human',
+      acceptCoverage: 'Accept',
+      revokeCoverage: 'Revoke',
       configTitle: 'Long-task relay settings',
       configNote: 'Saving writes the active profile cordis.patch.yml and reloads the plugin with the new values.',
       save: 'Save',
@@ -195,6 +200,7 @@ window.__ModuleLoader__.load({
       delete: 'Delete',
       confirmDelete: 'Delete this chain? Its features, progress, handoff brief, and audit log are removed too; this cannot be undone.',
       deleteBlocked: 'Pause the chain before deleting it',
+      raiseHandoffLimit: 'Raise handoff limit',
     }
 
     const STATUS_LABELS = {
@@ -251,18 +257,22 @@ window.__ModuleLoader__.load({
           { key: 'compactedRatioFloor', kind: 'number', min: 0.1, max: 0.9, step: 0.01, hint: '已压缩过的会话触发收尾的最低比例' },
           { key: 'hardCompactions', kind: 'int', min: 1, hint: '压缩达到几次后不等边界，直接交接' },
           { key: 'wrapupTimeoutMinutes', kind: 'int', min: 1, hint: '收尾后空闲多少分钟仍然强制交接' },
+          { key: 'staleHandoffMinutes', kind: 'int', min: 1, hint: '收尾后 HANDOFF 仍然陈旧时给多少分钟宽限' },
           { key: 'cooldownMs', kind: 'int', min: 0, hint: '同一会话两次判定的最小间隔（毫秒）' },
         ],
       },
       {
         title: '行为',
         fields: [
-          { key: 'autoHandoff', kind: 'boolean', hint: '允许自动收尾与交接；关掉后只能手动操作' },
+          { key: 'autoHandoff', kind: 'boolean', hint: '允许自动收尾与交接；关掉后只能手动操作（自动续跑也停）' },
+          { key: 'autoContinue', kind: 'boolean', hint: '链头空闲且没有 goal 驱动时自动续跑下一个功能' },
+          { key: 'maxAutoContinues', kind: 'int', min: 1, hint: '每个会话自动续跑的次数上限，到顶记阻塞' },
           { key: 'maxHandoffs', kind: 'int', min: 1, hint: '单条链的交接次数上限' },
           { key: 'pauseGoalOnRetire', kind: 'boolean', hint: '交接后暂停旧会话的 goal' },
           { key: 'seedGoalOnHandoff', kind: 'boolean', hint: '交接后给新会话建一个 goal，让它按目标轮次自动继续；需要目标功能可用' },
           { key: 'goalRoundsPerHandoff', kind: 'int', min: 1, hint: '给新会话 goal 分配的续轮上限' },
           { key: 'notifyOldSession', kind: 'boolean', hint: '交接后给旧会话留一条退役说明' },
+          { key: 'commitTruth', kind: 'boolean', hint: '收尾 / 初始化提示里是否要求提交真理源' },
           { key: 'truthDir', kind: 'text', hint: '真理源目录，相对工作区' },
           { key: 'agentPreset', kind: 'text', hint: '新会话使用的 preset；留空继承当前会话' },
         ],
@@ -761,10 +771,11 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
         }
 
         /** One row of the feature list. */
-        function FeatureRow({ feature }) {
+        function FeatureRow({ feature, onAccept }) {
           const coverage = typeof feature.coverage === 'string' ? feature.coverage : null
           const showsCoverage = coverage !== null && coverage !== 'full'
           const accepted = feature.acceptedBy === 'human'
+          const acceptable = onAccept !== undefined && feature.passes === true && showsCoverage
           return h('li', { className: `relay-feature${feature.passes ? ' is-done' : ''}` },
             h('span', { className: 'relay-check' }, feature.passes ? '✓' : '·'),
             h('span', { className: 'relay-mono' }, feature.id),
@@ -776,6 +787,12 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
                     ? h('span', { className: 'relay-chip is-warn' }, COVERAGE_LABELS[coverage] ?? coverage)
                     : null,
                   accepted ? h('span', { className: 'relay-chip is-human' }, t('acceptedByHuman')) : null,
+                  acceptable
+                    ? h('button', {
+                      className: 'relay-btn',
+                      onClick: () => onAccept(feature, !accepted),
+                    }, accepted ? t('revokeCoverage') : t('acceptCoverage'))
+                    : null,
                 )
                 : null,
             ),
@@ -928,6 +945,18 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
                       }
                     },
                   }, t('handoffNow')),
+                  chain.pausedBy === 'handoff-limit'
+                    ? h('button', {
+                      className: 'relay-btn',
+                      disabled: busy,
+                      onClick: () => {
+                        void onAct('relay/raiseHandoffLimit', {
+                          chainId: chain.chainId,
+                          maxHandoffs: Math.min(1000, (chain.maxHandoffs ?? 32) + 8),
+                        })
+                      },
+                    }, t('raiseHandoffLimit'))
+                    : null,
                   h('button', {
                     className: 'relay-btn',
                     disabled: busy || !deletable,
@@ -967,7 +996,13 @@ body:not([data-ds-dark-theme]) .relay-child { box-shadow: 0 1px 2px rgba(0, 0, 0
               h(CardTitle, { sub: `${done}/${total}` }, t('features')),
               features.length === 0
                 ? h('div', { className: 'relay-text' }, t('noFeatures'))
-                : h('ul', { className: 'relay-rows' }, features.map(feature => h(FeatureRow, { key: feature.id, feature }))),
+                : h('ul', { className: 'relay-rows' }, features.map(feature => h(FeatureRow, {
+                  key: feature.id,
+                  feature,
+                  onAccept: (target, accepted) => {
+                    void onAct('relay/acceptCoverage', { chainId: chain.chainId, featureId: target.id, accepted })
+                  },
+                }))),
             ),
             h('section', { className: 'relay-card is-wide' },
               h(CardTitle, {}, t('handoff')),

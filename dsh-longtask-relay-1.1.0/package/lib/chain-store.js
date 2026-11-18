@@ -26,6 +26,16 @@ export const RELAY_CODES = Object.freeze({
   io: 'truth_io_failed',
   incomplete: 'features_incomplete',
   limit: 'handoff_limit',
+  /** The calling session is not a member of the chain it tried to write. */
+  notMember: 'not_chain_member',
+  /** The calling session has been retired and may only read. */
+  retired: 'session_retired',
+  /** A delegated worker tried to do something only its chain head may do. */
+  workerReadOnly: 'worker_read_only',
+  /** features.json no longer matches the frozen list. */
+  drift: 'features_drift',
+  /** The session is mid-turn; the action needs it idle. */
+  busy: 'session_busy',
 })
 
 /** A failure a tool can report without leaking an implementation error. */
@@ -200,6 +210,28 @@ export function featureProgress(document) {
   }
 }
 
+/** A chain id is `chain-` plus a UUID; the shape also guards recursive deletes. */
+const CHAIN_ID_PATTERN = /^chain-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/**
+ * Whether a value is a well-formed chain id.
+ * @param {unknown} value - candidate.
+ * @returns {boolean} true for `chain-<uuid>`.
+ */
+export function isChainId(value) {
+  return typeof value === 'string' && CHAIN_ID_PATTERN.test(value)
+}
+
+/**
+ * Reject a malformed chain id before it reaches the filesystem.
+ * @param {unknown} value - candidate.
+ * @returns {string} the id.
+ */
+function requireChainId(value) {
+  if (!isChainId(value)) throw new RelayError(RELAY_CODES.invalid, 'chainId must look like chain-<uuid>')
+  return value
+}
+
 /** Reject a chain record this version cannot read. */
 function validateChain(record) {
   if (record === null || typeof record !== 'object') throw new RelayError(RELAY_CODES.invalid, 'relay.json must be an object')
@@ -231,7 +263,11 @@ export class ChainStore {
    * @returns {ChainStore} store rooted there.
    */
   static forCwd(cwd, root = '.relay') {
-    return new ChainStore(join(resolve(cwd), root))
+    const store = new ChainStore(join(resolve(cwd), root))
+    // Keep the workspace root: a custom truthDir may be a subdirectory, so the
+    // parent of truthDir is not necessarily the workspace.
+    store.cwd = resolve(cwd)
+    return store
   }
 
   /**
@@ -240,6 +276,7 @@ export class ChainStore {
    * @returns {{ dir: string, chain: string, features: string, progress: string, handoff: string }} paths.
    */
   paths(chainId) {
+    requireChainId(chainId)
     const dir = join(this.truthDir, chainId)
     return {
       dir,
@@ -290,15 +327,26 @@ export class ChainStore {
   }
 
   /**
+   * Make sure the chain directory ignores the host-owned files.
+   * `relay.json` and `audit.jsonl` change on every evaluation, so a workspace
+   * that commits the truth source should not commit those.
+   * @param {string} chainId - chain identity.
+   * @returns {void}
+   */
+  ensureGitignore(chainId) {
+    writeAtomic(join(this.paths(chainId).dir, '.gitignore'), 'relay.json\naudit.jsonl\n')
+  }
+
+  /**
    * Read one chain record.
    * @param {string} chainId - chain identity.
    * @returns {object|undefined} validated record, or undefined when absent.
    */
   readChain(chainId) {
+    if (!isChainId(chainId)) return undefined
     const record = readJson(this.paths(chainId).chain)
     return record === undefined ? undefined : validateChain(record)
   }
-
   /**
    * Persist one chain record and register it in the index.
    * @param {object} record - complete validated record.
@@ -338,6 +386,7 @@ export class ChainStore {
       sessions: [],
       currentSessionId: null,
       pendingHandoff: null,
+      pausedBy: null,
       wrapupAt: null,
       readyAt: null,
       readySessionId: null,

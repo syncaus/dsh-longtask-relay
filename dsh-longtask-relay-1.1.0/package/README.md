@@ -36,11 +36,15 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 | `verifyFast` | 每次收尾跑得起的快速校验收（秒级） |
 | `verifyFull` | 完整校验，`relay_finish` 前跑 |
 
-每条功能还带一个 `coverage` 字段，说明**验证到了多少**：`full`（端到端）、`partial`（只覆盖部分分支 / 平台 / 视口 / 子命令）、`smoke`（只证明它能响）。偏低的覆盖率默认不允许自动通过——必须由人把 `acceptedBy` 置成 `human`。
+每条功能还带一个 `coverage` 字段，说明**验证到了多少**：`full`（端到端）、`partial`（只覆盖部分分支 / 平台 / 视口 / 子命令）、`smoke`（只证明它能响）。偏低的覆盖率默认不允许自动通过——必须由人在面板里点「接受」（模型工具不能写 `acceptedBy`）。
 
 这三条命令和覆盖率取值都与技术栈无关：Rust 的 `cargo test`、Java 的 `mvn verify`、前端 `tsc --noEmit`、Python 的 `pytest -q` 都能当 `verifyFast`/`verifyFull`；输出被识别为证据的形态包括比例（`41/41`）、退出码（`exit 0`）、结论词（`ok`/`passed`/`BUILD SUCCESS`/`通过`）。
 
 之后每完成一个功能，模型调用 `relay_checkpoint` 记录进度。会话空闲且上下文比例越过阈值时，插件先发一条收尾指令（做完当前单元、写进度、跑验证），下一轮空闲创建新会话并投递交接说明；新会话从真理源重建上下文，而不是复制旧对话。每次交接，插件把上一份交接说明自动追加到 `history.md`，新会话可以用 `relay_recall` 检索更早的交接和台账，不必全量读文件。
+
+**并行与续跑**：`relay_spawn` 把一部分功能交给子会话并行做；子会话上下文吃紧时，插件让它收尾并把未完成的功能交还链（清掉分配、写 PROGRESS），而不是只能压缩。父会话可以用 `relay_control(action="reclaim")` 随时收回。打开 `autoContinue` 后，链头空闲且没有 goal 驱动时会自动续跑下一个未委派的功能，超过 `maxAutoContinues` 记阻塞并暂停链。
+
+交接前会检查 `HANDOFF.md` 是否新鲜：没有 `relay:state` 块、或不是当前会话写的，就先收尾并给 `staleHandoffMinutes` 的宽限；仍不新鲜才交接，交接说明里会明确写"上一份已陈旧，以 PROGRESS / features / git 为准"。
 
 ## 工具
 
@@ -53,11 +57,11 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 | `relay_recall` | 按关键词检索链内记忆（HANDOFF / history / PROGRESS / decisions / traps / features / audit） |
 | `relay_finish` | 结束链；功能没全部通过时会被拒绝并列出剩余项 |
 | `relay_spawn` | 把一部分功能交给新的子会话并行执行（仅链头会话可调用） |
-| `relay_control` | 暂停 / 恢复自动接力、立即交接，或删除已停止（paused / done / failed）的链 |
+| `relay_control` | 暂停 / 恢复自动接力、立即交接，或收回某个 worker 的未完成功能（`reclaim`）；删除链只保留在面板 |
 
 ## 面板
 
-侧栏「长任务接力」：链列表（状态、进度、当前会话） + 展开后的会话时间线、功能清单、交接说明，以及暂停 / 恢复 / 立即交接 / 删除。删除需要二次确认，会连链目录（功能清单、进度、交接说明、审计）一起删掉；进行中的链必须先暂停。会话里另有「下游」「我的任务」两个标签页：「下游」列出本会话派发的子会话；「我的任务」列出分配给本会话的功能，以及它当前的 goal 阶段、轮次和是否会自动继续。
+侧栏「长任务接力」：链列表（状态、进度、当前会话） + 展开后的会话时间线、功能清单、交接说明，以及暂停 / 恢复 / 立即交接 / 删除 / 调高交接上限（链因交接次数到顶暂停时出现）。删除需要二次确认，会连链目录（功能清单、进度、交接说明、审计）一起删掉；进行中的链必须先暂停。会话里另有「下游」「我的任务」两个标签页：「下游」列出本会话派发的子会话；「我的任务」列出分配给本会话的功能，以及它当前的 goal 阶段、轮次和是否会自动继续。
 
 ## 配置
 
@@ -84,6 +88,10 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 | `maxHandoffs` | `32` | 单链交接上限 |
 | `cooldownMs` | `5000` | 同一会话两次判定之间的最小间隔 |
 | `wrapupTimeoutMinutes` | `10` | 收尾后空闲多久仍然强制交接 |
+| `staleHandoffMinutes` | `5` | 收尾后多久内必须写出新鲜的 HANDOFF；到期仍陈旧就带着警告交接 |
+| `autoContinue` | `false` | 链头空闲且无 goal 驱动时，自动续跑下一个功能；`autoHandoff` 关闭时不生效 |
+| `maxAutoContinues` | `20` | 每个会话自动续跑的次数上限，到顶记阻塞并暂停 |
+| `commitTruth` | `true` | 收尾/初始化提示里是否要求提交真理源；关掉只记录 sha256 |
 | `agentPreset` | 空 | 新会话使用的 preset；空表示继承当前会话 |
 | `pauseGoalOnRetire` | `true` | 交接后暂停旧会话的 goal |
 | `seedGoalOnHandoff` | `false` | 交接后给新会话建一个 goal，让目标轮驱动继续跑；需要目标服务可用 |

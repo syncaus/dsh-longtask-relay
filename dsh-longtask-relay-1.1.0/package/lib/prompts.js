@@ -70,7 +70,9 @@ export function renderInitializerPrompt(input) {
     '   <!-- /relay:state -->',
     '   Anything after the block is free-form detail the next session may skip.',
     `   Earlier briefs are kept automatically in ${paths.history}; later sessions search them with relay_recall.`,
-    '6. Commit the truth source if the workspace is a git repository; otherwise record its sha256 in PROGRESS.md.',
+    input.commitTruth === false
+      ? '6. Do not commit; record the truth source\'s sha256 in PROGRESS.md.'
+      : '6. Commit the truth source if the workspace is a git repository; otherwise record its sha256 in PROGRESS.md.',
     '',
     'Then begin feature 1 only. Rules for the rest of this session:',
     '- Work on one feature at a time; finish it before starting another.',
@@ -78,14 +80,16 @@ export function renderInitializerPrompt(input) {
     '  command, its exit code or a count, and enough text to show what ran — "all green" proves nothing.',
     '- Never write a count into the truth source by hand. Quote the command that produced it.',
     '- Never add, remove, or rename an entry in features.json directly; only change',
-    '  `passes`, `evidence`, `coverage`, `acceptedBy`, and `notes`. Work you discover later is appended with',
+    '  `passes`, `evidence`, `coverage`, and `notes`. The list is frozen the first time relay_checkpoint',
+    '  accepts it: after that, editing ids or titles by hand is refused, and a human accepts partial coverage',
+    '  in the panel. Work you discover later is appended with',
     '  relay_checkpoint `addFeatures` plus a `reason`, so the miss stays visible.',
     `- Update ${paths.progress} before you stop for any reason.`,
     '- When a blocker needs a human (credentials, machine access, a decision only the owner can make),',
     '  record it with relay_checkpoint `blocker` kind=external and say which action clears it. Do not keep',
     '  spending rounds on it.',
-    '- Call relay_finish only when every feature passes, each pass carries usable evidence, and any',
-    '  partial coverage has been accepted by the human.',
+    '- Call relay_finish only when every feature passes, each pass carries usable evidence, and a human',
+    '  has accepted any partial coverage in the panel (you cannot accept it yourself).',
     '</relay_start>',
   ].join('\n')
 }
@@ -115,7 +119,9 @@ export function renderWrapupPrompt(input) {
     '   the exact next action, the verification commands, how to reach the environment (credential variable',
     '   names only), and the traps that will bite again.',
     `   The plugin appends this brief to ${paths.history} automatically; earlier briefs stay searchable with relay_recall.`,
-    '7. Commit the workspace state if it is a git repository; otherwise record the truth-source sha256 in PROGRESS.md.',
+    input.commitTruth === false
+      ? '7. Do not commit; record the truth-source sha256 in PROGRESS.md.'
+      : '7. Commit the workspace state if it is a git repository; otherwise record the truth-source sha256 in PROGRESS.md.',
     '8. Do not begin another feature. Do not change the set of features except by appending discovered work.',
     '9. Then call relay_checkpoint with ready=true and a one-paragraph summary.',
     '</relay_wrapup>',
@@ -156,19 +162,39 @@ export function stateBlockLines(handoff) {
 export function renderHandoffPrompt(input) {
   const paths = truthPaths({ truthDir: input.truthDir })
   const features = input.features?.features ?? []
-  const pending = features.filter(feature => !feature.passes)
-  const done = features.length - pending.length
-  const next = pending[0]
+  const pending = features.filter(feature => !feature.passes && (feature.assignedSessionId === null || feature.assignedSessionId === undefined))
+  const done = features.filter(feature => feature.passes).length
+  const next = pending
+    .slice()
+    .sort((a, b) => Number(a.priority ?? 0) - Number(b.priority ?? 0))[0]
   const verify = next?.verify?.trim() || features[0]?.verify?.trim() || '(run the project test command)'
   const statusCheck = input.features?.statusCheck?.trim() || ''
   const verifyFast = input.features?.verifyFast?.trim() || ''
   const summary = stateBlockLines(input.handoff)
   const blocker = input.chain.blocker
 
+  const steps = [
+    `Confirm the working directory is ${input.chain.cwd}.`,
+    `Read ${paths.handoff} (the relay:state block is the contract), then ${paths.progress}, ${paths.decisions}, ${paths.traps}, then ${paths.features}.`,
+    ...(statusCheck === ''
+      ? []
+      : [
+        `Run the project's statusCheck (${statusCheck}) and compare it with the truth source: the previous\n`
+        + '   session wrote those numbers as claims, so where they disagree the command is right and the file\n'
+        + '   is stale. Fix the file before starting.',
+      ]),
+    `Run the verification command once (${verifyFast || verify || 'as recorded in features.json'}).\n`
+    + '   If it fails, fix that first and record why in PROGRESS.md.',
+    'Work on the single highest-priority feature whose "passes" is false.',
+  ]
+
   return [
     '<relay_handoff>',
     'You are taking over a long-running task from a previous session.',
     "That session's conversation is NOT yours. Rebuild context from the files below instead of guessing.",
+    ...(input.stale === true
+      ? ['WARNING: the previous HANDOFF.md is stale or missing; treat PROGRESS.md, features.json, and git state as authoritative.']
+      : []),
     '',
     `Objective: ${JSON.stringify(input.chain.objective)}`,
     `Chain: ${input.chain.chainId}   Handoff: #${input.handoffNo}   Previous session: ${input.previousSessionId ?? '(none)'}`,
@@ -184,23 +210,12 @@ export function renderHandoffPrompt(input) {
       : [`Known blocker (${blocker.kind}, waits on ${blocker.who}): ${blocker.action || '(no action recorded)'}`]),
     '',
     'Do this first, in order, before any other work:',
-    `1. Confirm the working directory is ${input.chain.cwd}.`,
-    `2. Read ${paths.handoff} (the relay:state block is the contract), then ${paths.progress}, ${paths.decisions}, ${paths.traps}, then ${paths.features}.`,
-    ...(statusCheck === ''
-      ? []
-      : [
-        `3. Run the project's statusCheck (${statusCheck}) and compare it with the truth source: the previous`,
-        '   session wrote those numbers as claims, so where they disagree the command is right and the file',
-        '   is stale. Fix the file before starting.',
-      ]),
-    `4. Run the verification command once (${verifyFast || verify || 'as recorded in features.json'}).`,
-    '   If it fails, fix that first and record why in PROGRESS.md.',
-    '5. Work on the single highest-priority feature whose "passes" is false.',
+    ...steps.map((step, index) => `${index + 1}. ${step}`),
     '',
     'Rules for this session:',
     '- One feature at a time; mark it passing only after its verify command passed, putting the command and',
     '  its exit code or a count in `evidence`. "All green" is a claim, not evidence.',
-    '- Set `coverage` honestly (full / partial / smoke); only the human may accept partial coverage.',
+    '- Set `coverage` honestly (full / partial / smoke); only a human can accept partial coverage, from the panel.',
     '- Append discovered work with relay_checkpoint `addFeatures` plus a `reason`; never rewrite the list.',
     `- Update ${paths.progress} before you stop. Earlier narration is not evidence; the files are.`,
     '- Finish with relay_finish once all pass; on a blocker pass blocker={kind:external|code|decision, who, action}',
@@ -264,5 +279,54 @@ export function renderRetireNotice(input) {
     'Do not continue the objective here: automatic continuation has stopped and the chain now follows the new session.',
     'Answer the human if they talk to you, but do not resume the task on your own.',
     '</relay_retired>',
+  ].join('\n')
+}
+
+/**
+ * Nudge for an idle chain head: continue with the next unassigned feature.
+ * @param {{ truthDir: string, feature: object, done: number, total: number }} input - continue input.
+ * @returns {string} the continue prompt.
+ */
+export function renderContinuePrompt(input) {
+  const paths = truthPaths({ truthDir: input.truthDir })
+  return [
+    '<relay_continue>',
+    `The chain is still active (${input.done}/${input.total} features passing) and you are the current session.`,
+    `Continue with ${input.feature.id} — ${input.feature.title}.`,
+    `Read ${paths.progress} and ${paths.handoff} first, work only this feature, and record its evidence before stopping.`,
+    '</relay_continue>',
+  ].join('\n')
+}
+
+/**
+ * Ask a delegated worker to close its phase and hand its unfinished features back.
+ * @param {{ truthDir: string, features: Array<object> }} input - worker wrap-up input.
+ * @returns {string} the worker wrap-up prompt.
+ */
+export function renderWorkerWrapupPrompt(input) {
+  const paths = truthPaths({ truthDir: input.truthDir })
+  return [
+    '<relay_worker_wrapup>',
+    'Your context is nearly full, so this worker session is closing.',
+    `Unfinished features were returned to the chain: ${input.features.map(feature => feature.id).join(', ')}.`,
+    'Do not start anything new. Do exactly this:',
+    `1. Write what you learned into ${paths.progress} (what is done, what remains, and the exact next command).`,
+    `2. Append traps that cost you time to ${paths.traps}, with the command or syntax that bit.`,
+    '3. Stop. The parent session will pick the features up again.',
+    '</relay_worker_wrapup>',
+  ].join('\n')
+}
+
+/**
+ * Notice for a worker whose delegated features were taken back by the parent.
+ * @param {{ chainId: string, features: Array<string> }} input - reclaim input.
+ * @returns {string} the reclaim notice.
+ */
+export function renderReclaimNotice(input) {
+  return [
+    '<relay_reclaimed>',
+    `The chain ${input.chainId} took back these features: ${input.features.join(', ')}.`,
+    'Stop working on them; write anything the next session needs into PROGRESS.md and traps.md, then stop.',
+    '</relay_reclaimed>',
   ].join('\n')
 }

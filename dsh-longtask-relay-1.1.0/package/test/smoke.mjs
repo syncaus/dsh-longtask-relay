@@ -9,7 +9,10 @@ import { join } from 'node:path'
 import { ChainIndex, ChainStore, RELAY_CODES, RelayError } from '../lib/chain-store.js'
 import { resolveConfig } from '../lib/config.js'
 import { RelayEngine } from '../lib/engine.js'
-import { renderHandoffPrompt, renderWrapupPrompt, stateBlockLines } from '../lib/prompts.js'
+import { ChainFingerprints } from '../lib/fingerprints.js'
+import { sessionTitle } from '../lib/labels.js'
+import { renderHandoffPrompt, renderInitializerPrompt, renderWrapupPrompt, stateBlockLines } from '../lib/prompts.js'
+import { RelayRemote } from '../lib/remote.js'
 import { registerTools } from '../lib/tools.js'
 
 const failures = []
@@ -134,7 +137,6 @@ function fakeWorld({ goalService = true, ...overrides } = {}) {
     objective: 'engine objective',
     features: [{ id: 'F001', title: 'a', passes: false, verify: 'npm test' }],
   })
-  local.writeHandoff(chain.chainId, '# HANDOFF\n\n<!-- relay:state -->\n- step: start F001\n<!-- /relay:state -->\n')
 
   const calls = []
   const newSessionId = 'session-new'
@@ -198,18 +200,26 @@ function fakeWorld({ goalService = true, ...overrides } = {}) {
     logger: { warn: () => {} },
     get: name => services[name],
   }
-  const engine = new RelayEngine(ctx, config, { chainIndex: new ChainIndex(indexHome) })
+  const engine = new RelayEngine(ctx, config, {
+    chainIndex: new ChainIndex(indexHome),
+    fingerprints: new ChainFingerprints(indexHome),
+  })
   // Adopt the existing chain so the fake agent is its current session.
   local.update(chain.chainId, record => {
     record.sessions.push({ sessionId: 'session-old', role: 'initializer', index: 0, joinedAt: new Date().toISOString() })
     record.currentSessionId = 'session-old'
     record.status = 'active'
   })
+  // Write the brief after the session joined: an older file is a stale handoff.
+  local.writeHandoff(chain.chainId, '# HANDOFF\n\n<!-- relay:state -->\n- step: start F001\n<!-- /relay:state -->\n')
   engine.members.set('session-old', { chainId: chain.chainId, truthDir: local.truthDir })
   engine.remember(local.readChain(chain.chainId), local)
   // A second engine over the same files, as after a plugin reload.
   const rebuild = () => {
-    const next = new RelayEngine(ctx, config, { chainIndex: new ChainIndex(indexHome) })
+    const next = new RelayEngine(ctx, config, {
+      chainIndex: new ChainIndex(indexHome),
+      fingerprints: new ChainFingerprints(indexHome),
+    })
     next.members.set('session-old', { chainId: chain.chainId, truthDir: local.truthDir })
     return next
   }
@@ -290,8 +300,14 @@ await checkAsync('deleting a paused chain removes its files and both indexes', a
 
 await checkAsync('deleting an unknown chain is refused', async () => {
   const world = fakeWorld()
+  // A malformed id never reaches the filesystem.
   assert.throws(
     () => world.engine.deleteChain('chain-missing'),
+    error => error instanceof RelayError && error.code === RELAY_CODES.invalid,
+  )
+  // A well-formed id that does not exist is a not-found.
+  assert.throws(
+    () => world.engine.deleteChain('chain-00000000-0000-4000-8000-000000000000'),
     error => error instanceof RelayError && error.code === RELAY_CODES.notFound,
   )
 })
@@ -479,7 +495,7 @@ await checkAsync('finish refuses while features are pending', async () => {
   const result = world.engine.finish({ agent: world.oldAgent, evidence: 'done', chainId: world.chain.chainId })
   assert.equal(result.ok, false)
   assert.equal(result.code, RELAY_CODES.incomplete)
-  world.local.patchFeatures(world.chain.chainId, [{ id: 'F001', passes: true, evidence: 'ran npm test' }])
+  world.local.patchFeatures(world.chain.chainId, [{ id: 'F001', passes: true, evidence: 'npm test -> exit 0, 3/3 passed' }])
   const second = world.engine.finish({ agent: world.oldAgent, evidence: 'done', chainId: world.chain.chainId })
   assert.equal(second.ok, true)
   assert.equal(world.local.readChain(world.chain.chainId).status, 'done')
@@ -768,17 +784,18 @@ function spawnWorld() {
     record.currentSessionId = 'session-parent'
     record.status = 'active'
   })
+  const calls = []
   const makeAgent = (id) => ({
     id,
     session: { id, header: { cwd: workspaceDir } },
     status: 'idle',
     inbox: { nextTurn: [], nextStep: [] },
-    followup() {},
-    inject() {},
+    followup(message) { calls.push({ kind: 'followup', sessionId: id, text: message.content[0].text }) },
+    inject(message) { calls.push({ kind: 'inject', sessionId: id, text: message.content[0].text }) },
   })
   const parent = makeAgent('session-parent')
   const child = makeAgent('session-child')
-  const calls = []
+  let ratio = 0.1
   let goal
   const services = {
     agents: { get: id => (id === 'session-parent' ? parent : id === 'session-child' ? child : undefined) },
@@ -791,16 +808,19 @@ function spawnWorld() {
       },
     },
     tokenMeter: {
-      contextPressure: () => ({ pressureTokens: 100, contextWindow: 1000 }),
-      measure: () => ({ totalTokens: 100 }),
+      contextPressure: () => ({ pressureTokens: Math.round(ratio * 1000), contextWindow: 1000 }),
+      measure: () => ({ totalTokens: Math.round(ratio * 1000) }),
     },
     sessions: { flush: async () => true },
   }
   const ctx = { logger: { warn: () => {} }, get: name => services[name] }
-  const engine = new RelayEngine(ctx, config, { chainIndex: new ChainIndex(indexHome) })
+  const engine = new RelayEngine(ctx, config, {
+    chainIndex: new ChainIndex(indexHome),
+    fingerprints: new ChainFingerprints(indexHome),
+  })
   engine.members.set('session-parent', { chainId: chain.chainId, truthDir: local.truthDir })
   engine.remember(local.readChain(chain.chainId), local)
-  return { engine, local, chain, parent, child, calls, setGoal: value => { goal = value } }
+  return { engine, local, chain, parent, child, calls, setGoal: value => { goal = value }, setRatio: value => { ratio = value } }
 }
 
 await checkAsync('spawn delegates features to a child session', async () => {
@@ -931,6 +951,641 @@ check('readAudit keeps valid lines and skips a truncated one', () => {
   assert.equal(later.length, 1)
   assert.equal(later[0].kind, 'second')
   assert.equal(later[0].actor, 'session-x')
+})
+
+// --- first batch: caller gates, acceptance, fingerprint, timers ---
+
+await checkAsync('a session outside the chain cannot write to it', async () => {
+  const world = fakeWorld()
+  const outsider = {
+    id: 'session-outsider',
+    session: { id: 'session-outsider', header: { cwd: world.chain.cwd } },
+    status: 'idle',
+    inbox: { nextTurn: [], nextStep: [] },
+  }
+  assert.throws(
+    () => world.engine.checkpoint({ agent: outsider, chainId: world.chain.chainId, note: 'x' }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.notMember,
+  )
+  assert.throws(
+    () => world.engine.finish({ agent: outsider, chainId: world.chain.chainId, evidence: 'done' }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.notMember,
+  )
+  assert.throws(
+    () => world.engine.setPaused({ agent: outsider, chainId: world.chain.chainId, paused: true }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.notMember,
+  )
+  await assert.rejects(
+    () => world.engine.handoffNow({ agent: outsider, chainId: world.chain.chainId }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.notMember,
+  )
+})
+
+await checkAsync('a retired session is read-only', async () => {
+  const world = fakeWorld()
+  world.local.update(world.chain.chainId, record => {
+    const session = record.sessions.find(entry => entry.sessionId === 'session-old')
+    session.retiredAt = new Date().toISOString()
+  })
+  assert.throws(
+    () => world.engine.checkpoint({ agent: world.oldAgent, note: 'late' }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.retired,
+  )
+  assert.throws(
+    () => world.engine.finish({ agent: world.oldAgent, evidence: 'done' }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.retired,
+  )
+})
+
+await checkAsync('a delegated worker only writes its own features', async () => {
+  const world = spawnWorld()
+  await world.engine.spawn({ agent: world.parent, features: ['F002'] })
+  assert.throws(
+    () => world.engine.finish({ agent: world.child, evidence: 'done' }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.workerReadOnly,
+  )
+  assert.throws(
+    () => world.engine.setPaused({ agent: world.child, chainId: world.chain.chainId, paused: true }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.workerReadOnly,
+  )
+  const own = world.engine.checkpoint({
+    agent: world.child,
+    features: [{ id: 'F002', passes: true, evidence: 'node two.mjs -> exit 0, 3 checks' }],
+  })
+  assert.equal(own.chainId, world.chain.chainId)
+  assert.throws(
+    () => world.engine.checkpoint({ agent: world.child, features: [{ id: 'F003', notes: 'not mine' }] }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.workerReadOnly,
+  )
+  assert.throws(
+    () => world.engine.checkpoint({ agent: world.child, ready: true }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.workerReadOnly,
+  )
+  assert.throws(
+    () => world.engine.checkpoint({ agent: world.child, features: [{ id: 'F002', assignedSessionId: null }] }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.workerReadOnly,
+  )
+})
+
+check('the model cannot write acceptedBy itself', () => {
+  const world = fakeWorld()
+  const registered = new Map()
+  registerTools({ tools: { register: definition => registered.set(definition.name, definition) } }, world.engine)
+  const definition = registered.get('relay_checkpoint')
+  const result = definition.execute({
+    features: [{ id: 'F001', passes: true, evidence: 'npm test -> exit 0, 3/3 passed', acceptedBy: 'human' }],
+  }, { agent: world.oldAgent })
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'invalid_arguments')
+  assert.throws(
+    () => world.engine.checkpoint({
+      agent: world.oldAgent,
+      features: [{ id: 'F001', acceptedBy: 'human' }],
+    }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.invalid,
+  )
+})
+
+check('the panel acceptance path releases partial coverage', () => {
+  const world = fakeWorld({ requireHumanAcceptedCoverage: true })
+  world.local.writeFeatures(world.chain.chainId, {
+    version: 1,
+    objective: 'engine objective',
+    features: [{ id: 'F001', title: 'a', passes: true, evidence: 'npm test -> exit 0, 3/3 passed', verify: 'npm test', coverage: 'partial' }],
+  })
+  world.engine.freezeFeatures(world.local.readChain(world.chain.chainId), world.local, 'test')
+  const refused = world.engine.finish({ agent: world.oldAgent, evidence: 'done' })
+  assert.equal(refused.ok, false, 'partial coverage must not finish before acceptance')
+  const remote = new RelayRemote(world.engine)
+  remote.acceptCoverage(world.chain.chainId, 'F001', true)
+  const accepted = world.engine.finish({ agent: world.oldAgent, evidence: 'done' })
+  assert.equal(accepted.ok, true)
+  remote.acceptCoverage(world.chain.chainId, 'F001', false)
+  const revoked = world.engine.finish({ agent: world.oldAgent, evidence: 'done' })
+  assert.equal(revoked.ok, false)
+  const descriptor = Object.getOwnPropertyDescriptor(RelayRemote.prototype, '@deepseek-ai/dsh-typert-protocol/remote-methods')
+  assert.ok(descriptor.value.methods.some(method => method.method === 'acceptCoverage'))
+})
+
+check('finish refuses a deleted, renamed, or unannounced feature', () => {
+  const world = fakeWorld()
+  world.local.writeFeatures(world.chain.chainId, {
+    version: 1,
+    objective: 'engine objective',
+    features: [
+      { id: 'F001', title: 'a', passes: false },
+      { id: 'F002', title: 'b', passes: false },
+    ],
+  })
+  world.engine.freezeFeatures(world.local.readChain(world.chain.chainId), world.local, 'test')
+  const deleted = world.local.readFeatures(world.chain.chainId)
+  deleted.features = deleted.features.filter(feature => feature.id !== 'F002')
+  world.local.writeFeatures(world.chain.chainId, deleted)
+  assert.throws(
+    () => world.engine.finish({ agent: world.oldAgent, evidence: 'done' }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.drift,
+  )
+  const renamed = world.local.readFeatures(world.chain.chainId)
+  renamed.features.push({ id: 'F002', title: 'renamed', passes: false })
+  renamed.features[1].title = 'renamed by hand'
+  world.local.writeFeatures(world.chain.chainId, renamed)
+  assert.throws(
+    () => world.engine.finish({ agent: world.oldAgent, evidence: 'done' }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.drift,
+  )
+  const added = world.local.readFeatures(world.chain.chainId)
+  added.features[1].title = 'b'
+  added.features.push({ id: 'F003', title: 'sneaked in', passes: false })
+  world.local.writeFeatures(world.chain.chainId, added)
+  assert.throws(
+    () => world.engine.finish({ agent: world.oldAgent, evidence: 'done' }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.drift,
+  )
+})
+
+check('checkpoint refuses a drifted feature list', () => {
+  const world = fakeWorld()
+  world.local.writeFeatures(world.chain.chainId, {
+    version: 1,
+    objective: 'engine objective',
+    features: [{ id: 'F001', title: 'a', passes: false }, { id: 'F002', title: 'b', passes: false }],
+  })
+  world.engine.freezeFeatures(world.local.readChain(world.chain.chainId), world.local, 'test')
+  const document = world.local.readFeatures(world.chain.chainId)
+  document.features[1].title = 'renamed by hand'
+  world.local.writeFeatures(world.chain.chainId, document)
+  assert.throws(
+    () => world.engine.checkpoint({ agent: world.oldAgent, features: [{ id: 'F001', notes: 'x' }] }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.drift,
+  )
+})
+
+check('finish re-checks evidence for every passing feature', () => {
+  const world = fakeWorld()
+  world.local.writeFeatures(world.chain.chainId, {
+    version: 1,
+    objective: 'engine objective',
+    features: [{ id: 'F001', title: 'a', passes: true, evidence: 'looks fine', verify: 'npm test', coverage: 'full' }],
+  })
+  const result = world.engine.finish({ agent: world.oldAgent, evidence: 'done' })
+  assert.equal(result.ok, false)
+  assert.equal(result.code, RELAY_CODES.incomplete)
+  assert.equal(result.features[0].id, 'F001')
+})
+
+await checkAsync('a wrap-up deadline hands off without a ready checkpoint', async () => {
+  const world = fakeWorld()
+  world.engine.config.wrapupTimeoutMinutes = 0.005
+  world.setRatio(0.55)
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.calls.filter(call => /<relay_wrapup>/.test(call.text ?? '')).length, 1)
+  await new Promise(resolve => setTimeout(resolve, 500))
+  assert.ok(world.calls.some(call => call.kind === 'create'), 'the wrap-up deadline did not hand off')
+  world.engine.dispose()
+})
+
+await checkAsync('a cooled-down evaluation is retried instead of dropped', async () => {
+  const world = fakeWorld({ cooldownMs: 200 })
+  world.setRatio(0.7)
+  await world.engine.evaluate(world.oldAgent)
+  world.engine.statsFor('session-old').ready = true
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0, 'the cooled check ran immediately')
+  await new Promise(resolve => setTimeout(resolve, 450))
+  assert.ok(world.calls.some(call => call.kind === 'create'), 'the cooled check was never retried')
+  world.engine.dispose()
+})
+
+await checkAsync('the initializer freezes the list on its first checkpoint', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'relay-start-home-'))
+  const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-start-ws-'))
+  const agent = {
+    id: 'session-initial',
+    session: { id: 'session-initial', header: { cwd: workspaceDir } },
+    status: 'idle',
+    inbox: { nextTurn: [], nextStep: [] },
+    followup() {},
+    inject() {},
+  }
+  const services = {
+    agents: { get: id => (id === 'session-initial' ? agent : undefined) },
+    sessions: { flush: async () => true },
+  }
+  const engine = new RelayEngine(
+    { logger: { warn: () => {} }, get: name => services[name] },
+    resolveConfig({}),
+    { chainIndex: new ChainIndex(home), fingerprints: new ChainFingerprints(home) },
+  )
+  const started = engine.start({ agent, objective: 'freeze me' })
+  assert.equal(engine.findChain(started.chainId).chain.status, 'initializing')
+  const store = engine.storeFor(engine.findChain(started.chainId).store.truthDir)
+  store.writeFeatures(started.chainId, {
+    version: 1,
+    objective: 'freeze me',
+    features: [{ id: 'F001', title: 'one', passes: false }],
+  })
+  engine.checkpoint({ agent, features: [{ id: 'F001', notes: 'listed' }] })
+  assert.equal(engine.findChain(started.chainId).chain.status, 'active')
+  assert.deepEqual(engine.fingerprints.get(started.chainId).features, [{ id: 'F001', title: 'one' }])
+  engine.dispose()
+})
+
+await checkAsync('a reload re-attaches the wrap-up deadline', async () => {
+  const world = fakeWorld()
+  world.engine.config.wrapupTimeoutMinutes = 0.005
+  world.setRatio(0.55)
+  await world.engine.evaluate(world.oldAgent)
+  world.engine.dispose()
+  const restarted = world.rebuild()
+  restarted.config.wrapupTimeoutMinutes = 0.005
+  restarted.scheduleWrapupDeadline(world.oldAgent)
+  assert.ok(restarted.timers.has('session-old'), 'the reload did not re-attach the deadline')
+  await new Promise(resolve => setTimeout(resolve, 500))
+  assert.ok(world.calls.some(call => call.kind === 'create'), 'the reloaded deadline did not hand off')
+  restarted.dispose()
+})
+
+check('pausing a chain clears its pending re-checks', () => {
+  const world = fakeWorld()
+  world.engine.scheduleEvaluate('session-old', 60_000)
+  assert.ok(world.engine.timers.has('session-old'))
+  world.engine.setPaused({ chainId: world.chain.chainId, paused: true })
+  assert.equal(world.engine.timers.has('session-old'), false)
+  world.engine.dispose()
+})
+
+// --- second batch: handoff robustness ---
+
+await checkAsync('a stale brief forces a wrap-up before a compaction handoff', async () => {
+  const world = fakeWorld({ hardCompactions: 2 })
+  world.local.writeHandoff(world.chain.chainId, 'Not written yet')
+  world.engine.noteCompaction('session-old')
+  world.engine.noteCompaction('session-old')
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.calls.filter(call => /<relay_wrapup>/.test(call.text ?? '')).length, 1)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0, 'handed off with a stale brief')
+})
+
+await checkAsync('a compaction handoff waits out the stale grace', async () => {
+  const world = fakeWorld({ hardCompactions: 2, staleHandoffMinutes: 5 })
+  world.local.writeHandoff(world.chain.chainId, 'Not written yet')
+  world.local.update(world.chain.chainId, record => {
+    record.wrapupAt = new Date(Date.now() - 10_000).toISOString()
+  })
+  world.engine.noteCompaction('session-old')
+  world.engine.noteCompaction('session-old')
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0, 'handed off before the stale grace')
+  world.engine.dispose()
+})
+
+await checkAsync('a stale handoff is forced with a warning after the grace', async () => {
+  const world = fakeWorld({ staleHandoffMinutes: 1, wrapupTimeoutMinutes: 10 })
+  world.local.writeHandoff(world.chain.chainId, 'Not written yet')
+  world.local.update(world.chain.chainId, record => {
+    record.wrapupAt = new Date(Date.now() - 2 * 60_000).toISOString()
+  })
+  await world.engine.evaluate(world.oldAgent)
+  const prompt = world.calls.find(call => call.kind === 'prompt')
+  assert.ok(prompt !== undefined, 'the stale grace did not hand off')
+  assert.match(prompt.text, /WARNING: the previous HANDOFF\.md is stale/)
+  const decision = world.local.readAudit(world.chain.chainId, 50)
+    .find(record => record.kind === 'supervisor.decision' && record.detail.action === 'handoff')
+  assert.equal(decision.detail.reason, 'stale')
+})
+
+await checkAsync('a stale brief waits out the grace even when pressure is high', async () => {
+  const world = fakeWorld({ staleHandoffMinutes: 5, wrapupTimeoutMinutes: 10, handoffRatio: 0.6 })
+  world.local.writeHandoff(world.chain.chainId, 'Not written yet')
+  world.local.update(world.chain.chainId, record => {
+    record.wrapupAt = new Date().toISOString()
+  })
+  world.setRatio(0.7)
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0, 'pressure bypassed the stale grace')
+  assert.ok(world.engine.timers.has('session-old'), 'no re-check was scheduled for the grace')
+  world.engine.dispose()
+})
+
+await checkAsync('the handoff cap pauses even when external blockers do not', async () => {
+  const world = fakeWorld({ pauseOnExternalBlocker: false, maxHandoffs: 1 })
+  world.local.update(world.chain.chainId, record => {
+    record.handoffCount = 1
+    record.maxHandoffs = 1
+  })
+  await assert.rejects(
+    () => world.engine.handoff(world.local.readChain(world.chain.chainId), world.oldAgent, 'manual', world.local),
+    error => error instanceof RelayError && error.code === RELAY_CODES.limit,
+  )
+  const after = world.local.readChain(world.chain.chainId)
+  assert.equal(after.status, 'paused')
+  assert.equal(after.pausedBy, 'handoff-limit')
+})
+
+await checkAsync('reconciling a pending handoff stops the old head from acting', async () => {
+  const world = fakeWorld()
+  world.local.update(world.chain.chainId, record => {
+    record.sessions.push({
+      sessionId: 'session-new',
+      role: 'worker',
+      index: 1,
+      joinedAt: new Date().toISOString(),
+      parentSessionId: null,
+      compactions: 0,
+    })
+    record.pendingHandoff = { sessionId: 'session-new', createdAt: new Date().toISOString(), reason: 'manual' }
+  })
+  world.setRatio(0.7)
+  await world.engine.evaluate(world.oldAgent)
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.currentSessionId, 'session-new')
+  assert.equal(chain.pendingHandoff, null)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0)
+})
+
+await checkAsync('a handoff does not shrink a durable compaction count', async () => {
+  const world = fakeWorld()
+  world.local.update(world.chain.chainId, record => {
+    record.sessions.find(session => session.sessionId === 'session-old').compactions = 3
+  })
+  const restarted = world.rebuild()
+  await restarted.handoff(world.local.readChain(world.chain.chainId), world.oldAgent, 'manual', world.local)
+  const after = world.local.readChain(world.chain.chainId).sessions
+    .find(session => session.sessionId === 'session-old').compactions
+  assert.equal(after, 3)
+})
+
+await checkAsync('manual handoff is refused while the session is running', async () => {
+  const world = fakeWorld()
+  world.oldAgent.status = 'running'
+  await assert.rejects(
+    () => world.engine.handoffNow({ agent: world.oldAgent, chainId: world.chain.chainId }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.busy,
+  )
+  world.oldAgent.status = 'idle'
+})
+
+await checkAsync('a failed handoff reuses the pending session on retry', async () => {
+  const world = fakeWorld()
+  const controller = world.engine.ctx.get('sessionController')
+  const originalPrompt = controller.prompt
+  controller.prompt = async () => { throw new Error('flush failed') }
+  world.setRatio(0.7)
+  await world.engine.evaluate(world.oldAgent)
+  world.engine.statsFor('session-old').ready = true
+  await world.engine.evaluate(world.oldAgent)
+  assert.ok(world.local.readChain(world.chain.chainId).pendingHandoff !== null)
+  controller.prompt = originalPrompt
+  const result = await world.engine.handoff(world.local.readChain(world.chain.chainId), world.oldAgent, 'checkpoint', world.local)
+  assert.equal(result.newSessionId, 'session-new', 'the retry created a second session instead of reusing the pending one')
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 1)
+})
+
+await checkAsync('the handoff limit pauses the chain instead of failing it', async () => {
+  const world = fakeWorld({ maxHandoffs: 1 })
+  world.local.update(world.chain.chainId, record => {
+    record.handoffCount = 1
+    record.maxHandoffs = 1
+  })
+  const chain = world.local.readChain(world.chain.chainId)
+  await assert.rejects(
+    () => world.engine.handoff(chain, world.oldAgent, 'manual', world.local),
+    error => error instanceof RelayError && error.code === RELAY_CODES.limit,
+  )
+  const limited = world.local.readChain(world.chain.chainId)
+  assert.equal(limited.status, 'paused')
+  assert.equal(limited.pausedBy, 'handoff-limit')
+  assert.equal(limited.blocker.kind, 'external')
+  const raised = world.engine.raiseHandoffLimit({ chainId: world.chain.chainId, maxHandoffs: 5 })
+  assert.equal(raised.maxHandoffs, 5)
+  assert.notEqual(world.local.readChain(world.chain.chainId).status, 'paused')
+})
+
+await checkAsync('autoContinue nudges an idle chain head once', async () => {
+  const world = fakeWorld({ autoContinue: true })
+  world.setRatio(0.2)
+  await world.engine.evaluate(world.oldAgent)
+  assert.ok(world.calls.some(call => /<relay_continue>/.test(call.text ?? '')))
+  assert.equal(world.engine.statsFor('session-old').autoContinues, 1)
+})
+
+await checkAsync('autoContinue stops at the configured limit', async () => {
+  const world = fakeWorld({ autoContinue: true, maxAutoContinues: 1 })
+  world.setRatio(0.2)
+  await world.engine.evaluate(world.oldAgent)
+  await world.engine.evaluate(world.oldAgent)
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.blocker.kind, 'external')
+  assert.equal(chain.status, 'paused')
+})
+
+await checkAsync('a pressured worker returns its unfinished features', async () => {
+  const world = spawnWorld()
+  await world.engine.spawn({ agent: world.parent, features: ['F002'] })
+  world.setRatio(0.6)
+  await world.engine.evaluate(world.child)
+  assert.ok(world.calls.some(call => /<relay_worker_wrapup>/.test(call.text ?? '')))
+  const feature = world.local.readFeatures(world.chain.chainId).features.find(entry => entry.id === 'F002')
+  assert.equal(feature.assignedSessionId, null)
+})
+
+await checkAsync('the chain head can reclaim a worker delegation', async () => {
+  const world = spawnWorld()
+  await world.engine.spawn({ agent: world.parent, features: ['F002'] })
+  const result = world.engine.reclaimDelegation({ agent: world.parent, sessionId: 'session-child' })
+  assert.deepEqual(result.features, ['F002'])
+  const feature = world.local.readFeatures(world.chain.chainId).features.find(entry => entry.id === 'F002')
+  assert.equal(feature.assignedSessionId, null)
+})
+
+check('the handoff prompt skips delegated features and sorts by priority', () => {
+  const prompt = renderHandoffPrompt({
+    chain: { chainId: 'chain-x', objective: 'o', cwd: '/w' },
+    features: {
+      statusCheck: '',
+      features: [
+        { id: 'F001', title: 'p3', priority: 3, passes: false },
+        { id: 'F002', title: 'p1-delegated', priority: 1, passes: false, assignedSessionId: 'session-w' },
+        { id: 'F003', title: 'p2', priority: 2, passes: false },
+      ],
+    },
+    handoff: '<!-- relay:state -->\n- x\n<!-- /relay:state -->',
+    handoffNo: 1,
+    previousSessionId: 'session-old',
+    truthDir: '/w/.relay/chain-x',
+  })
+  assert.match(prompt, /Next feature: F003/)
+})
+
+await checkAsync('clearing an external blocker resumes a chain paused by it', async () => {
+  const world = fakeWorld()
+  world.engine.checkpoint({
+    agent: world.oldAgent,
+    blocked: true,
+    note: 'waiting for access',
+    blocker: { kind: 'external', action: 'grant access' },
+  })
+  const paused = world.local.readChain(world.chain.chainId)
+  assert.equal(paused.status, 'paused')
+  assert.equal(paused.pausedBy, 'blocker')
+  world.engine.checkpoint({ agent: world.oldAgent, blocker: null })
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'active')
+})
+
+await checkAsync('a timed-out handoff records the timeout reason', async () => {
+  const world = fakeWorld()
+  world.engine.config.wrapupTimeoutMinutes = 0.005
+  world.setRatio(0.55)
+  await world.engine.evaluate(world.oldAgent)
+  await new Promise(resolve => setTimeout(resolve, 500))
+  const decision = world.local.readAudit(world.chain.chainId, 50)
+    .find(record => record.kind === 'supervisor.decision' && record.detail.action === 'handoff')
+  assert.equal(decision.detail.reason, 'timeout')
+  world.engine.dispose()
+})
+
+check('a moved chain record is corrected on read', () => {
+  const world = fakeWorld()
+  world.local.update(world.chain.chainId, record => {
+    record.truthDir = '/nonexistent/.relay'
+    record.cwd = '/nonexistent'
+  })
+  const { chain } = world.engine.findChain(world.chain.chainId)
+  assert.equal(chain.truthDir, world.local.truthDir)
+  assert.equal(chain.cwd, world.chain.cwd)
+  assert.equal(world.local.readChain(world.chain.chainId).truthDir, world.local.truthDir)
+})
+
+check('the chain gitignore covers host-owned files', () => {
+  const world = fakeWorld()
+  world.local.ensureGitignore(world.chain.chainId)
+  const text = readFileSync(join(world.local.paths(world.chain.chainId).dir, '.gitignore'), 'utf8')
+  assert.match(text, /relay\.json/)
+  assert.match(text, /audit\.jsonl/)
+})
+
+check('commitTruth=false removes the commit instruction', () => {
+  const wrapup = renderWrapupPrompt({ truthDir: '/w/.relay/c', featuresTotal: 1, featuresDone: 0, commitTruth: false })
+  assert.ok(!wrapup.includes('Commit the workspace state'))
+  assert.ok(wrapup.includes('Do not commit'))
+  const initial = renderInitializerPrompt({ truthDir: '/w/.relay/c', objective: 'o', commitTruth: false })
+  assert.ok(!initial.includes('Commit the truth source'))
+})
+
+// --- third batch: small items ---
+
+check('malformed chain ids are rejected before touching the filesystem', () => {
+  const world = fakeWorld()
+  for (const bad of ['../chain-00000000-0000-4000-8000-000000000000', 'chain-', 'chain-../../x', '']) {
+    assert.throws(
+      () => world.local.paths(bad),
+      error => error instanceof RelayError && error.code === RELAY_CODES.invalid,
+      `paths accepted ${JSON.stringify(bad)}`,
+    )
+  }
+  assert.equal(world.local.readChain('../chain-00000000-0000-4000-8000-000000000000'), undefined)
+})
+
+check('truthDir may not contain a parent segment', () => {
+  assert.throws(() => resolveConfig({ truthDir: '../escape' }), /must not contain "\.\."/)
+  assert.throws(() => resolveConfig({ truthDir: 'a/../../b' }), /must not contain "\.\."/)
+  assert.equal(resolveConfig({ truthDir: 'relay' }).truthDir, 'relay')
+})
+
+check('recall matches whole paragraphs in markdown', () => {
+  const world = fakeWorld()
+  world.local.appendLedger(world.chain.chainId, 'traps', 'first line of the block CRLF\nsecond line also CRLF')
+  const result = world.engine.recall({ chainId: world.chain.chainId, query: 'CRLF' })
+  assert.equal(result.total, 1)
+  assert.equal(result.matches[0].file, 'traps.md')
+  assert.ok(result.matches[0].text.includes('first line'))
+  assert.ok(result.matches[0].text.includes('second line'))
+})
+
+check('status reuses its payload until a chain file changes', () => {
+  const world = fakeWorld()
+  const first = world.engine.status()
+  const second = world.engine.status()
+  assert.equal(first, second, 'status did not reuse the cached payload')
+  world.local.update(world.chain.chainId, record => { record.lastError = 'changed' })
+  const third = world.engine.status()
+  assert.notEqual(first, third, 'status ignored a changed chain file')
+  assert.equal(third[0].lastError, 'changed')
+})
+
+check('starting a chain clears the negative locate cache', () => {
+  const world = fakeWorld()
+  const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-later-'))
+  const outsider = {
+    id: 'session-later',
+    session: { id: 'session-later', header: { cwd: workspaceDir } },
+    status: 'idle',
+    inbox: { nextTurn: [], nextStep: [] },
+    followup() {},
+    inject() {},
+  }
+  assert.equal(world.engine.locate(outsider.session), undefined)
+  assert.equal(world.engine.misses.has('session-later'), true)
+  world.engine.start({ agent: outsider, objective: 'later' })
+  assert.equal(world.engine.misses.has('session-later'), false)
+  assert.ok(world.engine.locate(outsider.session) !== undefined)
+})
+
+check('a compaction before the first evaluation starts from the durable count', () => {
+  const world = fakeWorld()
+  world.engine.noteCompaction('session-old')
+  const restarted = world.rebuild()
+  restarted.members.set('session-old', { chainId: world.chain.chainId, truthDir: world.local.truthDir })
+  restarted.noteCompaction('session-old')
+  assert.equal(world.local.readChain(world.chain.chainId).sessions
+    .find(session => session.sessionId === 'session-old').compactions, 2)
+})
+
+check('session titles come from the locale file', () => {
+  assert.equal(sessionTitle('handoff', { title: 'demo', index: 3 }), 'demo · 接力 3')
+  assert.equal(sessionTitle('subtask', { title: 'demo' }), 'demo · 子任务')
+})
+
+check('handoff steps are numbered without gaps', () => {
+  const base = {
+    chain: { chainId: 'chain-x', objective: 'o', cwd: '/w' },
+    features: { statusCheck: '', features: [{ id: 'F001', title: 'a', passes: false }] },
+    handoff: '<!-- relay:state -->\n- x\n<!-- /relay:state -->',
+    handoffNo: 1,
+    previousSessionId: 'session-old',
+    truthDir: '/w/.relay/chain-x',
+  }
+  const plain = renderHandoffPrompt(base)
+  const plainNumbers = [...plain.matchAll(/^(\d+)\. /gm)].map(match => Number(match[1]))
+  assert.deepEqual(plainNumbers, [1, 2, 3, 4])
+  const withStatus = renderHandoffPrompt({
+    ...base,
+    features: { statusCheck: 'npm test', features: base.features.features },
+  })
+  const statusNumbers = [...withStatus.matchAll(/^(\d+)\. /gm)].map(match => Number(match[1]))
+  assert.deepEqual(statusNumbers, [1, 2, 3, 4, 5])
+})
+
+check('a nested truthDir still resolves the workspace cwd', () => {
+  const home = mkdtempSync(join(tmpdir(), 'relay-nested-home-'))
+  const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-nested-ws-'))
+  const store = ChainStore.forCwd(workspaceDir, 'docs/relay')
+  const chain = store.create({ objective: 'nested', cwd: workspaceDir })
+  const engine = new RelayEngine(
+    { logger: { warn: () => {} }, get: () => undefined },
+    resolveConfig({ truthDir: 'docs/relay' }),
+    { chainIndex: new ChainIndex(home), fingerprints: new ChainFingerprints(home) },
+  )
+  const normalized = engine.normalizeLocation({ ...chain, cwd: '/wrong', truthDir: '/wrong' }, store)
+  assert.equal(normalized.cwd, workspaceDir)
+  assert.equal(normalized.truthDir, store.truthDir)
+  engine.dispose()
+})
+
+check('package metadata exposes the test script and version', () => {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(pkg.version, '1.2.0')
+  assert.match(pkg.scripts.test, /node test\/smoke\.mjs/)
 })
 
 rmSync(workspace, { recursive: true, force: true })
