@@ -81,8 +81,8 @@
         "zh": "长任务接力"
       },
       "description": {
-        "en": "Turn a long task into a session chain: the truth source lives in workspace files, and when context nears its limit the plugin wraps up, opens a fresh session, and hands the work over. The new session keeps the permission preset, goal, and plan mode. The panel lists what needs a human, shows the relay track, features, and truth source, and can pause, hand off, clear a blocker, or finish a chain.",
-        "zh": "把长任务变成一条会话链：真理源落在工作区文件，上下文逼近上限时自动收尾、开新会话并交接，新会话沿用权限预设、目标和计划模式。面板集中列出需要人处理的事，可查看接力轨道、功能清单和真理源，并暂停、交接、解除阻塞或结束链。"
+        "en": "Turn a long task into a session chain: the truth source lives in workspace files, and when context nears its limit the plugin wraps up, opens a fresh session, and hands the work over. The new session keeps the permission preset, goal, and plan mode. Cluster mode plans first, then opens several sessions in parallel once you confirm the grouping. The panel lists what needs a human, shows the relay track, features, and truth source, and can pause, hand off, clear a blocker, or finish a chain.",
+        "zh": "把长任务变成一条会话链：真理源落在工作区文件，上下文逼近上限时自动收尾、开新会话并交接，新会话沿用权限预设、目标和计划模式。集群模式先谈需求定计划，再由你确认分组，开出多个会话并行执行。面板集中列出需要人处理的事，可查看接力轨道、功能清单和真理源，并暂停、交接、解除阻塞或结束链。"
       },
       "icon": "https://raw.githubusercontent.com/syncaus/dsh-plugins/main/dsh-longtask-relay-1.1.0/package/icon.svg",
       "author": "syncaus",
@@ -94,6 +94,19 @@
         "keywords": ["relay", "handoff", "context", "long-running", "session"]
       },
       "versions": [
+        {
+          "version": "1.4.2",
+          "publishTimestamp": 1795066042,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/syncaus/dsh-plugins",
+            "commit": "65b82ea8b061e386f9bb49014efbd06ecab1412e",
+            "path": "dsh-longtask-relay-1.1.0/package"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.3"
+          }
+        },
         {
           "version": "1.3.2",
           "publishTimestamp": 1795059726,
