@@ -180,6 +180,8 @@ export function registerTools(ctx, engine) {
               verify: { type: 'string' },
               coverage: { type: 'string', enum: ['full', 'partial', 'smoke'] },
               notes: { type: 'string' },
+              files: { type: 'array', items: { type: 'string' } },
+              dependsOn: { type: 'array', items: { type: 'string' } },
             },
             required: ['id', 'title'],
           },

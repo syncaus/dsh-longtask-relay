@@ -90,8 +90,8 @@ relay_propose                AI 提交启动方案：分组、隔离方式、理
 - 某功能依赖的功能在另一个组里（提示：放进同一组）。
 
 通过后：
-- 冻结功能清单（沿用 `freezeFeatures`）。
-- 算出冲突提示 `conflicts`：两个 `shared` 组的 `files` 有相同路径，或一个是另一个的目录前缀。只提示，不拒绝，由人决定。没写 `files` 的功能记为「范围未知」，同样提示。
+- 不冻结功能清单：规划阶段清单可以反复改、方案可以重新提交，冻结发生在启动那一刻（实现审查后改）。
+- 算出冲突提示 `conflicts`：两个 `shared` 组的 `files` 有相同路径，或一个是另一个的目录前缀；主会话自己要做的活（`worktree` 组和没进组的功能）也和各 `shared` 组比较。只提示，不拒绝，由人决定。没写 `files` 的功能记为「范围未知」，同样提示。
 - 链记录写 `launchPlan = { proposedAt, proposedBy, groups, note, conflicts }`。重复调用覆盖旧方案。
 - 审计 `cluster.proposed`。
 

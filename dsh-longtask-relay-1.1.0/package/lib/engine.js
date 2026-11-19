@@ -80,49 +80,79 @@ function chainSummary(chain, progress) {
     // `cluster` chains plan first and wait for a human to confirm the parallel launch.
     mode: chain.mode ?? 'relay',
     launchPending: chain.status === 'planning' && Array.isArray(chain.launchPlan?.groups) && chain.launchPlan.launchedAt === undefined,
-    // Launch groups that wait for features to pass before a worker is opened for them.
-    launchWaiting: Array.isArray(chain.launchPlan?.results) ? chain.launchPlan.results.filter(result => result.waiting === true).length : 0,
   }
 }
 
 /**
- * Canonical form of a feature scope path: forward slashes, no trailing slash.
+ * Canonical form of a feature scope path, so the spellings a model mixes compare equal:
+ * forward slashes, no leading `./`, no trailing slash, lower case, and relative to the chain's
+ * working directory when the path sits under it.
  * @param {string} path - path or directory prefix from a feature's `files`.
- * @returns {string} comparable path.
+ * @param {string} [cwd] - the chain's working directory; an absolute path under it is made relative.
+ * @returns {string} comparable path; empty for the working directory itself.
  */
-function scopePath(path) {
-  return String(path).replace(/\\/g, '/').replace(/\/+$/, '')
+function scopePath(path, cwd) {
+  let value = String(path).replace(/\\/g, '/')
+  if (typeof cwd === 'string' && cwd.length > 0) {
+    const base = cwd.replace(/\\/g, '/').replace(/\/+$/, '')
+    // The boundary matters: `proj2/x` is not under `proj`.
+    if (base.length > 0 && (value.toLowerCase() === base.toLowerCase() || value.toLowerCase().startsWith(`${base.toLowerCase()}/`))) {
+      value = value.slice(base.length).replace(/^\/+/, '')
+    }
+  }
+  return value.replace(/^(\.\/)+/, '').replace(/\/+$/, '').toLowerCase()
+}
+
+/**
+ * The covering path when two scope lists meet: a path equal on both sides, or a directory that holds one from the other.
+ * @param {Array<string>} left - canonical paths of one feature.
+ * @param {Array<string>} right - canonical paths of the other.
+ * @returns {string|undefined} the covering path, or undefined when the scopes are apart.
+ */
+function overlapPath(left, right) {
+  for (const a of left) {
+    for (const b of right) {
+      // An empty path is the working directory, which holds everything.
+      if (a === b || a === '' || b.startsWith(`${a}/`)) return a
+      if (b === '' || a.startsWith(`${b}/`)) return b
+    }
+  }
+  return undefined
 }
 
 /**
  * Where a proposed cluster launch would put two sessions on the same files.
- * Only different `shared` groups can collide: they work in one directory at the same time, while
- * features inside one group run in order and a `worktree` group has its own copy. A feature without
- * `files` could touch anything, so it is reported as an unknown scope.
- * @param {{ features: Array<{ id: string, files?: Array<string> }> }} document - normalized features.
+ * Different `shared` groups collide: they work in one directory at the same time. A shared group also
+ * collides with the work the planning session keeps, compared as one pseudo group `main`: the features of
+ * `worktree` groups (not opened in this version) and the ungrouped features that are neither passing nor
+ * delegated. Features inside one group run in order and cannot collide. A feature without `files` could touch
+ * anything, so a scopeless feature in a shared group is reported as an unknown scope (`main` is not).
+ * @param {{ features: Array<{ id: string, files?: Array<string>, passes?: boolean, assignedSessionId?: string|null }> }} document - normalized features.
  * @param {Array<{ id: string, isolation: string, features: Array<string> }>} groups - validated groups.
+ * @param {string} [cwd] - the chain's working directory, to read absolute scope paths against.
  * @returns {Array<object>} conflicts: `overlap` (path equal or one a directory prefix of the other; `path` is the
  *   covering one) once per feature pair, and `unknown-scope` per scopeless feature in a shared group.
  */
-export function clusterConflicts(document, groups) {
+export function clusterConflicts(document, groups, cwd) {
   const byId = new Map(document.features.map(feature => [feature.id, feature]))
+  const scopeOf = id => (byId.get(id)?.files ?? []).map(file => scopePath(file, cwd))
   const shared = groups.filter(group => group.isolation === 'shared')
+  const grouped = new Set(groups.flatMap(group => group.features))
+  const kept = [
+    ...groups.filter(group => group.isolation === 'worktree').flatMap(group => group.features),
+    ...document.features
+      .filter(feature => !grouped.has(feature.id) && !feature.passes
+        && (typeof feature.assignedSessionId !== 'string' || feature.assignedSessionId.length === 0))
+      .map(feature => feature.id),
+  ]
   const conflicts = []
+  const others = [...shared.map(group => ({ id: group.id, features: group.features })), { id: 'main', features: kept }]
   for (let a = 0; a < shared.length; a += 1) {
-    for (let b = a + 1; b < shared.length; b += 1) {
+    for (let b = a + 1; b < others.length; b += 1) {
       for (const idA of shared[a].features) {
-        for (const idB of shared[b].features) {
-          const filesA = (byId.get(idA)?.files ?? []).map(scopePath)
-          const filesB = (byId.get(idB)?.files ?? []).map(scopePath)
-          let path
-          for (const left of filesA) {
-            for (const right of filesB) {
-              if (path !== undefined) break
-              if (left === right || right.startsWith(`${left}/`)) path = left
-              else if (left.startsWith(`${right}/`)) path = right
-            }
-          }
-          if (path !== undefined) conflicts.push({ kind: 'overlap', groups: [shared[a].id, shared[b].id], features: [idA, idB], path })
+        for (const idB of others[b].features) {
+          const path = overlapPath(scopeOf(idA), scopeOf(idB))
+          if (path !== undefined) conflicts.push({ kind: 'overlap', groups: [shared[a].id, others[b].id], features: [idA, idB], path })
         }
       }
     }
@@ -427,6 +457,8 @@ export class RelayEngine {
    * @returns {boolean} whether this call froze the list.
    */
   freezeFeatures(chain, store, actor) {
+    // A cluster chain keeps editing its list while it plans; `launchCluster` freezes it.
+    if (chain.status === 'planning') return false
     const document = store.readFeatures(chain.chainId)
     if (document === undefined || document.features.length === 0) return false
     const snapshot = document.features.map(feature => ({ id: feature.id, title: feature.title }))
@@ -464,6 +496,8 @@ export class RelayEngine {
    * @returns {void}
    */
   verifyFrozen(chain, store) {
+    // Nothing is frozen while a cluster chain plans, even when a failed launch left a fingerprint behind.
+    if (chain.status === 'planning') return
     const stored = this.fingerprints.get(chain.chainId)
     if (stored === undefined) return
     const document = store.readFeatures(chain.chainId)
@@ -816,6 +850,11 @@ export class RelayEngine {
     if (blocker !== undefined) this.recordBlocker(store, chain.chainId, blocker)
     if (blocked === true) {
       store.update(chain.chainId, record => {
+        if (record.status === 'planning') {
+          // Planning ends only by launch or delete; the note stays visible without pausing.
+          record.lastError = typeof note === 'string' && note.trim().length > 0 ? note.trim() : 'blocked by a session'
+          return
+        }
         record.status = 'paused'
         // A blocker and blocked=true usually arrive together; the blocker owns
         // the pause so clearing it can release the chain.
@@ -909,7 +948,8 @@ export class RelayEngine {
     }
     store.update(chainId, record => {
       record.blocker = description
-      if (kind === 'external' && this.config.pauseOnExternalBlocker) {
+      // A planning chain leaves `planning` only through launch or delete, so its blocker is recorded without a pause.
+      if (kind === 'external' && this.config.pauseOnExternalBlocker && record.status !== 'planning') {
         record.status = 'paused'
         record.pausedBy = 'blocker'
         record.lastError = `external blocker: ${description.action || 'waiting for a human'}`
@@ -1020,6 +1060,10 @@ export class RelayEngine {
   finish({ agent, chainId, evidence }) {
     const { chain, store } = this.resolveChain(agent, chainId)
     this.assertChainHeadWriter(chain, agent)
+    // Planning ends only by launch or delete; finishing would skip the human's launch confirmation.
+    if (chain.status === 'planning') {
+      throw new RelayError(RELAY_CODES.invalid, `chain ${chain.chainId} is planning; launch it or delete it`)
+    }
     const document = store.readFeatures(chain.chainId)
     if (document === undefined) throw new RelayError(RELAY_CODES.notFound, `chain ${chain.chainId} has no features.json`)
     this.verifyFrozen(chain, store)
@@ -1088,6 +1132,18 @@ export class RelayEngine {
       }
     } catch (error) {
       this.warn(`could not complete the goal of chain ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    // The workers' own goals end with the chain too; a loaded worker whose goal is still running would otherwise go on.
+    for (const session of chain.sessions) {
+      if (!this.isWorker(session)) continue
+      try {
+        const found = this.workerGoalOf(session)
+        if (found === undefined || found.view.phase !== 'active') continue
+        found.goals.complete(found.agent, { id: found.view.id, revision: found.view.revision })
+        this.record(store, chain.chainId, { kind: 'goal.completed', actor: 'system', detail: { sessionId: found.agent.id, goalId: found.view.id } })
+      } catch (error) {
+        this.warn(`could not complete the goal of worker ${session.sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      }
     }
     return { ok: true, chainId: chain.chainId, featuresTotal: progress.total }
   }
@@ -1171,9 +1227,20 @@ export class RelayEngine {
           store.update(chain.chainId, record => { record.goalPausedByRelay = { sessionId: head.agent.id, goalId: head.view.id } })
           this.record(store, chain.chainId, { kind: 'goal.paused', actor: 'host', detail: { sessionId: head.agent.id, goalId: head.view.id } })
         }
+        // The workers' own goals would keep sending rounds to a chain the human just stopped.
+        const pausedWorkers = chain.sessions
+          .filter(session => this.isWorker(session) && (session.retiredAt === null || session.retiredAt === undefined))
+          .filter(session => this.pauseWorkerGoal(chain, store, session.sessionId, 'chain-paused'))
+          .map(session => ({ sessionId: session.sessionId, goalId: session.goalId }))
+        if (pausedWorkers.length > 0) {
+          store.update(chain.chainId, record => { record.workerGoalsPaused = [...(record.workerGoalsPaused ?? []), ...pausedWorkers] })
+        }
       } else if (!paused) {
         const current = store.readChain(chain.chainId)
-        if (current?.status === 'active') this.releasePausedGoal(current, store, agent?.session?.id ?? 'host')
+        if (current?.status === 'active') {
+          this.releasePausedGoal(current, store, agent?.session?.id ?? 'host')
+          this.resumeWorkerGoals(current, store, agent?.session?.id ?? 'host')
+        }
       }
     } catch (error) {
       this.warn(`could not sync the goal of chain ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
@@ -1817,6 +1884,9 @@ export class RelayEngine {
     for (const group of normalized) {
       for (const featureId of group.features) {
         for (const dependency of byId.get(featureId).dependsOn ?? []) {
+          if (!byId.has(dependency)) {
+            throw new RelayError(RELAY_CODES.invalid, `feature ${featureId} depends on ${dependency}, which is not in features.json`)
+          }
           const dependencyGroup = owner.get(dependency)
           if (dependencyGroup !== undefined && dependencyGroup !== group.id) {
             throw new RelayError(
@@ -1852,8 +1922,7 @@ export class RelayEngine {
     const document = store.readFeatures(chain.chainId)
     if (document === undefined) throw new RelayError(RELAY_CODES.notFound, `chain ${chain.chainId} has no features.json`)
     const validated = this.validateClusterGroups(document, groups)
-    this.freezeFeatures(chain, store, agent.session.id)
-    const conflicts = clusterConflicts(document, validated)
+    const conflicts = clusterConflicts(document, validated, chain.cwd)
     store.update(chain.chainId, record => {
       record.launchPlan = {
         proposedAt: new Date().toISOString(),
@@ -1899,7 +1968,10 @@ export class RelayEngine {
     if (document === undefined) throw new RelayError(RELAY_CODES.notFound, `chain ${chain.chainId} has no features.json`)
     // The stored plan is checked again too: features may have passed or moved since it was proposed.
     const plan = this.validateClusterGroups(document, Array.isArray(groups) ? groups : chain.launchPlan.groups)
-    const conflicts = clusterConflicts(document, plan)
+    const conflicts = clusterConflicts(document, plan, chain.cwd)
+    // The list is frozen here, not while planning: the plan just validated is the contract the sessions work against.
+    this.updateFingerprint(chain, store)
+    this.record(store, chain.chainId, { kind: 'features.frozen', actor: 'host', detail: { features: document.features.length } })
 
     this.busyChains.add(chain.chainId)
     try {
@@ -2129,9 +2201,121 @@ export class RelayEngine {
           entry.goalSeeded = true
         }
       })
+      // The goal was just created armed in this process; a later disarm is somebody's decision (same as a handoff successor).
+      this.statsFor(sessionId).rearmChecked = true
     } catch (error) {
       this.warn(`could not create a goal for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  /**
+   * A worker's plugin-created goal with the live session that has it.
+   * Only a goal the plugin recorded on the entry (`goalSeeded`, and the id still matches the live goal)
+   * qualifies: a goal the user set on a worker is the user's.
+   * @param {object|undefined} entry - the worker's session entry.
+   * @returns {{ goals: object, agent: object, view: object }|undefined} undefined when the worker has no such goal or is not loaded.
+   */
+  workerGoalOf(entry) {
+    if (entry?.goalSeeded !== true || typeof entry.goalId !== 'string') return undefined
+    const goals = this.ctx.get('goals')
+    const agent = this.ctx.get('agents')?.get(entry.sessionId)
+    if (goals === undefined || agent === undefined) return undefined
+    const view = this.goalOf(agent)
+    if (view === undefined || view.id !== entry.goalId) return undefined
+    return { goals, agent, view }
+  }
+
+  /**
+   * Pause a worker's plugin-created goal when the worker no longer has its features, so a goal round
+   * does not send it back to work it gave up. Never throws.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {string} sessionId - the worker session.
+   * @param {string} why - what stopped the worker, for the audit.
+   * @returns {boolean} true when this call paused the goal.
+   */
+  pauseWorkerGoal(chain, store, sessionId, why) {
+    try {
+      const found = this.workerGoalOf(chain.sessions.find(session => session.sessionId === sessionId))
+      if (found === undefined || found.view.phase !== 'active' || typeof found.goals.pause !== 'function') return false
+      found.goals.pause(found.agent, { id: found.view.id, revision: found.view.revision })
+      this.record(store, chain.chainId, {
+        kind: 'goal.paused',
+        actor: 'system',
+        detail: { sessionId, goalId: found.view.id, why },
+      })
+      return true
+    } catch (error) {
+      this.warn(`could not pause the goal of worker ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+  }
+
+  /**
+   * Resume the worker goals the panel paused together with the chain.
+   * Best effort and spent in one go: a worker is resumed only when it is loaded, its goal is still the one
+   * that was paused and is paused now (not by anyone else since), it has rounds left and it still owns an
+   * unfinished feature. The rest are dropped.
+   * @param {object} chain - chain record, read after the chain went active.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {string} actor - who resumed the chain, for the audit.
+   * @returns {void}
+   */
+  resumeWorkerGoals(chain, store, actor) {
+    const marked = chain.workerGoalsPaused
+    if (!Array.isArray(marked) || marked.length === 0) return
+    try {
+      store.update(chain.chainId, record => { record.workerGoalsPaused = null })
+      const document = store.readFeatures(chain.chainId)
+      for (const item of marked) {
+        try {
+          const entry = chain.sessions.find(session => session.sessionId === item.sessionId)
+          const found = entry?.goalId === item.goalId ? this.workerGoalOf(entry) : undefined
+          if (found === undefined || found.view.phase !== 'paused' || found.view.roundsStarted >= found.view.maxGoalRounds
+            || typeof found.goals.resume !== 'function') continue
+          const owns = (document?.features ?? []).some(feature => feature.assignedSessionId === item.sessionId && !feature.passes)
+          if (!owns) continue
+          found.goals.resume(found.agent, { id: found.view.id, revision: found.view.revision })
+          this.record(store, chain.chainId, { kind: 'goal.resumed', actor, detail: { sessionId: item.sessionId, goalId: found.view.id } })
+        } catch (error) {
+          this.warn(`could not resume the goal of worker ${item?.sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    } catch (error) {
+      this.warn(`could not sync the worker goals of chain ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * Re-arm a worker's plugin-created goal after a Host restart or plugin reload, like `rearmGoal` does for the head.
+   * One attempt per session load (see `sessionLoaded`). The chain must be active, the worker not wrapping up,
+   * and the worker must still own an unfinished feature: a goal round would otherwise have nothing to work on.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object} agent - the live worker.
+   * @param {object} entry - the worker's session entry.
+   * @returns {void}
+   */
+  rearmWorkerGoal(chain, store, agent, entry) {
+    if (!this.config.rearmGoalOnReload || entry?.goalSeeded !== true || typeof entry.goalId !== 'string') return
+    // A chain that is not running neither checked nor spent anything.
+    if (chain.status !== 'active') return
+    const stats = this.statsFor(agent.id)
+    if (stats.rearmChecked) return
+    stats.rearmChecked = true
+    if (stats.wrapupSentAt !== 0) return
+    const document = store.readFeatures(chain.chainId)
+    if (!(document?.features ?? []).some(feature => feature.assignedSessionId === agent.id && !feature.passes)) return
+    const found = this.workerGoalOf(entry)
+    if (found === undefined || found.view.phase !== 'active' || found.view.activation !== 'disarmed'
+      || found.view.roundsStarted >= found.view.maxGoalRounds || typeof found.goals.resume !== 'function') return
+    try {
+      found.goals.resume(agent, { id: found.view.id, revision: found.view.revision })
+    } catch (error) {
+      this.warn(`could not re-arm the goal of ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    this.record(store, chain.chainId, { kind: 'goal.rearmed', actor: 'system', detail: { sessionId: agent.id, goalId: found.view.id } })
   }
 
   /**
@@ -2461,6 +2645,7 @@ export class RelayEngine {
 
     // A delegated worker only supervises its own phase; the chain head owns handoff.
     if (this.isWorker(entry)) {
+      this.rearmWorkerGoal(chain, store, agent, entry)
       await this.evaluateWorker(chain, store, entry, agent)
       return
     }
@@ -2482,10 +2667,11 @@ export class RelayEngine {
     if (refreshed === undefined) return
     chain = refreshed
     if (chain.status !== 'active' && chain.status !== 'initializing') return
+    this.releasePausedGoal(chain, store, 'system')
+    // Before the group release: that starts a background launch, which marks the chain busy and would make the re-arm give up.
+    this.rearmGoal(chain, store, agent, entry)
     // A restart, or features marked passing by editing the file, still releases waiting groups.
     this.releaseWaitingGroups(chain)
-    this.releasePausedGoal(chain, store, 'system')
-    this.rearmGoal(chain, store, agent, entry)
     // A wrap-up that was already sent (a manual handoff on a stale brief, or the
     // switch turned off mid-wrap-up) holds the goal, so it must still reach its handoff.
     // Only a wrap-up that was actually sent passes: a model-reported `ready` alone must not re-enable the automatic policy.
@@ -2772,6 +2958,8 @@ export class RelayEngine {
       actor: 'system',
       detail: { sessionId: entry.sessionId, features: owned.map(feature => feature.id), ratio: Number(pressure.ratio.toFixed(3)) },
     })
+    // The worker owns nothing now: a goal round would only send it back to work it no longer has.
+    this.pauseWorkerGoal(chain, store, entry.sessionId, 'returned')
   }
 
   /**
@@ -2798,6 +2986,8 @@ export class RelayEngine {
     }
     const stamp = new Date().toISOString()
     store.writeProgress(chain.chainId, `${store.readProgress(chain.chainId).replace(/\s*$/, '\n')}- [${stamp}] reclaimed ${owned.map(feature => feature.id).join(', ') || '(nothing pending)'} from worker ${sessionId}\n`)
+    // Before the notice below, so the goal does not answer it with another round.
+    this.pauseWorkerGoal(chain, store, sessionId, 'reclaimed')
     const live = this.ctx.get('agents')?.get(sessionId)
     if (live !== undefined) {
       try {
@@ -3279,12 +3469,13 @@ export class RelayEngine {
    */
   rearmGoal(chain, store, agent, entry) {
     if (!this.config.rearmGoalOnReload || typeof entry?.goalId !== 'string') return
+    // A handoff holds the goal before its first await; a timer-driven evaluation
+    // that lands inside that handoff must not hand the rounds back. It checked
+    // nothing, so it must not spend the attempt either.
+    if (this.busyChains.has(chain.chainId)) return
     const stats = this.statsFor(agent.id)
     if (stats.rearmChecked) return
     stats.rearmChecked = true
-    // A handoff holds the goal before its first await; a timer-driven evaluation
-    // that lands inside that handoff must not hand the rounds back.
-    if (this.busyChains.has(chain.chainId)) return
     if (chain.pendingHandoff !== null && chain.pendingHandoff !== undefined) return
     if (this.isWrapping(chain)) return
     const view = this.goalOf(agent)
