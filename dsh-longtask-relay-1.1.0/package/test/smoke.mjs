@@ -1846,7 +1846,7 @@ check('a nested truthDir still resolves the workspace cwd', () => {
 
 check('package metadata exposes the test script and version', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(pkg.version, '1.3.1')
+  assert.equal(pkg.version, '1.3.2')
   assert.match(pkg.scripts.test, /node test\/smoke\.mjs/)
 })
 
@@ -2170,6 +2170,99 @@ await checkAsync('a blocked user goal is not replaced by a seeded one', async ()
   assert.equal(goals.ops('create').length, 0, 'a goal was created over a blocked user goal')
 })
 
+await checkAsync('a session loaded again gets one more goal re-arm attempt', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  await handOffOnce(world)
+  goals.views.get('session-new').activation = 'disarmed'
+  world.engine.sessionLoaded('session-new')
+  world.setRatio(0.3)
+  await world.engine.evaluate(world.newAgent)
+  assert.equal(goals.views.get('session-new').activation, 'armed', 'the reopened session kept its disarmed goal')
+  assert.equal(auditOf(world, 'goal.rearmed').length, 1)
+})
+
+await checkAsync('with autoHandoff off a ready report without a wrap-up does not hand off', async () => {
+  const world = fakeWorld({ autoHandoff: false })
+  const chainId = world.chain.chainId
+  assert.notEqual(world.engine.checkpoint({ agent: world.oldAgent, ready: true }).ok, false)
+  world.setRatio(0.7)
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.local.readChain(chainId).handoffCount, 0, 'a ready report re-enabled the automatic handoff')
+  assert.equal(world.calls.filter(call => /<relay_wrapup>/.test(call.text ?? '')).length, 0)
+  world.engine.dispose()
+})
+
+await checkAsync('a user goal blocked at the handoff leaves a blocker that survives the next evaluation', async () => {
+  const world = fakeWorld({ seedGoalOnHandoff: true, pauseOnExternalBlocker: false })
+  withGoals(world, { 'session-old': goalView({ phase: 'blocked' }) })
+  await handOffOnce(world)
+  const blocker = world.local.readChain(world.chain.chainId).blocker
+  assert.equal(blocker?.kind, 'external', 'nothing tells the human the goal was blocked')
+  assert.match(blocker.action, /was blocked/)
+  world.setRatio(0.3)
+  await world.engine.evaluate(world.newAgent)
+  assert.match(world.local.readChain(world.chain.chainId).blocker?.action ?? '', /was blocked/, 'the next evaluation cleared the blocker')
+})
+
+await checkAsync('a failing blocker write cannot fail a finished handoff', async () => {
+  const world = fakeWorld({ seedGoalOnHandoff: true })
+  withGoals(world, { 'session-old': goalView({ roundsStarted: 10 }) })
+  const original = world.local.writeProgress.bind(world.local)
+  world.local.writeProgress = (chainId, text) => {
+    if (text.includes('blocked (external')) throw new Error('progress write failed')
+    return original(chainId, text)
+  }
+  await handOffOnce(world)
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.currentSessionId, 'session-new')
+  assert.notEqual(chain.pausedBy, 'handoff-failed')
+  assert.equal(auditOf(world, 'handoff.completed').length, 1)
+})
+
+await checkAsync('handoffNow on a paused chain says it is paused', async () => {
+  const stale = '# HANDOFF\n\nnothing yet\n'
+  const paused = fakeWorld()
+  paused.local.writeHandoff(paused.chain.chainId, stale)
+  paused.engine.setPaused({ chainId: paused.chain.chainId, paused: true })
+  const pausedResult = await paused.engine.handoffNow({ chainId: paused.chain.chainId })
+  assert.equal(pausedResult.code, 'handoff_not_ready')
+  assert.match(pausedResult.message, /The chain is paused, so hand off again once the session is idle/)
+  const active = fakeWorld()
+  active.local.writeHandoff(active.chain.chainId, stale)
+  const activeResult = await active.engine.handoffNow({ chainId: active.chain.chainId })
+  assert.match(activeResult.message, /the handoff follows when it reports ready/)
+  assert.doesNotMatch(activeResult.message, /paused/)
+  paused.engine.dispose()
+  active.engine.dispose()
+})
+
+await checkAsync('a seeded goal recorded by 1.3.0 without the flag is still told apart by the audit', async () => {
+  const world = fakeWorld({ seedGoalOnHandoff: true, inheritGoal: true })
+  const goals = withGoals(world, { 'session-old': goalView({ phase: 'complete' }) })
+  await handOffOnce(world)
+  assert.equal(auditOf(world, 'goal.seeded').length, 1)
+  world.local.update(world.chain.chainId, record => {
+    delete record.sessions.find(session => session.sessionId === 'session-new').goalSeeded
+  })
+  goals.views.get('session-new').roundsStarted = 5
+  await handOffAgain(world)
+  assert.equal(goals.views.get('session-third').maxGoalRounds, world.engine.config.goalRoundsPerHandoff)
+  assert.equal(auditOf(world, 'goal.inherited').length, 0, 'a seeded goal was inherited')
+})
+
+await checkAsync('a finished chain cannot be paused or resumed', async () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  world.local.patchFeatures(chainId, [{ id: 'F001', passes: true, evidence: 'npm test -> exit 0, 3/3 passed' }])
+  assert.equal(world.engine.finish({ agent: world.oldAgent, evidence: 'done', chainId }).ok, true)
+  assert.throws(
+    () => world.engine.setPaused({ chainId, paused: true }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.invalid && /cannot be paused or resumed/.test(error.message),
+  )
+  assert.equal(world.local.readChain(chainId).status, 'done')
+})
+
 await checkAsync('a panel pause then a manual handoff still carries the user goal', async () => {
   const world = fakeWorld()
   const goals = withGoals(world, { 'session-old': goalView() })
@@ -2465,6 +2558,26 @@ await checkAsync('/relay handoff swaps the chain head', async () => {
   assert.equal(result.kind, 'success')
   const chain = world.local.readChain(world.chain.chainId)
   assert.equal(chain.currentSessionId, 'session-new')
+})
+
+await checkAsync('/relay start begins a new chain from a session whose chain is done', async () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  world.local.patchFeatures(chainId, [{ id: 'F001', passes: true, evidence: 'npm test -> exit 0, 3/3 passed' }])
+  assert.equal(world.engine.finish({ agent: world.oldAgent, evidence: 'done', chainId }).ok, true)
+  const result = await handleRelayCommand(world.engine, commandInvocation(world.oldAgent, 'start the next objective'))
+  assert.equal(result.kind, 'success', result.text)
+  assert.notEqual(world.engine.locate(world.oldAgent.session).chain.chainId, chainId)
+})
+
+await checkAsync('/relay pause acts as the human: the goal pauses and the audit actor is the host', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  const result = await handleRelayCommand(world.engine, commandInvocation(world.oldAgent, 'pause'))
+  assert.equal(result.kind, 'success')
+  assert.equal(goals.views.get('session-old').phase, 'paused')
+  assert.equal(auditOf(world, 'chain.paused')[0].actor, 'host')
+  world.engine.dispose()
 })
 
 rmSync(workspace, { recursive: true, force: true })

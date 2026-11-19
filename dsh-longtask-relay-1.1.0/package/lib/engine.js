@@ -133,7 +133,7 @@ function newStats() {
     lastContinueAt: 0,
     /** Whether the durable compaction count was read into this counter. */
     hydrated: false,
-    /** Whether the goal re-arm was already attempted for this session in this process. */
+    /** Whether the goal re-arm was already attempted for this session load. */
     rearmChecked: false,
   }
 }
@@ -497,6 +497,17 @@ export class RelayEngine {
     // shorter stale-brief grace.
     const minutes = Math.min(this.config.wrapupTimeoutMinutes, this.config.staleHandoffMinutes)
     this.scheduleEvaluate(agent.session.id, at + minutes * 60_000 - Date.now())
+  }
+
+  /**
+   * Note that a session was loaded (again) by the host.
+   * The host disarms goals each time a session is loaded, so each load gets one re-arm attempt.
+   * @param {string} sessionId - the loaded session.
+   * @returns {void}
+   */
+  sessionLoaded(sessionId) {
+    const stats = this.stats.get(sessionId)
+    if (stats !== undefined) stats.rearmChecked = false
   }
 
   /** Per-session supervisor state. */
@@ -1030,6 +1041,9 @@ export class RelayEngine {
   setPaused({ agent, chainId, paused }) {
     const { chain, store } = this.resolveChain(agent, chainId)
     this.assertWriter(chain, agent)
+    if (chain.status === 'done' || chain.status === 'failed') {
+      throw new RelayError(RELAY_CODES.invalid, `chain ${chain.chainId} is ${chain.status}; it cannot be paused or resumed`)
+    }
     store.update(chain.chainId, record => {
       if (paused) {
         record.status = 'paused'
@@ -1131,7 +1145,9 @@ export class RelayEngine {
         return {
           ok: false,
           code: 'handoff_not_ready',
-          message: 'HANDOFF.md is stale or missing; the session was asked to wrap up and the handoff follows when it reports ready',
+          message: chain.status === 'paused'
+            ? 'HANDOFF.md is stale or missing; the session was asked to wrap up. The chain is paused, so hand off again once the session is idle'
+            : 'HANDOFF.md is stale or missing; the session was asked to wrap up and the handoff follows when it reports ready',
         }
       }
       const remaining = this.config.staleHandoffMinutes * 60_000 - (Date.now() - stats.wrapupSentAt)
@@ -1969,7 +1985,8 @@ export class RelayEngine {
     this.rearmGoal(chain, store, agent, entry)
     // A wrap-up that was already sent (a manual handoff on a stale brief, or the
     // switch turned off mid-wrap-up) holds the goal, so it must still reach its handoff.
-    if (!this.config.autoHandoff && !this.isWrapping(chain)) return
+    // Only a wrap-up that was actually sent passes: a model-reported `ready` alone must not re-enable the automatic policy.
+    if (!this.config.autoHandoff && (chain.wrapupAt === null || chain.wrapupAt === undefined)) return
 
     const stats = this.statsFor(agent.id)
     // Compaction counts live in memory; the chain record is the only value that
@@ -2490,14 +2507,6 @@ export class RelayEngine {
         record.readySessionId = null
         record.goalPausedByRelay = null
       })
-      if (continued.exhausted === true) {
-        // Without it the chain reads as running while nothing drives the successor.
-        this.recordBlocker(store, chain.chainId, {
-          kind: 'external',
-          who: 'human',
-          action: 'the goal ran out of rounds; set a new goal on the current session or let it go on without one, then clear this blocker',
-        })
-      }
 
       this.members.set(createdSessionId, { chainId: chain.chainId, truthDir: store.truthDir })
       this.misses.delete(createdSessionId)
@@ -2514,6 +2523,21 @@ export class RelayEngine {
         handoff: previousHandoff,
       })
       this.retire(oldAgent, chain, createdSessionId, handoffNo)
+      const stalled = continued.exhausted === true
+        ? 'the goal ran out of rounds'
+        : continued.blocked === true ? 'the goal of the previous session was blocked' : null
+      if (stalled !== null) {
+        // Without it the chain reads as running while nothing drives the successor.
+        try {
+          this.recordBlocker(store, chain.chainId, {
+            kind: 'external',
+            who: 'human',
+            action: `${stalled}; set a new goal on the current session or let it go on without one, then clear this blocker`,
+          })
+        } catch (error) {
+          this.warn(`could not record the goal blocker for ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
       this.record(store, chain.chainId, {
         kind: 'handoff.completed',
         actor: 'system',
@@ -2674,19 +2698,21 @@ export class RelayEngine {
    * those rounds are spent it is not replaced by a seeded goal (that would hand out a budget the
    * owner already used); the caller records a blocker instead. A user's goal that is blocked, or
    * paused by the user, is not replaced either; a goal the panel paused together with the chain
-   * counts as active.
+   * counts as active. A blocked goal is reported as `blocked` so the caller can leave a blocker.
    * @param {object} chain - chain record.
    * @param {import('./chain-store.js').ChainStore} store - its store.
    * @param {object} oldAgent - the retiring session.
    * @param {object|undefined} newAgent - the created successor session.
-   * @returns {{ goalId?: string, seeded?: boolean, exhausted?: boolean }} the goal the successor now
+   * @returns {{ goalId?: string, seeded?: boolean, exhausted?: boolean, blocked?: boolean }} the goal the successor now
    *   has, when any; `exhausted` when the user's goal had no rounds left.
    */
   continueGoal(chain, store, oldAgent, newAgent) {
     if (newAgent === undefined) return {}
     const previous = this.goalOf(oldAgent)
     const oldEntry = chain.sessions.find(session => session.sessionId === oldAgent.id)
-    const seededPrevious = previous !== undefined && oldEntry?.goalSeeded === true && oldEntry.goalId === previous.id
+    const recorded = previous !== undefined && oldEntry?.goalId === previous.id
+    const seededPrevious = recorded && (oldEntry.goalSeeded === true
+      || (oldEntry.goalSeeded === undefined && this.auditSeeded(store, chain.chainId, previous.id)))
     if (!this.config.inheritGoal || previous === undefined || seededPrevious || previous.phase === 'complete') {
       const id = this.config.seedGoalOnHandoff ? this.seedGoal(chain, store, newAgent) : undefined
       return id === undefined ? {} : { goalId: id, seeded: true }
@@ -2694,6 +2720,7 @@ export class RelayEngine {
     // From here the goal is the user's (or one inherited from the user's).
     const marker = chain.goalPausedByRelay
     const pausedByRelay = previous.phase === 'paused' && marker?.sessionId === oldAgent.id && marker?.goalId === previous.id
+    if (previous.phase === 'blocked') return { blocked: true }
     if (previous.phase !== 'active' && !pausedByRelay) return {}
     const remaining = previous.maxGoalRounds - previous.roundsStarted
     if (remaining < 1) {
@@ -2720,11 +2747,27 @@ export class RelayEngine {
   }
 
   /**
+   * Whether the audit says the plugin seeded this goal.
+   * Entries written before the `goalSeeded` flag existed carry only the goal id.
+   * @param {import('./chain-store.js').ChainStore} store - the chain's store.
+   * @param {string} chainId - chain identity.
+   * @param {string} goalId - the goal to look for.
+   * @returns {boolean} true when a `goal.seeded` record names it.
+   */
+  auditSeeded(store, chainId, goalId) {
+    try {
+      return store.readAudit(chainId, 500).some(record => record.kind === 'goal.seeded' && record.detail?.goalId === goalId)
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * Re-arm a goal this plugin created after a Host restart or plugin reload.
    * The host disarms goals at a session-start boundary. A goal the user created is left
    * alone for that reason; only the goal recorded as this plugin's (`entry.goalId`) is resumed,
-   * and never while a wrap-up or handoff is under way. It is one attempt per session per
-   * process: a goal disarmed later (a user abort, an agent error) is somebody's decision.
+   * and never while a wrap-up or handoff is under way. It is one attempt per session load
+   * (see `sessionLoaded`): a goal disarmed later (a user abort, an agent error) is somebody's decision.
    * @param {object} chain - chain record.
    * @param {import('./chain-store.js').ChainStore} store - its store.
    * @param {object} agent - the chain's current live session.

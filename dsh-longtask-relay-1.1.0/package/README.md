@@ -66,8 +66,8 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 |---|---|
 | `/relay` | 列出各条链，并指出当前会话属于哪条 |
 | `/relay start <目标>` | 在当前会话开始一条链（等价于 `relay_start`） |
-| `/relay pause` / `/relay resume` | 暂停 / 恢复当前会话的链 |
-| `/relay handoff` | 立即交接一次；会话还在跑时会拒绝 |
+| `/relay pause` / `/relay resume` | 暂停 / 恢复当前会话的链；效果与面板按钮一致 |
+| `/relay handoff` | 立即交接一次，效果与面板按钮一致；会话还在跑时会拒绝 |
 
 命令不经过模型，直接由 Host 执行。
 
@@ -137,7 +137,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 ## 与目标模式、计划模式的配合
 
 - 收尾指令发出后和交接开始时，插件会取消旧会话 goal 的自动续行（只取消续行，goal 本身的阶段不变），避免旧会话在收尾后又被目标轮推着继续干活，或在新会话已经启动时多跑一轮。
-- 交接时新会话继承旧会话的 goal：你自己建的 goal 会被继承，目标不变、轮次只给剩余部分；本会话显示的是它拿到的剩余额度。旧 goal 轮次用完时不继承，链记一条阻塞等你处理。插件按 `seedGoalOnHandoff` 建的 goal 不继承，每次交接照旧按 `goalRoundsPerHandoff` 新建。你的 goal 处于阻塞或被你暂停时，不会被换成新建的 goal。`inheritGoal` 关掉后回到 `seedGoalOnHandoff` 的旧行为。
+- 交接时新会话继承旧会话的 goal：你自己建的 goal 会被继承，目标不变、轮次只给剩余部分；本会话显示的是它拿到的剩余额度。旧 goal 轮次用完时不继承，链记一条阻塞等你处理。插件按 `seedGoalOnHandoff` 建的 goal 不继承，每次交接照旧按 `goalRoundsPerHandoff` 新建。你的 goal 处于阻塞或被你暂停时，不会被换成新建的 goal；阻塞的 goal 在交接后还会留下一条阻塞，等你处理。`inheritGoal` 关掉后回到 `seedGoalOnHandoff` 的旧行为。
 - 本插件建的 goal 在 Host 重启或插件重载后会被恢复自动续行；用户自己建的 goal 不动。链用 `relay_finish` 结束时，本插件建的 goal 一并标为完成。
 - 在面板里暂停一条链会同时暂停链头会话的 goal，恢复链时把这个 goal 一并恢复；会话自己调用 `relay_control` 暂停链不动 goal。
 - 旧会话处于计划模式时，接力会话和子会话也以计划模式启动。

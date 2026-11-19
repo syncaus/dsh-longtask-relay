@@ -42,10 +42,6 @@ export async function handleRelayCommand(engine, invocation) {
     }
     if (sub === 'start') {
       if (argument.length === 0) return { kind: 'error', text: `An objective is required.\n${USAGE}` }
-      const existing = engine.locate(invocation.agent.session)
-      if (existing !== undefined) {
-        return { kind: 'error', text: `This session already belongs to ${existing.chain.chainId}; continue that chain instead.` }
-      }
       const chain = engine.start({ agent: invocation.agent, objective: argument })
       return {
         kind: 'success',
@@ -55,16 +51,19 @@ export async function handleRelayCommand(engine, invocation) {
     const membership = engine.locate(invocation.agent.session)
     if (membership === undefined) return { kind: 'error', text: 'This session is not in a chain. Use /relay start <objective> first.' }
     const chainId = membership.chain.chainId
+    // These act as the human, like the panel buttons: no agent is passed, so the goal
+    // pauses with the chain, the audit actor is the host, and a worker session is not refused.
     if (sub === 'pause') {
-      engine.setPaused({ agent: invocation.agent, chainId, paused: true })
+      engine.setPaused({ chainId, paused: true })
       return { kind: 'success', text: `Paused ${chainId}.` }
     }
     if (sub === 'resume') {
-      engine.setPaused({ agent: invocation.agent, chainId, paused: false })
+      const { status } = engine.setPaused({ chainId, paused: false })
+      if (status !== 'active') return { kind: 'error', text: `${chainId} is still ${status}.` }
       return { kind: 'success', text: `Resumed ${chainId}.` }
     }
     if (sub === 'handoff') {
-      const result = await engine.handoffNow({ agent: invocation.agent, chainId })
+      const result = await engine.handoffNow({ chainId })
       if (result.ok === false) {
         return { kind: 'error', text: `${result.code ?? 'handoff refused'}: ${result.message ?? 'try again when the session is idle'}` }
       }
