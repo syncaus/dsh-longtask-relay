@@ -103,8 +103,7 @@ window.__ModuleLoader__.load({
       launchNote: '会按上面的分组开出会话并开始执行',
       launchOverlap: '可能互相覆盖',
       launchUnknown: '没写文件范围',
-      launchCrossDep: '依赖在另一组，放进同一组才能启动',
-      launchMissingDep: '依赖的功能不存在',
+      launchRefused: '这样分组无法启动',
       attnLaunch: '等你确认启动',
       launchWaitingTitle: '待启动的组',
       launchWaitingSub: '前置功能通过后自动开会话',
@@ -383,8 +382,7 @@ window.__ModuleLoader__.load({
       launchNote: 'Sessions are created for the groups above and start working',
       launchOverlap: 'May overwrite each other',
       launchUnknown: 'No file scope given',
-      launchCrossDep: 'Depends on another group; put both in one group to launch',
-      launchMissingDep: 'Depends on a feature that does not exist',
+      launchRefused: 'This grouping cannot be launched',
       attnLaunch: 'Waiting for you to launch',
       launchWaitingTitle: 'Groups not opened yet',
       launchWaitingSub: 'Opened automatically once their dependencies pass',
@@ -1862,60 +1860,6 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 
         /** Everything about the selected chain. */
         /**
-         * Overlaps between shared groups, by the rule the Host applies at launch.
-         * Recomputed here so the warnings follow the human's regrouping.
-         */
-        const launchConflicts = (groups, features, cwd) => {
-          const byId = new Map(features.map(feature => [feature.id, feature]))
-          const slashed = path => String(path).replace(/\\/g, '/')
-          const root = typeof cwd === 'string' ? slashed(cwd).replace(/\/+$/, '').toLowerCase() : ''
-          const normal = (path) => {
-            let text = slashed(path).toLowerCase()
-            if (root !== '' && (text === root || text.startsWith(`${root}/`))) text = text.slice(root.length)
-            text = text.replace(/^\/+/, '')
-            while (text.startsWith('./')) text = text.slice(2)
-            return text.replace(/\/+$/, '')
-          }
-          const scope = id => (Array.isArray(byId.get(id)?.files) ? byId.get(id).files : []).map(normal)
-          // An empty path is the working directory itself, which holds everything.
-          const hits = (a, b) => a === b || a === '' || b === '' || b.startsWith(`${a}/`) || a.startsWith(`${b}/`)
-          const shared = groups.filter(group => group.isolation === 'shared')
-          const owner = new Map(groups.flatMap(group => group.features.map(id => [id, group.id])))
-          // Work the planning session keeps runs in the same directory as the shared sessions.
-          const main = [
-            ...groups.filter(group => group.isolation !== 'shared').flatMap(group => group.features),
-            ...features.filter(feature => !owner.has(feature.id) && !feature.passes
-              && (feature.assignedSessionId === null || feature.assignedSessionId === undefined)).map(feature => feature.id),
-          ]
-          const found = []
-          for (const group of groups) {
-            for (const id of group.features) {
-              for (const dependency of (Array.isArray(byId.get(id)?.dependsOn) ? byId.get(id).dependsOn : [])) {
-                if (!byId.has(dependency)) found.push({ key: `missing:${id}:${dependency}`, kind: 'launchMissingDep', text: `${id} -> ${dependency}`, blocking: true })
-                else if (owner.has(dependency) && owner.get(dependency) !== group.id) found.push({ key: `cross:${id}:${dependency}`, kind: 'launchCrossDep', text: `${id} -> ${dependency}`, blocking: true })
-              }
-            }
-          }
-          for (const group of shared) {
-            for (const id of group.features) {
-              if (scope(id).length === 0) found.push({ key: `unknown:${id}`, kind: 'launchUnknown', text: id })
-            }
-          }
-          const overlap = (left, right) => {
-            const other = scope(right)
-            const path = scope(left).find(mine => other.some(theirs => hits(mine, theirs)))
-            if (path !== undefined) found.push({ key: `overlap:${left}:${right}`, kind: 'launchOverlap', text: `${left} / ${right}: ${path}` })
-          }
-          for (let a = 0; a < shared.length; a += 1) {
-            for (let b = a + 1; b < shared.length; b += 1) {
-              for (const left of shared[a].features) for (const right of shared[b].features) overlap(left, right)
-            }
-            for (const left of shared[a].features) for (const right of main) overlap(left, right)
-          }
-          return found
-        }
-
-        /**
          * The launch proposal of a planning cluster chain.
          * The model only proposes; this card is where a human regroups the
          * features, picks the isolation, and starts the sessions.
@@ -1927,6 +1871,21 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const [groups, setGroups] = useState(proposed)
           // A new proposal replaces whatever was regrouped locally.
           useEffect(() => { setGroups(proposed) }, [plan?.proposedAt])
+          // The Host judges every regrouping: refusals, overlaps, and which groups
+          // will wait. One rule set, so the card cannot disagree with the launch.
+          const payload = groups.map(group => ({ title: group.title, features: group.features, isolation: group.isolation, reason: group.reason }))
+          const payloadKey = JSON.stringify(payload)
+          const [preview, setPreview] = useState(null)
+          useEffect(() => {
+            if (payload.length === 0) return undefined
+            let live = true
+            call('relay/previewCluster', { chainId: chain.chainId, groups: payload })
+              .then((value) => { if (live) setPreview({ key: payloadKey, value: value ?? {} }) })
+              .catch((error) => {
+                if (live) setPreview({ key: payloadKey, value: { refusal: error instanceof Error ? error.message : String(error) } })
+              })
+            return () => { live = false }
+          }, [chain.chainId, payloadKey])
           if (proposed.length === 0) {
             return h('section', { className: 'relay-card' },
               h(CardTitle, { icon: true }, t('launchTitle')),
@@ -1950,21 +1909,13 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           })
           const isolate = (groupId, isolation) => setGroups(current => current.map(group => (group.id === groupId ? { ...group, isolation } : group)))
           const sharedCount = groups.filter(group => group.isolation === 'shared').length
-          // A group that depends on unfinished work outside itself opens later, by the Host's rule.
-          const waitsFor = (group) => {
-            const own = new Set(group.features)
-            const unmet = new Set()
-            for (const id of group.features) {
-              const feature = features.find(candidate => candidate.id === id)
-              for (const dependency of (Array.isArray(feature?.dependsOn) ? feature.dependsOn : [])) {
-                // A dependency in another group is refused outright; the conflict list says so.
-                if (!own.has(dependency) && !grouped.has(dependency) && features.find(candidate => candidate.id === dependency)?.passes !== true) unmet.add(dependency)
-              }
-            }
-            return [...unmet]
-          }
-          const conflicts = launchConflicts(groups, features, chain.cwd)
-          const refused = conflicts.some(conflict => conflict.blocking === true)
+          // Until the Host has judged this exact grouping, nothing can be launched.
+          const judged = preview !== null && preview.key === payloadKey ? preview.value : null
+          const refusal = typeof judged?.refusal === 'string' && judged.refusal.length > 0 ? judged.refusal : null
+          const conflicts = (Array.isArray(judged?.conflicts) ? judged.conflicts : []).map((conflict, index) => (conflict.kind === 'overlap'
+            ? { key: `overlap:${index}`, kind: 'launchOverlap', text: `${(conflict.features ?? []).join(' / ')}: ${conflict.path === '' ? '.' : conflict.path}` }
+            : { key: `unknown:${index}`, kind: 'launchUnknown', text: (conflict.features ?? []).join(', ') }))
+          const waiting = new Map((Array.isArray(judged?.waiting) ? judged.waiting : []).map(item => [item.index, item.waitsFor ?? []]))
           const picker = (featureId, value) => h('select', {
             className: 'relay-input',
             value,
@@ -1983,11 +1934,17 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           return h('section', { className: 'relay-card' },
             h(CardTitle, { icon: true, sub: `${sharedCount} ${t('launchSessions')}` }, t('launchTitle')),
             typeof plan.note === 'string' && plan.note.length > 0 ? h('p', { className: 'relay-text' }, plan.note) : null,
-            conflicts.map(conflict => h('div', { key: conflict.key, className: `relay-blocker is-${conflict.blocking === true ? 'external' : 'code'}` },
+            refusal === null
+              ? null
+              : h('div', { className: 'relay-blocker is-external' },
+                h('span', { className: 'relay-blocker-kind' }, t('launchRefused')),
+                h('span', { className: 'relay-blocker-text' }, refusal),
+              ),
+            conflicts.map(conflict => h('div', { key: conflict.key, className: 'relay-blocker is-code' },
               h('span', { className: 'relay-blocker-kind' }, t(conflict.kind)),
               h('span', { className: 'relay-blocker-text' }, conflict.text),
             )),
-            groups.map(group => h('div', { key: group.id, className: 'relay-launch-group' },
+            groups.map((group, index) => h('div', { key: group.id, className: 'relay-launch-group' },
               h('div', { className: 'relay-launch-head' },
                 h('span', { className: 'relay-launch-name' }, group.title),
                 h(Seg, {
@@ -1996,8 +1953,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                   onChange: next => isolate(group.id, next),
                 }),
                 group.isolation === 'worktree' ? h('span', { className: 'relay-tag' }, t('launchWorktreeNote')) : null,
-                group.isolation === 'shared' && waitsFor(group).length > 0
-                  ? h('span', { className: 'relay-chip' }, `${t('launchWaitsFor')} ${waitsFor(group).join(', ')} ${t('launchWaitsNote')}`)
+                waiting.has(index)
+                  ? h('span', { className: 'relay-chip' }, `${t('launchWaitsFor')} ${waiting.get(index).join(', ')} ${t('launchWaitsNote')}`)
                   : null,
               ),
               typeof group.reason === 'string' && group.reason.length > 0 ? h('div', { className: 'relay-text' }, group.reason) : null,
@@ -2012,13 +1969,13 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             h('div', { className: 'relay-launch-foot' },
               h(ConfirmButton, {
                 primary: true,
-                disabled: busy || groups.length === 0 || refused,
+                disabled: busy || groups.length === 0 || judged === null || refusal !== null,
                 confirmLabel: t('launchConfirm'),
                 note: t('launchNote'),
                 onConfirm: () => {
                   void onAct('relay/launchCluster', {
                     chainId: chain.chainId,
-                    groups: groups.map(group => ({ title: group.title, features: group.features, isolation: group.isolation, reason: group.reason })),
+                    groups: payload,
                   })
                 },
               }, t('launchGo')),
