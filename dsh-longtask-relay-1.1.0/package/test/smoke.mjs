@@ -762,6 +762,9 @@ await checkAsync('finish refuses partial coverage that no human accepted', async
   assert.equal(refused.ok, false)
   assert.match(refused.message, /partial coverage/)
   world.local.patchFeatures(world.chain.chainId, [{ id: 'F001', acceptedBy: 'human' }])
+  const handEdited = world.engine.finish({ agent: world.oldAgent, evidence: 'done' })
+  assert.equal(handEdited.ok, false, 'a hand-written human without the panel stamp must not count')
+  world.engine.acceptCoverage({ chainId: world.chain.chainId, featureId: 'F001', accepted: true })
   const accepted = world.engine.finish({ agent: world.oldAgent, evidence: 'done' })
   assert.equal(accepted.ok, true)
 })
@@ -4256,6 +4259,26 @@ await checkAsync('an update check reports a package outside git', async () => {
   const applied = await applyPluginUpdate(dir)
   assert.equal(applied.ok, false)
   rmSync(dir, { recursive: true, force: true })
+})
+
+await checkAsync('a hand-edited acceptedBy does not release the coverage gate', async () => {
+  const world = fakeWorld({ requireHumanAcceptedCoverage: true })
+  world.local.patchFeatures(world.chain.chainId, [
+    {
+      id: 'F001',
+      passes: true,
+      evidence: 'npm test exit 0: 42/42 passed',
+      coverage: 'partial',
+      acceptedBy: 'human',
+    },
+  ])
+  const refused = world.engine.finish({ agent: world.oldAgent, evidence: 'npm test exit 0: 42/42 passed' })
+  assert.equal(refused.ok, false)
+  assert.match(refused.message, /partial coverage/)
+  const retried = world.engine.acceptCoverageMany({ chainId: world.chain.chainId })
+  assert.equal(retried.accepted, 1, 'the panel acceptance must re-stamp a hand-written human value')
+  const result = world.engine.finish({ agent: world.oldAgent, evidence: 'npm test exit 0: 42/42 passed' })
+  assert.equal(result.ok, true)
 })
 
 rmSync(workspace, { recursive: true, force: true })

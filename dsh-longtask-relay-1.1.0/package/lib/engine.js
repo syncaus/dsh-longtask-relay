@@ -1099,13 +1099,15 @@ export class RelayEngine {
     if (progress.total === 0) {
       throw new RelayError(RELAY_CODES.incomplete, 'the chain has no features; list them before finishing')
     }
+    // Every blocker is reported together: fixing one and retrying would
+    // otherwise discover the next one only after another round.
+    const blockers = []
     if (progress.pending.length > 0) {
-      return {
-        ok: false,
-        code: RELAY_CODES.incomplete,
+      blockers.push({
+        kind: 'pending',
         message: `${progress.pending.length} of ${progress.total} features do not pass yet.`,
-        pending: progress.pending.slice(0, 20).map(feature => ({ id: feature.id, title: feature.title })),
-      }
+        items: progress.pending.slice(0, 20).map(feature => ({ id: feature.id, title: feature.title })),
+      })
     }
     // A passing feature with no usable output is a claim, not evidence. The
     // same rule the tool layer applies is re-checked here for the whole list.
@@ -1115,23 +1117,37 @@ export class RelayEngine {
       if (issue !== undefined) unsupported.push({ id: feature.id, issue })
     }
     if (unsupported.length > 0) {
-      return {
-        ok: false,
-        code: RELAY_CODES.incomplete,
+      blockers.push({
+        kind: 'evidence',
         message: `${unsupported.length} features pass without usable evidence; record the command output first.`,
-        features: unsupported.slice(0, 20),
-      }
+        items: unsupported.slice(0, 20),
+      })
     }
-    // Partial coverage is allowed only when a human accepted it (policy configurable).
+    // Partial coverage counts only when the panel wrote `human` and stamped
+    // `acceptedAt`. Free text typed into features.json, or a hand-written
+    // `human` without the stamp, does not release the gate.
     const partial = this.config.requireHumanAcceptedCoverage
-      ? document.features.filter(feature => feature.coverage !== 'full' && feature.acceptedBy !== 'human')
+      ? document.features.filter(feature => feature.coverage !== 'full'
+        && (feature.acceptedBy !== 'human' || typeof feature.acceptedAt !== 'string'))
       : []
     if (partial.length > 0) {
+      blockers.push({
+        kind: 'coverage',
+        message: `${partial.length} features only reach partial coverage and are not accepted by a human yet; accept them in the panel (a hand-edited acceptedBy does not count).`,
+        items: partial.slice(0, 20).map(feature => ({
+          id: feature.id,
+          coverage: feature.coverage,
+          acceptedBy: typeof feature.acceptedBy === 'string' ? feature.acceptedBy.slice(0, 60) : null,
+        })),
+      })
+    }
+    if (blockers.length > 0) {
       return {
         ok: false,
         code: RELAY_CODES.incomplete,
-        message: `${partial.length} features only reach partial coverage and are not accepted by a human yet.`,
-        features: partial.slice(0, 20).map(feature => ({ id: feature.id, coverage: feature.coverage })),
+        message: blockers.map(blocker => blocker.message).join(' '),
+        blockers,
+        features: blockers.flatMap(blocker => blocker.items).slice(0, 20),
       }
     }
     store.update(chain.chainId, record => {
@@ -1188,7 +1204,8 @@ export class RelayEngine {
       throw new RelayError(RELAY_CODES.invalid, 'only a passing feature can have its coverage accepted')
     }
     const value = accepted === true ? 'human' : null
-    store.patchFeatures(chain.chainId, [{ id: featureId, acceptedBy: value }])
+    const acceptedAt = value === 'human' ? new Date().toISOString() : null
+    store.patchFeatures(chain.chainId, [{ id: featureId, acceptedBy: value, acceptedAt }])
     this.record(store, chain.chainId, {
       kind: value === 'human' ? 'coverage.accepted' : 'coverage.revoked',
       actor: 'human',
@@ -1199,6 +1216,7 @@ export class RelayEngine {
       chainId: chain.chainId,
       featureId,
       acceptedBy: value,
+      acceptedAt,
       total: progress.total,
       done: progress.done,
       partial: progress.partial,
@@ -1222,10 +1240,12 @@ export class RelayEngine {
     const wanted = new Set(Array.isArray(featureIds) ? featureIds.filter(id => typeof id === 'string') : [])
     const targets = document.features.filter(feature => feature.passes === true
       && feature.coverage !== undefined && feature.coverage !== 'full'
-      && feature.acceptedBy !== 'human'
+      // A hand-written `human` without the panel's stamp is re-accepted here.
+      && (feature.acceptedBy !== 'human' || typeof feature.acceptedAt !== 'string')
       && (wanted.size === 0 || wanted.has(feature.id)))
+    const acceptedAt = new Date().toISOString()
     if (targets.length > 0) {
-      store.patchFeatures(chain.chainId, targets.map(feature => ({ id: feature.id, acceptedBy: 'human' })))
+      store.patchFeatures(chain.chainId, targets.map(feature => ({ id: feature.id, acceptedBy: 'human', acceptedAt })))
       this.record(store, chain.chainId, {
         kind: 'coverage.accepted',
         actor: 'human',
@@ -1236,6 +1256,7 @@ export class RelayEngine {
     return {
       chainId: chain.chainId,
       accepted: targets.length,
+      acceptedAt: targets.length === 0 ? null : acceptedAt,
       total: progress.total,
       done: progress.done,
       partial: progress.partial,

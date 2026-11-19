@@ -192,6 +192,9 @@ export function normalizeFeatures(document) {
       verify: typeof entry.verify === 'string' ? entry.verify : '',
       coverage: normalizeCoverage(entry.coverage),
       acceptedBy: typeof entry.acceptedBy === 'string' ? entry.acceptedBy : null,
+      // Stamped only by the panel acceptance path; finish requires it so a
+      // hand-edited `human` does not release the coverage gate.
+      acceptedAt: typeof entry.acceptedAt === 'string' ? entry.acceptedAt : null,
       // Session this feature is delegated to; null means the chain's own session.
       assignedSessionId: typeof entry.assignedSessionId === 'string' ? entry.assignedSessionId : null,
       notes: typeof entry.notes === 'string' ? entry.notes : '',
@@ -482,6 +485,9 @@ export class ChainStore {
       }
       if (update.acceptedBy !== undefined) {
         feature.acceptedBy = update.acceptedBy === null ? null : String(update.acceptedBy)
+      }
+      if (update.acceptedAt !== undefined) {
+        feature.acceptedAt = update.acceptedAt === null ? null : String(update.acceptedAt)
       }
       if (update.assignedSessionId !== undefined) {
         feature.assignedSessionId = update.assignedSessionId === null ? null : String(update.assignedSessionId)
