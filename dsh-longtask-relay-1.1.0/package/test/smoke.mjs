@@ -1850,7 +1850,7 @@ check('a nested truthDir still resolves the workspace cwd', () => {
 
 check('package metadata exposes the test script and version', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(pkg.version, '1.4.2')
+  assert.equal(pkg.version, '1.4.3')
   assert.match(pkg.scripts.test, /node test\/smoke\.mjs/)
 })
 
@@ -3059,6 +3059,38 @@ await checkAsync('a launch where every group fails freezes nothing; a successful
   assert.throws(() => world.engine.checkpoint({ agent: world.head, note: 'x' }), refusal(/no longer matches the frozen list/, RELAY_CODES.drift))
 })
 
+await checkAsync('the launch freezes the list that was validated, so a rename while the groups open is drift', async () => {
+  const world = clusterWorld()
+  proposeTwoGroups(world)
+  const original = world.engine.ctx.get
+  const controller = original('sessionController')
+  world.engine.ctx.get = name => (name === 'sessionController'
+    ? {
+        ...controller,
+        async create(request) {
+          const during = world.local.readFeatures(world.chain.chainId)
+          during.features.find(feature => feature.id === 'F005').title = 'renamed while the groups open'
+          world.local.writeFeatures(world.chain.chainId, during)
+          return controller.create(request)
+        },
+      }
+    : original(name))
+  await world.engine.launchCluster({ chainId: world.chain.chainId })
+  assert.equal(world.engine.fingerprints.get(world.chain.chainId).features.find(feature => feature.id === 'F005').title, 'fifth')
+  assert.deepEqual(auditOf(world, 'features.frozen')[0].detail, { features: 6 })
+  assert.throws(() => world.engine.checkpoint({ agent: world.head, note: 'x' }), refusal(/renamed: F005/, RELAY_CODES.drift))
+})
+
+await checkAsync('a fingerprint that cannot be written does not fail the launch', async () => {
+  const world = clusterWorld()
+  proposeTwoGroups(world)
+  world.engine.fingerprints.set = () => { throw new Error('disk full') }
+  const result = await world.engine.launchCluster({ chainId: world.chain.chainId })
+  assert.equal(result.status, 'active')
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'active')
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 2)
+})
+
 check('previewCluster reports conflicts with group positions and waiting groups, and writes nothing', () => {
   const world = clusterWorld()
   const chainId = world.chain.chainId
@@ -3067,38 +3099,142 @@ check('previewCluster reports conflicts with group positions and waiting groups,
   const auditBefore = world.engine.audit(chainId, 200).length
   const preview = world.engine.previewCluster({ chainId, groups: [clusterGroup('late', ['F004']), clusterGroup('now', ['F003'])] })
   assert.deepEqual(preview, {
-    refusal: null,
-    conflicts: [{ kind: 'overlap', groups: ['G1', 'main'], features: ['F004', 'F002'], path: 'src/a', groupIndexes: [0, -1] }],
+    issues: [],
+    conflicts: [{ kind: 'overlap', groups: ['G1', 'main'], features: ['F004', 'F002'], path: 'src/a' }],
     waiting: [{ index: 0, waitsFor: ['F002'] }],
-    blocker: null,
   })
   const unknown = world.engine.previewCluster({ chainId, groups: [clusterGroup('x', ['F002']), clusterGroup('y', ['F005'])] })
-  assert.deepEqual(unknown.conflicts.find(item => item.kind === 'unknown-scope'), { kind: 'unknown-scope', groups: ['G2'], features: ['F005'], groupIndexes: [1] })
+  assert.deepEqual(unknown.conflicts.find(item => item.kind === 'unknown-scope'), { kind: 'unknown-scope', groups: ['G2'], features: ['F005'] })
   assert.deepEqual(world.local.readChain(chainId), before, 'a preview must not change the chain record')
   assert.equal(world.local.readChain(chainId).launchPlan.groups.length, stored.groups.length)
   assert.equal(world.engine.audit(chainId, 200).length, auditBefore, 'a preview must not audit')
-  // Without groups the stored plan is read; without a plan there is nothing to check.
+  // Without groups the stored plan is read.
   assert.deepEqual(world.engine.previewCluster({ chainId }).conflicts, [])
   assert.deepEqual(world.engine.previewCluster({ chainId }).waiting, [])
-  const empty = clusterWorld()
-  assert.deepEqual(empty.engine.previewCluster({ chainId: empty.chain.chainId }), { refusal: null, conflicts: [], waiting: [], blocker: null })
-  assert.deepEqual(empty.engine.previewCluster({ chainId: empty.chain.chainId, groups: [] }), { refusal: null, conflicts: [], waiting: [], blocker: null })
+  assert.deepEqual(world.engine.previewCluster({ chainId }).issues, [])
 })
 
-check('previewCluster returns a refusal instead of throwing, reports the blocker, and refuses a chain that is not planning', () => {
+check('previewCluster lists every launch issue instead of throwing, and refuses a chain that is not planning', () => {
   const world = clusterWorld()
   const chainId = world.chain.chainId
-  const cross = world.engine.previewCluster({ chainId, groups: [clusterGroup('a', ['F002']), clusterGroup('b', ['F004'])] })
-  assert.match(cross.refusal, /F004 \(group G2\) depends on F002 \(group G1\); put both in the same group/)
+  const preview = groups => world.engine.previewCluster({ chainId, groups })
+  // Preconditions first: without a stored plan nothing else is looked at.
+  const bare = preview([clusterGroup('a', ['F404'])])
+  assert.deepEqual(bare, {
+    issues: [{ code: 'no-plan', message: `chain ${chainId} has no launch plan yet; the planning session must call relay_propose first` }],
+    conflicts: [],
+    waiting: [],
+  })
+  proposeTwoGroups(world)
+  const cross = preview([clusterGroup('a', ['F002']), clusterGroup('b', ['F004'])])
+  assert.deepEqual(cross.issues, [{
+    code: 'cross-group-dependency',
+    message: 'feature F004 (group G2) depends on F002 (group G1); put both in the same group',
+    feature: 'F004',
+    dependency: 'F002',
+    index: 1,
+    dependencyIndex: 0,
+  }])
   assert.deepEqual([cross.conflicts, cross.waiting], [[], []])
-  assert.match(world.engine.previewCluster({ chainId, groups: [clusterGroup('a', ['F404'])] }).refusal, /feature F404 does not exist/)
+  assert.deepEqual(preview([clusterGroup('a', ['F404'])]).issues, [{ code: 'unknown-feature', message: 'feature F404 does not exist', feature: 'F404', index: 0 }])
+  assert.deepEqual(preview([]).issues.map(issue => issue.code), ['invalid-groups'])
   world.engine.checkpoint({ agent: world.head, blocker: { kind: 'external', who: 'human', action: 'supply the API key' } })
-  const blocked = world.engine.previewCluster({ chainId, groups: [clusterGroup('a', ['F002'])] })
-  assert.equal(blocked.blocker, 'supply the API key')
-  assert.match(blocked.refusal, /has an open blocker \("supply the API key"\); clear it before launching/)
+  const blocked = preview([clusterGroup('a', ['F404'])])
+  assert.deepEqual(blocked.issues, [{
+    code: 'blocker',
+    message: `chain ${chainId} has an open blocker ("supply the API key"); clear it before launching`,
+    action: 'supply the API key',
+  }], 'a precondition issue skips the group checks')
   assert.deepEqual([blocked.conflicts, blocked.waiting], [[], []])
   world.local.update(chainId, record => { record.status = 'active' })
-  assert.throws(() => world.engine.previewCluster({ chainId, groups: [clusterGroup('a', ['F002'])] }), refusal(/is active; only a planning chain/))
+  assert.throws(() => preview([clusterGroup('a', ['F002'])]), refusal(/is active; only a planning chain/))
+})
+
+await checkAsync('every launch precondition is a previewCluster issue and makes launchCluster refuse with the same message', async () => {
+  const launchOf = world => () => world.engine.launchCluster({ chainId: world.chain.chainId })
+  const issueOf = (world, code) => {
+    const issues = world.engine.previewCluster({ chainId: world.chain.chainId }).issues
+    assert.deepEqual(issues.map(issue => issue.code), [code])
+    return issues[0]
+  }
+  const noPlan = clusterWorld()
+  const noPlanIssue = issueOf(noPlan, 'no-plan')
+  await assert.rejects(launchOf(noPlan), error => error instanceof RelayError && error.code === RELAY_CODES.invalid && error.message === noPlanIssue.message)
+
+  const busy = clusterWorld()
+  proposeTwoGroups(busy)
+  busy.engine.busyChains.add(busy.chain.chainId)
+  const busyIssue = issueOf(busy, 'busy')
+  await assert.rejects(launchOf(busy), error => error instanceof RelayError && error.code === RELAY_CODES.invalid && error.message === busyIssue.message)
+
+  const unloaded = clusterWorld()
+  proposeTwoGroups(unloaded)
+  unloaded.agents.delete('session-head')
+  const unloadedIssue = issueOf(unloaded, 'not-loaded')
+  await assert.rejects(launchOf(unloaded), error => error instanceof RelayError && error.code === RELAY_CODES.notFound && error.message === unloadedIssue.message)
+
+  const pending = clusterWorld()
+  proposeTwoGroups(pending)
+  withPlanMode(pending, { 'session-head': { active: true } })
+  const pendingIssue = issueOf(pending, 'plan-pending')
+  await assert.rejects(launchOf(pending), error => error instanceof RelayError && error.code === RELAY_CODES.invalid && error.message === pendingIssue.message)
+
+  const blocked = clusterWorld()
+  proposeTwoGroups(blocked)
+  blocked.engine.checkpoint({ agent: blocked.head, blocker: { kind: 'external', who: 'human', action: 'supply the API key' } })
+  const blockedIssue = issueOf(blocked, 'blocker')
+  assert.equal(blockedIssue.action, 'supply the API key')
+  await assert.rejects(launchOf(blocked), error => error instanceof RelayError && error.code === RELAY_CODES.invalid && error.message === blockedIssue.message)
+
+  const several = clusterWorld()
+  proposeTwoGroups(several)
+  several.engine.busyChains.add(several.chain.chainId)
+  several.agents.delete('session-head')
+  assert.deepEqual(several.engine.previewCluster({ chainId: several.chain.chainId }).issues.map(issue => issue.code), ['busy', 'not-loaded'], 'all preconditions are listed, in order')
+  for (const world of [noPlan, busy, unloaded, pending, blocked]) assert.equal(world.calls.filter(call => call.kind === 'create').length, 0)
+})
+
+check('previewCluster returns every group issue with its position', () => {
+  const world = clusterWorld()
+  const chainId = world.chain.chainId
+  world.local.writeFeatures(chainId, {
+    version: 1,
+    objective: 'cluster objective',
+    features: [
+      { id: 'F002', title: 'second' },
+      { id: 'F003', title: 'third', dependsOn: ['F002', 'F09'] },
+      { id: 'F004', title: 'fourth', dependsOn: ['F002'] },
+      { id: 'F005', title: 'fifth', dependsOn: ['F003'] },
+      { id: 'F006', title: 'sixth', passes: true, evidence: 'ran' },
+      { id: 'F007', title: 'seventh', assignedSessionId: 'session-w9' },
+    ],
+  })
+  world.engine.proposeCluster({ agent: world.head, groups: [clusterGroup('seed', ['F002'])] })
+  const issues = world.engine.previewCluster({
+    chainId,
+    groups: [clusterGroup('a', ['F002']), clusterGroup('b', ['F003', 'F004']), clusterGroup('c', ['F005'])],
+  }).issues
+  assert.deepEqual(issues.map(({ code, feature, dependency, index, dependencyIndex }) => ({ code, feature, dependency, index, dependencyIndex })), [
+    { code: 'cross-group-dependency', feature: 'F003', dependency: 'F002', index: 1, dependencyIndex: 0 },
+    { code: 'missing-dependency', feature: 'F003', dependency: 'F09', index: 1, dependencyIndex: undefined },
+    { code: 'cross-group-dependency', feature: 'F004', dependency: 'F002', index: 1, dependencyIndex: 0 },
+    { code: 'cross-group-dependency', feature: 'F005', dependency: 'F003', index: 2, dependencyIndex: 1 },
+  ])
+  assert.equal(issues[1].message, 'feature F003 depends on F09, which is not in features.json')
+  const mixed = world.engine.previewCluster({
+    chainId,
+    groups: [clusterGroup('a', ['F002', 'F006', 'F007']), clusterGroup('b', ['F002', 'F404']), { title: 'bad' }],
+  }).issues
+  assert.deepEqual(mixed.map(({ code, feature, index }) => ({ code, feature, index })), [
+    { code: 'feature-passes', feature: 'F006', index: 0 },
+    { code: 'feature-delegated', feature: 'F007', index: 0 },
+    { code: 'duplicate-feature', feature: 'F002', index: 1 },
+    { code: 'unknown-feature', feature: 'F404', index: 1 },
+    { code: 'invalid-groups', feature: undefined, index: 2 },
+    { code: 'invalid-groups', feature: undefined, index: 2 },
+    { code: 'invalid-groups', feature: undefined, index: 2 },
+  ])
+  assert.equal(world.engine.previewCluster({ chainId, groups: [1, 2, 3, 4, 5].map(n => clusterGroup(`g${n}`, ['F002'])) }).issues[0].code, 'invalid-groups')
 })
 
 await checkAsync('launchCluster refuses unsafe states', async () => {
@@ -3250,8 +3386,9 @@ check('the remote exposes previewCluster and forwards the edited groups', () => 
   const descriptor = Object.getOwnPropertyDescriptor(RelayRemote.prototype, '@deepseek-ai/dsh-typert-protocol/remote-methods')
   assert.ok(descriptor.value.methods.some(method => method.method === 'previewCluster'))
   assert.throws(() => remote.previewCluster(''), error => error instanceof RelayError && /chainId is required/.test(error.message))
-  assert.deepEqual(remote.previewCluster(world.chain.chainId), { refusal: null, conflicts: [], waiting: [], blocker: null })
+  assert.deepEqual(remote.previewCluster(world.chain.chainId).issues.map(issue => issue.code), ['no-plan'])
   proposeTwoGroups(world)
+  assert.deepEqual(remote.previewCluster(world.chain.chainId), { issues: [], conflicts: [], waiting: [] })
   const edited = [clusterGroup('late', ['F004']), clusterGroup('now', ['F003'])]
   assert.deepEqual(remote.previewCluster(world.chain.chainId, edited), world.engine.previewCluster({ chainId: world.chain.chainId, groups: edited }))
   assert.equal(remote.previewCluster(world.chain.chainId, edited).waiting.length, 1, 'the edited groups, not the stored ones, were checked')
@@ -3543,6 +3680,36 @@ await checkAsync('a blocked goal on the planning head records the blocker but ke
   assert.equal((await launch()).status, 'active')
 })
 
+await checkAsync('a goal blocker whose goal no longer blocks stops refusing the launch without any evaluation; preview leaves it alone and launch clears it', async () => {
+  for (const release of [
+    goals => { goals.views.get('session-head').phase = 'active' },
+    goals => { goals.views.delete('session-head') },
+  ]) {
+    const world = clusterWorld()
+    const chainId = world.chain.chainId
+    const goals = withGoals(world, { 'session-head': goalView({ phase: 'blocked', blockedReason: { code: 'stuck', message: 'needs a human' } }) })
+    await world.engine.evaluate(world.head)
+    proposeTwoGroups(world)
+    assert.match(world.local.readChain(chainId).blocker.action, /^goal blocked: needs a human/)
+    const blocked = world.engine.previewCluster({ chainId })
+    assert.deepEqual(blocked.issues.map(issue => issue.code), ['blocker'], 'the goal still blocks')
+    assert.match(blocked.issues[0].action, /^goal blocked: needs a human/)
+    await assert.rejects(() => world.engine.launchCluster({ chainId }), refusal(/has an open blocker \("goal blocked: needs a human/))
+    release(goals)
+    const stored = world.local.readChain(chainId)
+    assert.deepEqual(world.engine.previewCluster({ chainId }), { issues: [], conflicts: [], waiting: [] })
+    assert.deepEqual(world.local.readChain(chainId).blocker, stored.blocker, 'a preview writes nothing')
+    assert.equal((await world.engine.launchCluster({ chainId })).status, 'active')
+    assert.equal(world.local.readChain(chainId).blocker, null, 'the launch cleared the blocker the goal no longer owns')
+  }
+  // A blocker somebody else recorded is never judged by the goal.
+  const world = clusterWorld()
+  withGoals(world, { 'session-head': goalView() })
+  world.engine.checkpoint({ agent: world.head, blocker: { kind: 'external', who: 'human', action: 'supply the API key' } })
+  proposeTwoGroups(world)
+  assert.deepEqual(world.engine.previewCluster({ chainId: world.chain.chainId }).issues.map(issue => issue.code), ['blocker'])
+})
+
 await checkAsync('a blocker recorded by the supervisor itself pauses the worker goals at once', async () => {
   const { world, goals } = await launchedWithGoals()
   const { engine, local, chain } = world
@@ -3626,7 +3793,7 @@ check('clusterConflicts normalises ./, case, trailing slashes and the working di
   assert.deepEqual(pair('src/api', 'src/apis'), [], 'a name prefix is not a directory prefix')
 })
 
-check('clusterConflicts resolves ., .., empty and doubled segments and a leading slash', () => {
+check('clusterConflicts resolves ., .., empty and doubled segments', () => {
   const feature = (id, files) => ({ id, title: id, passes: false, files: [files] })
   const pair = (left, right, cwd) => clusterConflicts(
     { features: [feature('A', left), feature('B', right)] },
@@ -3639,10 +3806,27 @@ check('clusterConflicts resolves ., .., empty and doubled segments and a leading
   assert.deepEqual(pair('a/./b', 'a/b').map(item => item.path), ['a/b'])
   assert.deepEqual(pair('a//b', 'a/b/c.js').map(item => item.path), ['a/b'])
   assert.deepEqual(pair('a/b/../c', 'a/c/x.js').map(item => item.path), ['a/c'])
-  assert.deepEqual(pair('/src/api', 'src/api/x.js').map(item => item.path), ['src/api'], 'a leading slash disappears')
   assert.deepEqual(pair('../x', 'x'), [], 'a leading .. stays and is not the working directory')
   assert.deepEqual(pair('../x', '../x').map(item => item.path), ['../x'])
   assert.deepEqual(pair('a/..', 'src/api').map(item => item.path), [''], 'a/.. resolves to the working directory')
+})
+
+check('clusterConflicts resolves a relative path against the working directory and keeps outside locations apart', () => {
+  const feature = (id, files) => ({ id, title: id, passes: false, files: [files] })
+  const pair = (left, right, cwd) => clusterConflicts(
+    { features: [feature('A', left), feature('B', right)] },
+    [{ id: 'G1', isolation: 'shared', features: ['A'] }, { id: 'G2', isolation: 'shared', features: ['B'] }],
+    cwd,
+  )
+  const cwd = 'D:/work/proj'
+  assert.deepEqual(pair('../proj/src/a', 'src/a', cwd).map(item => item.path), ['src/a'], '../proj/ comes back into the working directory')
+  assert.deepEqual(pair('D:/work/x/../proj/src/a', 'src/a', cwd).map(item => item.path), ['src/a'], '.. inside an absolute path is resolved')
+  assert.deepEqual(pair('/src/api', 'src/api', cwd), [], 'a root-relative path is outside the working directory')
+  assert.deepEqual(pair('.', 'src/api', cwd).map(item => item.path), [''], '. under a cwd is the working directory')
+  assert.deepEqual(pair('d:\\WORK\\Proj\\Src\\a', 'src/a', 'D:\\work\\proj\\').map(item => item.path), ['src/a'], 'trailing slash and mixed case on the cwd')
+  assert.deepEqual(pair('../x', 'x', cwd), [], 'a path above the working directory is not inside it')
+  assert.deepEqual(pair('../x', '../x').map(item => item.path), ['../x'], 'without a cwd a relative path stays relative')
+  assert.deepEqual(pair('/src/api', 'src/api'), [], 'without a cwd an absolute path is still not a relative one')
 })
 
 check('a feature scoped to . overlaps a feature of another shared group', () => {
@@ -3770,6 +3954,68 @@ await checkAsync('resuming through setPaused or clearBlocker resumes the worker 
   blocked.world.engine.clearBlocker({ chainId: blockedId })
   assert.equal(blocked.world.local.readChain(blockedId).status, 'active')
   assert.deepEqual(blocked.goals.ops('resume').map(op => op.agentId), ['session-w2'], 'w1 owns nothing now; the head goal was never paused')
+})
+
+await checkAsync('a goal a human resumed by hand drops the pause flag, so a later human pause is never undone', async () => {
+  const { world, goals } = await launchedWithGoals()
+  const chainId = world.chain.chainId
+  world.engine.setPaused({ chainId, paused: true })
+  assert.equal(goals.views.get('session-w1').phase, 'paused')
+  assert.equal(pausedFlag(world, 'session-w1'), true)
+  goals.views.get('session-w1').phase = 'active'
+  world.engine.setPaused({ chainId, paused: false })
+  assert.equal(pausedFlag(world, 'session-w1'), undefined, 'a human took the goal over: the flag is dropped')
+  assert.deepEqual(goals.ops('resume').map(op => op.agentId), ['session-head', 'session-w2'], 'the plugin resumed nobody it had not paused')
+  goals.views.get('session-w1').phase = 'paused'
+  world.engine.checkpoint({ agent: world.head, note: 'any session reports in' })
+  world.engine.checkpoint({ agent: world.agents.get('session-w2'), note: 'a worker reports in' })
+  assert.equal(goals.views.get('session-w1').phase, 'paused', 'a pause a human made after that stays')
+  assert.ok(!goals.ops('resume').some(op => op.agentId === 'session-w1'))
+})
+
+await checkAsync('workers paused by a failed handoff get their goals back when the retry succeeds', async () => {
+  const { world, goals } = await launchedWithGoals({ failCreate: [3] })
+  const chainId = world.chain.chainId
+  await assert.rejects(() => world.engine.handoff(world.local.readChain(chainId), world.head, 'manual'), refusal(/create 3 refused/, RELAY_CODES.io))
+  assert.equal(world.local.readChain(chainId).status, 'paused')
+  assert.deepEqual(goals.ops('pause').map(op => op.agentId).sort(), ['session-w1', 'session-w2'])
+  assert.equal(pausedFlag(world, 'session-w1'), true)
+  await world.engine.handoff(world.local.readChain(chainId), world.head, 'manual')
+  assert.equal(world.local.readChain(chainId).status, 'active')
+  assert.deepEqual(goals.ops('resume').map(op => op.agentId).filter(id => id !== 'session-head').sort(), ['session-w1', 'session-w2'])
+  assert.equal(goals.views.get('session-w1').phase, 'active')
+  assert.equal(pausedFlag(world, 'session-w1'), undefined)
+})
+
+await checkAsync('a recovered pending handoff gives the worker goals back', async () => {
+  const { world, goals } = await launchedWithGoals()
+  const chainId = world.chain.chainId
+  world.engine.setPaused({ chainId, paused: true })
+  assert.equal(goals.views.get('session-w1').phase, 'paused')
+  world.makeAgent('session-w9')
+  world.local.update(chainId, record => {
+    record.sessions.push({ sessionId: 'session-w9', role: 'worker', index: 1, joinedAt: new Date().toISOString(), parentSessionId: null })
+    record.pendingHandoff = { sessionId: 'session-w9', createdAt: new Date().toISOString(), reason: 'failed: x' }
+  })
+  world.engine.reconcilePendingHandoff(world.local.readChain(chainId), world.local)
+  assert.equal(auditOf(world, 'handoff.recovered').length, 1)
+  assert.equal(world.local.readChain(chainId).status, 'active')
+  assert.deepEqual(goals.ops('resume').map(op => op.agentId).filter(id => id !== 'session-head').sort(), ['session-w1', 'session-w2'])
+  assert.equal(goals.views.get('session-w2').phase, 'active')
+})
+
+await checkAsync('evaluating the head of an active cluster chain gives back the worker goals the plugin paused', async () => {
+  const { world, goals } = await launchedWithGoals()
+  const chainId = world.chain.chainId
+  world.engine.setPaused({ chainId, paused: true })
+  assert.equal(goals.views.get('session-w1').phase, 'paused')
+  // Whatever path moved the chain back to active, without a sync of its own.
+  world.local.update(chainId, record => { record.status = 'active'; record.pausedBy = null })
+  assert.equal(goals.views.get('session-w1').phase, 'paused')
+  await world.engine.evaluate(world.head)
+  assert.equal(goals.views.get('session-w1').phase, 'active')
+  assert.equal(goals.views.get('session-w2').phase, 'active')
+  assert.equal(pausedFlag(world, 'session-w1'), undefined)
 })
 
 await checkAsync('a worker that is not loaded when the chain resumes gets its goal back once it is loaded and idle', async () => {

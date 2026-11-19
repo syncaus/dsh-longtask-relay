@@ -103,7 +103,19 @@ window.__ModuleLoader__.load({
       launchNote: '会按上面的分组开出会话并开始执行',
       launchOverlap: '可能互相覆盖',
       launchUnknown: '没写文件范围',
-      launchRefused: '这样分组无法启动',
+      launchRefused: '现在不能启动',
+      launchCheckFailed: '没能向引擎核对这份分组，稍后自动重试',
+      issueCrossGroup: '依赖在另一组，放进同一组才能启动',
+      issueMissingDep: '依赖的功能不存在',
+      issueBlocker: '有未解除的阻塞，先解除',
+      issueNotLoaded: '主会话没有加载，先打开它',
+      issuePlanPending: '计划还没批准，先在主会话里批准',
+      issueBusy: '这条链正在处理别的操作，稍后再试',
+      issueNoPlan: '主会话还没提交启动方案',
+      issueDelegated: '功能已经派给别的会话',
+      issuePasses: '功能已经通过',
+      issueDuplicate: '功能出现在两个组里',
+      issueUnknownFeature: '功能不在清单里',
       attnLaunch: '等你确认启动',
       launchWaitingTitle: '待启动的组',
       launchWaitingSub: '前置功能通过后自动开会话',
@@ -382,7 +394,19 @@ window.__ModuleLoader__.load({
       launchNote: 'Sessions are created for the groups above and start working',
       launchOverlap: 'May overwrite each other',
       launchUnknown: 'No file scope given',
-      launchRefused: 'This grouping cannot be launched',
+      launchRefused: 'Cannot launch yet',
+      launchCheckFailed: 'Could not check this grouping with the engine; retrying shortly',
+      issueCrossGroup: 'depends on another group; put both in one group',
+      issueMissingDep: 'depends on a feature that does not exist',
+      issueBlocker: 'An open blocker must be cleared first',
+      issueNotLoaded: 'The main session is not loaded; open it first',
+      issuePlanPending: 'The plan is not approved yet; approve it in the main session',
+      issueBusy: 'The chain is busy with another operation; try again shortly',
+      issueNoPlan: 'The main session has not proposed a launch yet',
+      issueDelegated: 'is already delegated to another session',
+      issuePasses: 'already passes',
+      issueDuplicate: 'appears in two groups',
+      issueUnknownFeature: 'is not in the feature list',
       attnLaunch: 'Waiting for you to launch',
       launchWaitingTitle: 'Groups not opened yet',
       launchWaitingSub: 'Opened automatically once their dependencies pass',
@@ -1874,17 +1898,31 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           // The Host judges every regrouping: refusals, overlaps, and which groups
           // will wait. One rule set, so the card cannot disagree with the launch.
           const payload = groups.map(group => ({ title: group.title, features: group.features, isolation: group.isolation, reason: group.reason }))
-          const payloadKey = JSON.stringify(payload)
+          // Everything the judgement depends on: the grouping, and the chain state the
+          // Host checks (blocker, plan approval, the main session being loaded, the list).
+          const [attempt, setAttempt] = useState(0)
+          const payloadKey = JSON.stringify([
+            payload,
+            chain.blocker?.action ?? null,
+            detail.head?.planMode === true,
+            (Array.isArray(detail.sessions) ? detail.sessions : []).find(session => session.sessionId === chain.currentSessionId)?.loaded === true,
+            features.map(feature => [feature.id, feature.passes === true, feature.assignedSessionId ?? null, feature.files ?? [], feature.dependsOn ?? []]),
+            attempt,
+          ])
           const [preview, setPreview] = useState(null)
           useEffect(() => {
             if (payload.length === 0) return undefined
             let live = true
+            let retry
             call('relay/previewCluster', { chainId: chain.chainId, groups: payload })
               .then((value) => { if (live) setPreview({ key: payloadKey, value: value ?? {} }) })
-              .catch((error) => {
-                if (live) setPreview({ key: payloadKey, value: { refusal: error instanceof Error ? error.message : String(error) } })
+              .catch(() => {
+                // A failed check is not a refusal: say so and ask again.
+                if (!live) return
+                setPreview({ key: payloadKey, failed: true })
+                retry = setTimeout(() => setAttempt(current => current + 1), 3000)
               })
-            return () => { live = false }
+            return () => { live = false; clearTimeout(retry) }
           }, [chain.chainId, payloadKey])
           if (proposed.length === 0) {
             return h('section', { className: 'relay-card' },
@@ -1910,8 +1948,26 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const isolate = (groupId, isolation) => setGroups(current => current.map(group => (group.id === groupId ? { ...group, isolation } : group)))
           const sharedCount = groups.filter(group => group.isolation === 'shared').length
           // Until the Host has judged this exact grouping, nothing can be launched.
-          const judged = preview !== null && preview.key === payloadKey ? preview.value : null
-          const refusal = typeof judged?.refusal === 'string' && judged.refusal.length > 0 ? judged.refusal : null
+          const current = preview !== null && preview.key === payloadKey ? preview : null
+          const judged = current !== null && current.failed !== true ? current.value : null
+          const groupName = index => groups[index]?.title ?? ''
+          const pair = issue => `${issue.feature} -> ${issue.dependency}`
+          /** A refusal in the reader's language; codes this build does not know keep the Host's sentence. */
+          const issueText = (issue) => {
+            if (issue.code === 'cross-group-dependency') return `${pair(issue)} (${groupName(issue.index)} / ${groupName(issue.dependencyIndex)}): ${t('issueCrossGroup')}`
+            if (issue.code === 'missing-dependency') return `${pair(issue)}: ${t('issueMissingDep')}`
+            if (issue.code === 'blocker') return `${t('issueBlocker')}: ${issue.action ?? ''}`
+            if (issue.code === 'not-loaded') return t('issueNotLoaded')
+            if (issue.code === 'plan-pending') return t('issuePlanPending')
+            if (issue.code === 'busy') return t('issueBusy')
+            if (issue.code === 'no-plan') return t('issueNoPlan')
+            if (issue.code === 'feature-delegated') return `${issue.feature}: ${t('issueDelegated')}`
+            if (issue.code === 'feature-passes') return `${issue.feature}: ${t('issuePasses')}`
+            if (issue.code === 'duplicate-feature') return `${issue.feature}: ${t('issueDuplicate')}`
+            if (issue.code === 'unknown-feature') return `${issue.feature}: ${t('issueUnknownFeature')}`
+            return issue.message ?? issue.code
+          }
+          const issues = Array.isArray(judged?.issues) ? judged.issues : []
           const conflicts = (Array.isArray(judged?.conflicts) ? judged.conflicts : []).map((conflict, index) => (conflict.kind === 'overlap'
             ? { key: `overlap:${index}`, kind: 'launchOverlap', text: `${(conflict.features ?? []).join(' / ')}: ${conflict.path === '' ? '.' : conflict.path}` }
             : { key: `unknown:${index}`, kind: 'launchUnknown', text: (conflict.features ?? []).join(', ') }))
@@ -1934,12 +1990,13 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           return h('section', { className: 'relay-card' },
             h(CardTitle, { icon: true, sub: `${sharedCount} ${t('launchSessions')}` }, t('launchTitle')),
             typeof plan.note === 'string' && plan.note.length > 0 ? h('p', { className: 'relay-text' }, plan.note) : null,
-            refusal === null
-              ? null
-              : h('div', { className: 'relay-blocker is-external' },
-                h('span', { className: 'relay-blocker-kind' }, t('launchRefused')),
-                h('span', { className: 'relay-blocker-text' }, refusal),
-              ),
+            current !== null && current.failed === true
+              ? h('div', { className: 'relay-blocker is-code' }, h('span', { className: 'relay-blocker-text' }, t('launchCheckFailed')))
+              : null,
+            issues.map((issue, index) => h('div', { key: `issue:${index}`, className: 'relay-blocker is-external' },
+              h('span', { className: 'relay-blocker-kind' }, t('launchRefused')),
+              h('span', { className: 'relay-blocker-text' }, issueText(issue)),
+            )),
             conflicts.map(conflict => h('div', { key: conflict.key, className: 'relay-blocker is-code' },
               h('span', { className: 'relay-blocker-kind' }, t(conflict.kind)),
               h('span', { className: 'relay-blocker-text' }, conflict.text),
@@ -1969,7 +2026,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             h('div', { className: 'relay-launch-foot' },
               h(ConfirmButton, {
                 primary: true,
-                disabled: busy || groups.length === 0 || judged === null || refusal !== null,
+                disabled: busy || groups.length === 0 || judged === null || issues.length > 0,
                 confirmLabel: t('launchConfirm'),
                 note: t('launchNote'),
                 onConfirm: () => {
