@@ -107,14 +107,16 @@ function boot(options = {}) {
 const strict = boot()
 assert.deepEqual(
   strict.injected.sort(),
-  ['conversation.view', 'conversation.view', 'main', 'plugins.bundle.config', 'sidebar.panellist'],
+  ['conversation.view', 'conversation.view', 'main', 'plugins.bundle.config', 'plugins.detail.actions', 'sidebar.panellist'],
 )
-assert.equal(strict.registrations.length, 5, 'expected five slot registrations')
+assert.equal(strict.registrations.length, 6, 'expected six slot registrations')
 const names = strict.registrations.map(entry => entry.options.name).sort()
-assert.deepEqual(names, ['conversation.view', 'conversation.view', 'main', 'plugins.bundle.config', 'sidebar.panellist'])
+assert.deepEqual(names, ['conversation.view', 'conversation.view', 'main', 'plugins.bundle.config', 'plugins.detail.actions', 'sidebar.panellist'])
 assert.equal(strict.registrations.find(entry => entry.options.name === 'main').options.key, 'relay')
 assert.equal(strict.registrations.find(entry => entry.options.name === 'sidebar.panellist').options.id, 'relay')
 assert.equal(strict.registrations.find(entry => entry.options.name === 'plugins.bundle.config').options.key, '@local/longtask-relay')
+assert.equal(strict.registrations.find(entry => entry.options.name === 'plugins.detail.actions').options.locale, 'relay')
+assert.equal(strict.registrations.find(entry => entry.options.name === 'plugins.detail.actions').options.id, 'relay-update')
 const viewIds = strict.registrations
   .filter(entry => entry.options.name === 'conversation.view')
   .map(entry => entry.options.id)
@@ -136,7 +138,7 @@ const withRemote = boot({
     },
   },
 })
-assert.equal(withRemote.registrations.length, 5, 'a live remote must not change the registrations')
+assert.equal(withRemote.registrations.length, 6, 'a live remote must not change the registrations')
 assert.deepEqual(watched.map(item => item.event).sort(), ['approval/request', 'user-questions/request'])
 
-console.log('client boot check passed: 5 slots registered (2 session tabs), locale namespace registered, decision streams watched')
+console.log('client boot check passed: 6 slots registered (2 session tabs, 1 detail action), locale namespace registered, decision streams watched')

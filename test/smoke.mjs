@@ -3,7 +3,8 @@
  * Run with: node test/smoke.mjs
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync, existsSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChainIndex, ChainStore, RELAY_CODES, RelayError, skeletonTruth } from '../lib/chain-store.js'
@@ -19,6 +20,7 @@ import {
 } from '../lib/prompts.js'
 import { RelayRemote } from '../lib/remote.js'
 import { registerTools } from '../lib/tools.js'
+import { applyPluginUpdate, checkPluginUpdate } from '../lib/update.js'
 
 const failures = []
 let checks = 0
@@ -4164,6 +4166,96 @@ await checkAsync('the agent/created handler schedules an evaluation for every se
     else process.env.DSH_HOME = previousHome
     for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup()
   }
+})
+
+// --- bulk coverage acceptance and plugin self-update ---
+
+await checkAsync('many partial features are accepted in one write', async () => {
+  const world = fakeWorld()
+  world.local.patchFeatures(world.chain.chainId, [
+    { id: 'F001', passes: true, evidence: 'ran it, exit 0', coverage: 'partial' },
+  ])
+  const result = world.engine.acceptCoverageMany({ chainId: world.chain.chainId })
+  assert.equal(result.accepted, 1)
+  assert.equal(world.local.readFeatures(world.chain.chainId).features[0].acceptedBy, 'human')
+  const again = world.engine.acceptCoverageMany({ chainId: world.chain.chainId })
+  assert.equal(again.accepted, 0, 'an accepted feature must not be accepted twice')
+})
+
+await checkAsync('finish succeeds after partial coverage is accepted', async () => {
+  const world = fakeWorld({ requireHumanAcceptedCoverage: true })
+  world.local.patchFeatures(world.chain.chainId, [
+    { id: 'F001', passes: true, evidence: 'npm test exit 0: 42/42 passed', coverage: 'partial' },
+  ])
+  const refused = world.engine.finish({ agent: world.oldAgent, evidence: 'npm test exit 0: 42/42 passed' })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, RELAY_CODES.incomplete)
+  world.engine.acceptCoverageMany({ chainId: world.chain.chainId })
+  const result = world.engine.finish({ agent: world.oldAgent, evidence: 'npm test exit 0: 42/42 passed' })
+  assert.equal(result.ok, true)
+})
+
+/** Build a git working tree whose upstream holds one newer commit. */
+async function updateFixture() {
+  const base = mkdtempSync(join(tmpdir(), 'relay-update-'))
+  const remoteDir = join(base, 'origin.git')
+  const workDir = join(base, 'work')
+  const peerDir = join(base, 'peer')
+  const pkgRel = 'dsh-longtask-relay-1.1.0/package'
+  const pkgDir = join(workDir, pkgRel)
+  mkdirSync(pkgDir, { recursive: true })
+  writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@local/longtask-relay', version: '1.0.0' }))
+  const git = (cwd, ...args) => execFileSync('git', args, { cwd, stdio: 'pipe', windowsHide: true })
+  mkdirSync(remoteDir)
+  git(remoteDir, 'init', '--bare', '-b', 'main')
+  git(workDir, 'init', '-b', 'main')
+  git(workDir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'add', '-A')
+  git(workDir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-m', 'v1.0.0')
+  git(workDir, 'remote', 'add', 'origin', remoteDir)
+  git(workDir, 'push', '-u', 'origin', 'main')
+  git(base, 'clone', remoteDir, peerDir)
+  writeFileSync(join(peerDir, pkgRel, 'package.json'), JSON.stringify({ name: '@local/longtask-relay', version: '1.1.0' }))
+  git(peerDir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'add', '-A')
+  git(peerDir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-m', 'v1.1.0')
+  git(peerDir, 'push')
+  return { base, pkgDir }
+}
+
+await checkAsync('the update check sees commits behind the upstream branch', async () => {
+  const { base, pkgDir } = await updateFixture()
+  const check = await checkPluginUpdate(pkgDir, { wait: true })
+  assert.equal(check.reason, 'ok')
+  assert.equal(check.available, true)
+  assert.equal(check.behind, 1)
+  assert.equal(check.latestVersion, '1.1.0')
+  assert.equal(check.dirty, false)
+  const applied = await applyPluginUpdate(pkgDir)
+  assert.equal(applied.ok, true)
+  assert.equal(applied.version, '1.1.0')
+  assert.equal(applied.reloadRequired, true)
+  const after = await checkPluginUpdate(pkgDir, { wait: true })
+  assert.equal(after.available, false)
+  rmSync(base, { recursive: true, force: true })
+})
+
+await checkAsync('an update refuses a dirty working tree', async () => {
+  const { base, pkgDir } = await updateFixture()
+  writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@local/longtask-relay', version: '1.0.0', dirty: true }))
+  const applied = await applyPluginUpdate(pkgDir)
+  assert.equal(applied.ok, false)
+  assert.equal(applied.reason, 'dirty')
+  rmSync(base, { recursive: true, force: true })
+})
+
+await checkAsync('an update check reports a package outside git', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'relay-nogit-'))
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: '@local/longtask-relay', version: '1.0.0' }))
+  const check = await checkPluginUpdate(dir)
+  assert.equal(check.reason, 'not-git')
+  assert.equal(check.currentVersion, '1.0.0')
+  const applied = await applyPluginUpdate(dir)
+  assert.equal(applied.ok, false)
+  rmSync(dir, { recursive: true, force: true })
 })
 
 rmSync(workspace, { recursive: true, force: true })
