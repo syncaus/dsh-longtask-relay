@@ -38,6 +38,7 @@ export function apply(ctx, config) {
     // session re-reads the workspace truth index and makes its chain visible.
     const offCreated = ctx.on('agent/created', ({ agent }) => {
       try {
+        engine.sessionLoaded(agent.id)
         const located = engine.locate(agent.session)
         // A session that is already idle emits no further idle event, so a goal
         // left disarmed by a restart would never be looked at without this.
