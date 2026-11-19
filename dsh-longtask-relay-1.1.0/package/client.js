@@ -167,7 +167,7 @@ window.__ModuleLoader__.load({
       goalRow: '目标',
       goalHeld: '续行已暂缓，等待交接',
       goalPausedWithChain: '随链暂停',
-      goalBudget: '整条链共用的轮次',
+      goalBudget: '本会话的轮次额度',
       planModeChip: '计划模式',
       planModeNote: '当前会话在计划模式：先规划、不执行。计划批准后才会拆出功能清单。',
       emptyPlanNote: '在计划模式下，先让计划获得批准，再启动链；批准的计划会写进 PLAN.md。',
@@ -422,7 +422,7 @@ window.__ModuleLoader__.load({
       goalRow: 'Goal',
       goalHeld: 'Continuation on hold until handoff',
       goalPausedWithChain: 'Paused with the chain',
-      goalBudget: 'Rounds shared by the whole chain',
+      goalBudget: "This session's round budget",
       planModeChip: 'Plan mode',
       planModeNote: 'This session is in plan mode: it plans and does not execute. The feature list is created once the plan is approved.',
       emptyPlanNote: 'In plan mode, get the plan approved before starting a chain; the approved plan is written to PLAN.md.',
@@ -1100,13 +1100,14 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 
         /**
          * The chain error worth showing next to its blocker.
-         * A pause the blocker caused writes the same sentence into `lastError`,
-         * so only a failed handoff is a second, separate problem.
+         * A pause the blocker caused writes the same sentence into `lastError`;
+         * a failed handoff or a session's own blocked note is a separate problem.
          */
         const errorOf = (chain) => {
           if (typeof chain.lastError !== 'string' || chain.lastError.length === 0) return null
           const hasBlocker = chain.blocker !== null && chain.blocker !== undefined
-          if (hasBlocker && chain.pausedBy !== 'handoff-failed') return null
+          const echoes = chain.pausedBy === 'blocker' || chain.pausedBy === 'handoff-limit' || chain.lastError.startsWith('external blocker:')
+          if (hasBlocker && echoes) return null
           return chain.lastError
         }
 
@@ -1570,7 +1571,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 
         /**
          * Reader for the chain's truth-source documents.
-         * The handoff brief and progress arrive with the chain detail; the
+         * The handoff brief arrives with the chain detail; progress and the
          * ledgers are fetched when their tab is opened.
          */
         function DocsCard({ chainId, detail, onSection }) {
@@ -2522,6 +2523,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
            */
           const focusChain = useCallback((chainId) => {
             setFilter('all')
+            setNeedle('')
             select(chainId)
             requestAnimationFrame(() => {
               try {

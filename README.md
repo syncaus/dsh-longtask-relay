@@ -67,7 +67,7 @@ market/index.json        插件索引
 
 插件都是纯 JavaScript，没有依赖，也没有构建步骤。
 
-长任务接力带三组测试，在 `dsh-longtask-relay-1.1.0/package` 目录下运行：
+长任务接力带测试，在 `dsh-longtask-relay-1.1.0/package` 目录下运行：
 
 ```sh
 node test/smoke.mjs         # 链存储、监督判定、交接、工具和面板接口

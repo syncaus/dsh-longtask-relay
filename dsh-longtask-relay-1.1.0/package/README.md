@@ -116,7 +116,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 | `pauseGoalOnRetire` | `true` | 交接后暂停旧会话的 goal |
 | `seedGoalOnHandoff` | `false` | 交接后给新会话建一个 goal，让目标轮驱动继续跑；需要目标服务可用 |
 | `goalRoundsPerHandoff` | `16` | 给新会话 goal 分配的续轮上限 |
-| `inheritGoal` | `true` | 交接时新会话沿用旧会话的 goal 目标，轮次只给剩余部分（上限减已用轮次），整条链共用一份轮次预算；关掉后不继承 |
+| `inheritGoal` | `true` | 交接时新会话沿用你自己建的 goal，轮次只给剩余部分（上限减已用轮次），整条链共用一份轮次预算；插件按 `seedGoalOnHandoff` 建的 goal 不继承；关掉后不继承 |
 | `rearmGoalOnReload` | `true` | Host 重启或插件重载后，恢复本插件建的 goal 的自动续行；用户自己建的 goal 不动 |
 | `inheritPlanMode` | `true` | 旧会话处于计划模式时，接力会话和子会话也以计划模式启动 |
 | `notifyOldSession` | `true` | 交接后给旧会话留一条退役说明 |
@@ -131,13 +131,13 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 - **`passes` 必须有可用证据**：`evidence` 里要出现命令、退出码或计数。`relay_finish` 会拒绝「通过但证据不足 8 个字符或缺数字」的条目；`relay_checkpoint` 在写入 `passes=true` 时先挡一道（`evidence_too_weak`）。
 - **数字不许手写**：真理源里的计数必须来自 `statusCheck` 的输出引用，否则下一棒会把过时数字当事实。
 - **阻塞分三类**：`external`（等人：账号、机器、只有 owner 能做的决定）、`code`（等自己修）、`decision`（等一个选择）。`external` 会暂停链并写下「谁要做哪件事才解开」，避免继续开新会话空转。
-- **与桌面端目标功能的关系**：目标（goal）管一个会话内的自动续轮，接力管换会话，两者串行互补。开启 `seedGoalOnHandoff` 后，交接会给新会话按链目标和当前进度建一个 goal，新会话由目标轮驱动继续，而不是跑完交接说明就停住。反过来，链头会话的 goal 进入 `blocked` 时（例如轮次耗尽），链会被记为 external 阻塞并暂停；在目标条里恢复或清除 goal 后，链的这条阻塞会自动解除。把 `pauseOnExternalBlocker` 关掉时只记录阻塞、继续交接，让新会话重新拿到轮次预算。
+- **与桌面端目标功能的关系**：目标（goal）管一个会话内的自动续轮，接力管换会话，两者串行互补。开启 `seedGoalOnHandoff` 后，交接会给新会话按链目标和当前进度建一个 goal，新会话由目标轮驱动继续，而不是跑完交接说明就停住。反过来，链头会话的 goal 进入 `blocked` 时（例如轮次耗尽），链会被记为 external 阻塞并暂停；在目标条里恢复或清除 goal 后，链的这条阻塞会自动解除。对插件按 `seedGoalOnHandoff` 建的 goal，把 `pauseOnExternalBlocker` 关掉时只记录阻塞、继续交接，让新会话重新拿到轮次预算。
 - **发现新工作只能追加**：`relay_checkpoint` 的 `addFeatures` 需要 `reason`，追加动作会写进 `PROGRESS.md`，让「初始化时没想到」这件事留下痕迹。
 
 ## 与目标模式、计划模式的配合
 
 - 收尾指令发出后和交接开始时，插件会取消旧会话 goal 的自动续行（只取消续行，goal 本身的阶段不变），避免旧会话在收尾后又被目标轮推着继续干活，或在新会话已经启动时多跑一轮。
-- 交接时新会话继承旧会话的 goal：目标不变，轮次只给剩余部分，所以 goal 的轮次上限是整条链的预算，不是每次交接重新计。旧 goal 已没有剩余轮次时不继承，也不会改建一个全新的 goal。`inheritGoal` 关掉后回到 `seedGoalOnHandoff` 的旧行为。
+- 交接时新会话继承旧会话的 goal：你自己建的 goal 会被继承，目标不变、轮次只给剩余部分；本会话显示的是它拿到的剩余额度。旧 goal 轮次用完时不继承，链记一条阻塞等你处理。插件按 `seedGoalOnHandoff` 建的 goal 不继承，每次交接照旧按 `goalRoundsPerHandoff` 新建。你的 goal 处于阻塞或被你暂停时，不会被换成新建的 goal。`inheritGoal` 关掉后回到 `seedGoalOnHandoff` 的旧行为。
 - 本插件建的 goal 在 Host 重启或插件重载后会被恢复自动续行；用户自己建的 goal 不动。链用 `relay_finish` 结束时，本插件建的 goal 一并标为完成。
 - 在面板里暂停一条链会同时暂停链头会话的 goal，恢复链时把这个 goal 一并恢复；会话自己调用 `relay_control` 暂停链不动 goal。
 - 旧会话处于计划模式时，接力会话和子会话也以计划模式启动。
