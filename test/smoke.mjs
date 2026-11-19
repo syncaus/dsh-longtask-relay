@@ -1849,7 +1849,7 @@ check('a nested truthDir still resolves the workspace cwd', () => {
 
 check('package metadata exposes the test script and version', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(pkg.version, '1.4.0')
+  assert.equal(pkg.version, '1.4.1')
   assert.match(pkg.scripts.test, /node test\/smoke\.mjs/)
 })
 
@@ -2616,10 +2616,10 @@ check('store: files and dependsOn survive write, read and appendFeatures; malfor
   assert.deepEqual(read[0].dependsOn, ['F002'])
   assert.equal('files' in read[1], false, 'an absent field must stay absent')
   assert.equal('dependsOn' in read[1], false)
-  assert.equal('files' in read[2], false, 'a non-array files value is dropped')
-  assert.equal('dependsOn' in read[2], false, 'an array holding an empty string is dropped')
-  assert.equal('files' in read[3], false, 'an array holding a non-string is dropped')
-  assert.deepEqual(read[3].dependsOn, [], 'an empty well-formed array is kept')
+  assert.deepEqual(read[2].files, ['src/a'], 'a single string becomes a one-item list')
+  assert.deepEqual(read[2].dependsOn, ['F001'], 'an empty string inside an array is dropped')
+  assert.deepEqual(read[3].files, ['ok'], 'a non-string inside an array is dropped')
+  assert.equal('dependsOn' in read[3], false, 'an empty array leaves nothing usable, so no field')
   local.appendFeatures(chain.chainId, [{ id: 'F005', title: 'five', files: ['docs'], dependsOn: ['F001'] }, { id: 'F006', title: 'six', files: [''] }], 'found later')
   const appended = local.readFeatures(chain.chainId).features
   assert.deepEqual(appended[4].files, ['docs'])
@@ -2861,7 +2861,7 @@ check('proposeCluster refuses every malformed or unsafe proposal', () => {
   assert.equal(world.engine.fingerprints.get(world.chain.chainId), undefined, 'a refusal must not freeze the list')
 })
 
-check('proposeCluster stores the launch plan, freezes the list, audits, and status shows launchPending', () => {
+check('proposeCluster stores the launch plan, leaves the list unfrozen, audits, and status shows launchPending', () => {
   const world = clusterWorld()
   const chainId = world.chain.chainId
   const before = world.engine.status().find(item => item.chainId === chainId)
@@ -2878,21 +2878,21 @@ check('proposeCluster stores the launch plan, freezes the list, audits, and stat
   assert.equal(record.launchPlan.note, 'ready')
   assert.equal(typeof record.launchPlan.proposedAt, 'string')
   assert.deepEqual(record.launchPlan.groups, result.groups)
-  assert.ok(world.engine.fingerprints.get(chainId) !== undefined, 'the feature list must be frozen')
-  assert.equal(auditOf(world, 'features.frozen').length, 1)
+  assert.equal(world.engine.fingerprints.get(chainId), undefined, 'the list is frozen at launch, not by a proposal')
+  assert.equal(auditOf(world, 'features.frozen').length, 0)
   assert.deepEqual(auditOf(world, 'cluster.proposed')[0].detail, { groups: 2, conflicts: 0 })
   const after = world.engine.status().find(item => item.chainId === chainId)
   assert.equal(after.launchPending, true, 'the status cache must notice the new launch plan')
-  // A second proposal overwrites the first and keeps the freeze.
+  // A second proposal overwrites the first.
   world.engine.proposeCluster({ agent: world.head, groups: [clusterGroup('only', ['F002'])] })
   const second = world.local.readChain(chainId).launchPlan
   assert.equal(second.groups.length, 1)
   assert.equal(second.note, '')
-  assert.equal(auditOf(world, 'features.frozen').length, 1)
+  assert.equal(auditOf(world, 'features.frozen').length, 0)
   assert.equal(auditOf(world, 'cluster.proposed').length, 2)
 })
 
-check('clusterConflicts: exact path, directory prefix, sibling that is not a prefix, worktree ignored, unknown scope', () => {
+check('clusterConflicts: exact path, directory prefix, sibling that is not a prefix, worktree compared as main, unknown scope', () => {
   const doc = features => ({ features: features.map(([id, files]) => ({ id, title: id, ...(files === undefined ? {} : { files }) })) })
   const shared = (id, features) => ({ id, isolation: 'shared', features })
   const exact = clusterConflicts(doc([['A', ['src\\x.js']], ['B', ['src/x.js']]]), [shared('G1', ['A']), shared('G2', ['B'])])
@@ -2906,7 +2906,7 @@ check('clusterConflicts: exact path, directory prefix, sibling that is not a pre
   const sibling = clusterConflicts(doc([['A', ['a/b']], ['B', ['a/bc.js']]]), [shared('G1', ['A']), shared('G2', ['B'])])
   assert.deepEqual(sibling, [], 'a/b is not a prefix of a/bc.js')
   const worktree = clusterConflicts(doc([['A', ['a']], ['B', ['a']]]), [shared('G1', ['A']), { id: 'G2', isolation: 'worktree', features: ['B'] }])
-  assert.deepEqual(worktree, [], 'a worktree group cannot collide with a shared one')
+  assert.deepEqual(worktree, [{ kind: 'overlap', groups: ['G1', 'main'], features: ['A', 'B'], path: 'a' }], 'a worktree group stays with the planning session, which is compared as main')
   const same = clusterConflicts(doc([['A', ['a']], ['B', ['a']]]), [shared('G1', ['A', 'B'])])
   assert.deepEqual(same, [], 'features in one group run in order and cannot collide')
   const unknown = clusterConflicts(doc([['A', undefined], ['B', ['x']], ['C', undefined]]), [shared('G1', ['A', 'B']), { id: 'G2', isolation: 'worktree', features: ['C'] }])
@@ -3247,7 +3247,7 @@ await checkAsync('launchCluster holds back a group whose dependency is outside e
   assert.match(notice, /opened automatically/)
   assert.ok(!/- F004:/.test(notice), 'a waiting feature is not kept by the planning session')
   const summary = world.engine.status().find(item => item.chainId === world.chain.chainId)
-  assert.equal(summary.launchWaiting, 1)
+  assert.equal('launchWaiting' in summary, false, 'nothing reads launchWaiting, so the summary must not carry it')
 })
 
 await checkAsync('launchCluster still activates the chain when every shared group waits', async () => {
@@ -3269,14 +3269,15 @@ await checkAsync('a dependency that already passes does not make a group wait', 
     features: [
       { id: 'F001', title: 'done', passes: true, evidence: 'ran true', files: ['x'] },
       { id: 'F002', title: 'second', files: ['a'], dependsOn: ['F001'] },
-      { id: 'F003', title: 'third', files: ['b'], dependsOn: ['F404'] },
+      { id: 'F003', title: 'third', files: ['b'], dependsOn: ['F001'] },
     ],
   })
   world.engine.proposeCluster({ agent: world.head, groups: [clusterGroup('a', ['F002']), clusterGroup('b', ['F003'])] })
   const result = await world.engine.launchCluster({ chainId: world.chain.chainId })
   assert.equal(result.results[0].launched, true, 'F001 passes, so G1 opens')
-  assert.equal(result.results[1].waiting, true, 'a dependency that does not exist counts as unmet')
-  assert.deepEqual(result.results[1].waitsFor, ['F404'])
+  assert.equal(result.results[1].launched, true, 'F001 passes, so G2 opens')
+  // A plan can no longer name a missing dependency, but the check stays defensive for a list edited later.
+  assert.deepEqual(world.engine.unmetDependencies({ features: [{ id: 'F003', dependsOn: ['F404'] }] }, { features: ['F003'] }), ['F404'])
 })
 
 await checkAsync('launchWaitingGroups opens the group once its dependency passes, and checkpoint triggers it', async () => {
@@ -3303,7 +3304,6 @@ await checkAsync('launchWaitingGroups opens the group once its dependency passes
   const notice = headTexts(world).at(-1)
   assert.match(notice, /<relay_cluster_group_opened>/)
   assert.ok(notice.includes(late.sessionId) && notice.includes('F004'))
-  assert.equal(world.engine.status().find(item => item.chainId === chainId).launchWaiting, 0)
   await world.engine.launchWaitingGroups(chainId)
   assert.equal(world.calls.filter(call => call.kind === 'create').length, 2, 'an opened group is not opened twice')
   // A relay-mode checkpoint never reaches it.
@@ -3371,6 +3371,305 @@ await checkAsync('handoffNow refuses a planning chain, from the engine and from 
   assert.equal(result.kind, 'error')
   assert.match(result.text, /there is no work to hand off yet/)
   assert.equal(world.calls.filter(call => call.kind === 'create').length, 0)
+})
+
+// --- cluster mode: review fixes ---
+
+/** Mount a context meter that reports one fixed pressure ratio for every session. */
+function withPressure(world, ratio) {
+  const original = world.engine.ctx.get
+  world.engine.ctx.get = name => (name === 'tokenMeter'
+    ? { contextPressure: () => ({ pressureTokens: Math.round(ratio * 1000), contextWindow: 1000 }), measure: () => ({ totalTokens: 0 }) }
+    : original(name))
+}
+
+/** A launched two-group cluster whose head and both workers have plugin-created goals. */
+async function launchedWithGoals(overrides = {}) {
+  const world = clusterWorld(overrides)
+  const goals = withGoals(world)
+  proposeTwoGroups(world)
+  await world.engine.launchCluster({ chainId: world.chain.chainId })
+  return { world, goals }
+}
+
+/** Mark features as passing the way a session would, with evidence strong enough for finish. */
+const passFeatures = (world, ids) => world.local.patchFeatures(
+  world.chain.chainId,
+  ids.map(id => ({ id, passes: true, evidence: 'node x.mjs -> exit 0, 3/3 passed' })),
+)
+
+await checkAsync('the list is frozen at launch: renames and additions made while planning are accepted', async () => {
+  const world = clusterWorld()
+  const chainId = world.chain.chainId
+  proposeTwoGroups(world)
+  const edited = world.local.readFeatures(chainId)
+  edited.features.find(feature => feature.id === 'F005').title = 'fifth, renamed'
+  edited.features.push({ id: 'F007', title: 'seventh', verify: 'node seven.mjs', files: ['src/c'] })
+  world.local.writeFeatures(chainId, edited)
+  world.engine.proposeCluster({
+    agent: world.head,
+    groups: [clusterGroup('left', ['F002', 'F004']), clusterGroup('right', ['F003', 'F006']), clusterGroup('extra', ['F007'])],
+  })
+  assert.equal(world.engine.fingerprints.get(chainId), undefined)
+  await world.engine.launchCluster({ chainId })
+  assert.equal(auditOf(world, 'features.frozen').length, 1)
+  assert.equal(auditOf(world, 'features.frozen')[0].actor, 'host')
+  assert.deepEqual(auditOf(world, 'features.frozen')[0].detail, { features: 7 })
+  assert.doesNotThrow(() => world.engine.checkpoint({ agent: world.head, note: 'after the launch' }))
+  const later = world.local.readFeatures(chainId)
+  later.features.find(feature => feature.id === 'F005').title = 'renamed by hand'
+  world.local.writeFeatures(chainId, later)
+  assert.throws(() => world.engine.checkpoint({ agent: world.head, note: 'x' }), refusal(/no longer matches the frozen list/, RELAY_CODES.drift))
+})
+
+check('a checkpoint during planning does not freeze the list', () => {
+  const world = clusterWorld()
+  world.engine.checkpoint({ agent: world.head, note: 'planning notes' })
+  assert.equal(world.engine.fingerprints.get(world.chain.chainId), undefined)
+  assert.equal(auditOf(world, 'features.frozen').length, 0)
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'planning')
+})
+
+await checkAsync('blockers and blocked reports never move a planning chain out of planning', async () => {
+  const world = clusterWorld()
+  const chainId = world.chain.chainId
+  const chain = () => world.local.readChain(chainId)
+  const first = world.engine.checkpoint({ agent: world.head, blocked: true, note: 'need a decision' })
+  assert.equal(first.status, 'planning')
+  assert.equal(first.paused, false)
+  assert.equal(chain().status, 'planning')
+  assert.equal(chain().pausedBy ?? null, null)
+  assert.equal(chain().lastError, 'need a decision', 'the note stays visible')
+  world.engine.checkpoint({ agent: world.head, blocker: { kind: 'external', who: 'human', action: 'supply the API key' } })
+  assert.equal(chain().status, 'planning')
+  assert.equal(chain().pausedBy ?? null, null)
+  assert.equal(chain().blocker.action, 'supply the API key', 'the blocker is still recorded')
+  const cleared = world.engine.clearBlocker({ chainId })
+  assert.equal(cleared.cleared, true)
+  assert.equal(cleared.status, 'planning')
+  assert.equal(chain().blocker, null)
+  proposeTwoGroups(world)
+  assert.equal((await world.engine.launchCluster({ chainId })).status, 'active')
+})
+
+await checkAsync('a blocked goal on the planning head records the blocker but keeps the chain planning', async () => {
+  const world = clusterWorld()
+  withGoals(world, { 'session-head': goalView({ phase: 'blocked', blockedReason: { code: 'stuck', message: 'needs a human' } }) })
+  await world.engine.evaluate(world.head)
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.status, 'planning')
+  assert.match(chain.blocker.action, /needs a human/)
+  proposeTwoGroups(world)
+  assert.equal((await world.engine.launchCluster({ chainId: world.chain.chainId })).status, 'active')
+})
+
+check('a planning chain cannot be finished, even when every feature already passes', () => {
+  const world = clusterWorld({ requireStrongEvidence: false })
+  passFeatures(world, ['F002', 'F003', 'F004', 'F005', 'F006'])
+  assert.throws(() => world.engine.finish({ agent: world.head, evidence: 'done' }), refusal(/is planning; launch it or delete it/))
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'planning')
+})
+
+check('clusterConflicts also compares shared groups with the work the planning session keeps', () => {
+  const feature = (id, files, extra = {}) => ({ id, title: id, passes: false, assignedSessionId: null, ...(files === undefined ? {} : { files }), ...extra })
+  const shared = (id, features) => ({ id, isolation: 'shared', features })
+  const worktree = (id, features) => ({ id, isolation: 'worktree', features })
+  const wt = clusterConflicts({ features: [feature('A', ['src/api']), feature('B', ['src/api/user.js'])] }, [shared('G1', ['A']), worktree('G2', ['B'])])
+  assert.deepEqual(wt, [{ kind: 'overlap', groups: ['G1', 'main'], features: ['A', 'B'], path: 'src/api' }])
+  const doc = {
+    features: [
+      feature('A', ['src/api']),
+      feature('C', ['src/api/x.js']),
+      feature('D', ['src/api'], { passes: true }),
+      feature('E', ['src/api'], { assignedSessionId: 'session-w9' }),
+      feature('F'),
+    ],
+  }
+  assert.deepEqual(
+    clusterConflicts(doc, [shared('G1', ['A'])]),
+    [{ kind: 'overlap', groups: ['G1', 'main'], features: ['A', 'C'], path: 'src/api' }],
+    'a passing or delegated feature is not the planning session\'s work, and a scopeless one adds no unknown-scope',
+  )
+})
+
+check('clusterConflicts normalises ./, case, trailing slashes and the working directory', () => {
+  const feature = (id, files) => ({ id, title: id, passes: false, files: [files] })
+  const pair = (left, right, cwd) => clusterConflicts(
+    { features: [feature('A', left), feature('B', right)] },
+    [{ id: 'G1', isolation: 'shared', features: ['A'] }, { id: 'G2', isolation: 'shared', features: ['B'] }],
+    cwd,
+  )
+  assert.deepEqual(pair('./src/api', 'src/api/user.js').map(item => item.path), ['src/api'])
+  assert.deepEqual(pair('././src/api/', 'src/api/user.js').map(item => item.path), ['src/api'])
+  assert.deepEqual(pair('Src/Api', 'src/api').map(item => item.path), ['src/api'])
+  assert.deepEqual(pair('D:\\Work\\Proj\\src\\api\\user.js', 'src/api', 'd:/work/proj/').map(item => item.path), ['src/api'])
+  assert.deepEqual(pair('D:\\Work\\Proj\\src\\api', 'src/api/user.js', 'D:\\Work\\Proj').map(item => item.path), ['src/api'])
+  assert.deepEqual(pair('D:/work/proj2/src/api', 'src/api', 'D:/work/proj'), [], 'a sibling directory that merely starts with the cwd is not under it')
+  assert.deepEqual(pair('src/api', 'src/apis'), [], 'a name prefix is not a directory prefix')
+})
+
+check('proposeCluster refuses a dependsOn id that is not in features.json', () => {
+  const world = clusterWorld()
+  world.local.writeFeatures(world.chain.chainId, {
+    version: 1,
+    objective: 'cluster objective',
+    features: [{ id: 'F002', title: 'second', dependsOn: ['F01'] }, { id: 'F003', title: 'third' }],
+  })
+  const propose = groups => () => world.engine.proposeCluster({ agent: world.head, groups })
+  assert.throws(propose([clusterGroup('a', ['F002'])]), refusal(/feature F002 depends on F01, which is not in features\.json/))
+  assert.equal(world.local.readChain(world.chain.chainId).launchPlan, undefined)
+  assert.doesNotThrow(propose([clusterGroup('b', ['F003'])]), 'a feature nobody depends on from a missing id is unaffected')
+})
+
+check('scope fields are read leniently: a single string, mixed arrays, nothing usable', () => {
+  const world = clusterWorld()
+  world.local.writeFeatures(world.chain.chainId, {
+    version: 1,
+    objective: 'cluster objective',
+    features: [
+      { id: 'F001', title: 'a', dependsOn: 'F002' },
+      { id: 'F002', title: 'b', dependsOn: ['F001', '', 3], files: ['  src/x  ', ' '] },
+      { id: 'F003', title: 'c', dependsOn: 42, files: [] },
+    ],
+  })
+  const features = world.local.readFeatures(world.chain.chainId).features
+  assert.deepEqual(features[0].dependsOn, ['F002'])
+  assert.deepEqual(features[1].dependsOn, ['F001'])
+  assert.deepEqual(features[1].files, ['src/x'])
+  assert.equal('dependsOn' in features[2], false)
+  assert.equal('files' in features[2], false)
+})
+
+check('relay_checkpoint addFeatures accepts files and dependsOn and stores them', () => {
+  const world = clusterWorld()
+  const registered = new Map()
+  registerTools({ tools: { register: definition => registered.set(definition.name, definition) } }, world.engine)
+  const checkpoint = registered.get('relay_checkpoint')
+  const item = checkpoint.parameters.properties.addFeatures.items.properties
+  assert.deepEqual(item.files, { type: 'array', items: { type: 'string' } })
+  assert.deepEqual(item.dependsOn, { type: 'array', items: { type: 'string' } })
+  const result = checkpoint.execute({
+    addFeatures: [{ id: 'F007', title: 'seventh', files: ['src/z'], dependsOn: ['F002'] }],
+    reason: 'found while planning',
+  }, { agent: world.head })
+  assert.equal(result.ok, true, result.message)
+  const added = world.local.readFeatures(world.chain.chainId).features.find(feature => feature.id === 'F007')
+  assert.deepEqual(added.files, ['src/z'])
+  assert.deepEqual(added.dependsOn, ['F002'])
+})
+
+await checkAsync('a worker whose features are returned for pressure has its seeded goal paused', async () => {
+  const { world, goals } = await launchedWithGoals()
+  withPressure(world, 0.9)
+  await world.engine.evaluate(world.agents.get('session-w1'))
+  assert.deepEqual(goals.ops('pause'), [{ op: 'pause', agentId: 'session-w1', id: 'goal-for-session-w1', revision: 1 }])
+  assert.deepEqual(auditOf(world, 'goal.paused')[0].detail, { sessionId: 'session-w1', goalId: 'goal-for-session-w1', why: 'returned' })
+  assert.equal(auditOf(world, 'goal.paused')[0].actor, 'system')
+  assert.equal(goals.views.get('session-w2').phase, 'active')
+})
+
+await checkAsync('reclaiming a worker pauses its seeded goal', async () => {
+  const { world, goals } = await launchedWithGoals()
+  world.engine.reclaimDelegation({ agent: world.head, sessionId: 'session-w2' })
+  assert.deepEqual(goals.ops('pause').map(op => op.agentId), ['session-w2'])
+  assert.equal(auditOf(world, 'goal.paused')[0].detail.why, 'reclaimed')
+  assert.equal(goals.views.get('session-w1').phase, 'active')
+})
+
+await checkAsync('pausing from the panel pauses seeded worker goals; resuming restores only those it paused', async () => {
+  const { world, goals } = await launchedWithGoals()
+  const chainId = world.chain.chainId
+  goals.views.get('session-w2').phase = 'paused'
+  world.engine.setPaused({ chainId, paused: true })
+  assert.deepEqual(goals.ops('pause').map(op => op.agentId).sort(), ['session-head', 'session-w1'])
+  assert.deepEqual(world.local.readChain(chainId).workerGoalsPaused, [{ sessionId: 'session-w1', goalId: 'goal-for-session-w1' }])
+  world.engine.setPaused({ chainId, paused: false })
+  assert.deepEqual(goals.ops('resume').map(op => op.agentId).sort(), ['session-head', 'session-w1'])
+  assert.equal(goals.views.get('session-w2').phase, 'paused', 'a pause the panel did not make stays')
+  assert.equal(world.local.readChain(chainId).workerGoalsPaused ?? null, null)
+  assert.ok(auditOf(world, 'goal.resumed').some(record => record.detail.sessionId === 'session-w1'))
+
+  const finished = await launchedWithGoals()
+  finished.world.engine.setPaused({ chainId: finished.world.chain.chainId, paused: true })
+  passFeatures(finished.world, ['F002', 'F004'])
+  finished.world.engine.setPaused({ chainId: finished.world.chain.chainId, paused: false })
+  assert.deepEqual(finished.goals.ops('resume').map(op => op.agentId), ['session-head', 'session-w2'], 'w1 has nothing left to do and stays paused; w2 still owns work')
+})
+
+await checkAsync('finish completes the seeded goals of loaded workers whose goal is active', async () => {
+  const { world, goals } = await launchedWithGoals({ requireStrongEvidence: false })
+  goals.views.get('session-w2').phase = 'paused'
+  passFeatures(world, ['F002', 'F003', 'F004', 'F005', 'F006'])
+  const result = world.engine.finish({ agent: world.head, evidence: 'everything passes' })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.deepEqual(goals.ops('complete').map(op => op.agentId).sort(), ['session-head', 'session-w1'])
+  assert.equal(auditOf(world, 'goal.completed').length, 2)
+})
+
+await checkAsync('a disarmed seeded worker goal is re-armed once per session load', async () => {
+  const { world, goals } = await launchedWithGoals()
+  const worker = world.agents.get('session-w1')
+  goals.views.get('session-w1').activation = 'disarmed'
+  await world.engine.evaluate(worker)
+  assert.equal(goals.ops('resume').length, 0, 'the goal was created in this process, so the load has nothing to re-arm')
+  world.engine.sessionLoaded('session-w1')
+  await world.engine.evaluate(worker)
+  assert.deepEqual(goals.ops('resume').map(op => op.agentId), ['session-w1'])
+  assert.deepEqual(auditOf(world, 'goal.rearmed')[0].detail, { sessionId: 'session-w1', goalId: 'goal-for-session-w1' })
+  goals.views.get('session-w1').activation = 'disarmed'
+  await world.engine.evaluate(worker)
+  assert.equal(goals.ops('resume').length, 1, 'a goal disarmed later is somebody\'s decision')
+})
+
+await checkAsync('a goal the user created on a worker is never paused, completed or re-armed', async () => {
+  const world = clusterWorld({ clusterGoals: false, requireStrongEvidence: false })
+  const chainId = world.chain.chainId
+  const goals = withGoals(world, { 'session-w1': goalView({ id: 'goal-user', roundsStarted: 0, activation: 'disarmed' }), 'session-w2': goalView({ id: 'goal-user-2', roundsStarted: 0 }) })
+  proposeTwoGroups(world)
+  await world.engine.launchCluster({ chainId })
+  // A goal id on the entry without `goalSeeded` is not the plugin's either.
+  world.local.update(chainId, record => { record.sessions.find(session => session.sessionId === 'session-w1').goalId = 'goal-user' })
+  world.engine.sessionLoaded('session-w1')
+  await world.engine.evaluate(world.agents.get('session-w1'))
+  withPressure(world, 0.9)
+  await world.engine.evaluate(world.agents.get('session-w2'))
+  world.engine.setPaused({ chainId, paused: true })
+  world.engine.setPaused({ chainId, paused: false })
+  world.engine.reclaimDelegation({ agent: world.head, sessionId: 'session-w1' })
+  passFeatures(world, ['F002', 'F003', 'F004', 'F005', 'F006'])
+  assert.equal(world.engine.finish({ agent: world.head, evidence: 'all pass' }).ok, true)
+  for (const op of ['pause', 'resume', 'complete']) assert.deepEqual(goals.ops(op), [], `${op} must not touch a user goal`)
+})
+
+await checkAsync('one evaluation re-arms the head goal and still opens a releasable waiting group', async () => {
+  const world = clusterWorld()
+  const chainId = world.chain.chainId
+  const goals = withGoals(world)
+  world.engine.proposeCluster({ agent: world.head, groups: [clusterGroup('late', ['F004']), clusterGroup('now', ['F003'])] })
+  await world.engine.launchCluster({ chainId })
+  passFeatures(world, ['F002'])
+  goals.views.get('session-head').activation = 'disarmed'
+  world.engine.sessionLoaded('session-head')
+  const opened = []
+  const original = world.engine.launchWaitingGroups.bind(world.engine)
+  world.engine.launchWaitingGroups = id => { const settled = original(id); opened.push(settled); return settled }
+  await world.engine.evaluate(world.head)
+  await Promise.all(opened)
+  assert.deepEqual(goals.ops('resume').map(op => op.agentId), ['session-head'])
+  assert.equal(auditOf(world, 'goal.rearmed').length, 1)
+  assert.equal(opened.length, 1)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 2, 'the waiting group was opened')
+})
+
+await checkAsync('a busy chain does not spend the head\'s re-arm attempt', async () => {
+  const { world } = await launchedWithGoals()
+  const chainId = world.chain.chainId
+  world.engine.sessionLoaded('session-head')
+  const chain = world.local.readChain(chainId)
+  world.engine.busyChains.add(chainId)
+  world.engine.rearmGoal(chain, world.local, world.head, chain.sessions.find(session => session.sessionId === 'session-head'))
+  world.engine.busyChains.delete(chainId)
+  assert.equal(world.engine.statsFor('session-head').rearmChecked, false)
 })
 
 rmSync(workspace, { recursive: true, force: true })
