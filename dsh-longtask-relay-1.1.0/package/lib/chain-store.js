@@ -52,7 +52,7 @@ export class RelayError extends Error {
 }
 
 /** Chain phases persisted in `relay.json`. */
-const CHAIN_STATUSES = new Set(['initializing', 'active', 'paused', 'done', 'failed'])
+const CHAIN_STATUSES = new Set(['planning', 'initializing', 'active', 'paused', 'done', 'failed'])
 
 /** Session roles persisted in `relay.json`. */
 const SESSION_ROLES = new Set(['initializer', 'worker', 'reviewer', 'leader'])
@@ -138,6 +138,18 @@ export const COVERAGES = new Set(['full', 'partial', 'smoke'])
 const LEGACY_COVERAGES = new Map([['error-path-only', 'partial']])
 
 /**
+ * Keep an optional list of non-empty strings (a cluster feature's `files` or `dependsOn`).
+ * Absent or malformed input yields no field at all, so a plain relay feature stays byte-identical.
+ * @param {unknown} value - candidate list.
+ * @param {string} key - field name to emit.
+ * @returns {object} `{ [key]: list }` when well-formed, otherwise an empty object.
+ */
+function optionalStringList(value, key) {
+  if (!Array.isArray(value) || !value.every(item => typeof item === 'string' && item.trim().length > 0)) return {}
+  return { [key]: value.slice() }
+}
+
+/**
  * Normalize one coverage value, accepting the current names and the legacy ones.
  * @param {unknown} value - candidate value.
  * @returns {string} a current coverage name.
@@ -180,6 +192,9 @@ export function normalizeFeatures(document) {
       // Session this feature is delegated to; null means the chain's own session.
       assignedSessionId: typeof entry.assignedSessionId === 'string' ? entry.assignedSessionId : null,
       notes: typeof entry.notes === 'string' ? entry.notes : '',
+      // Cluster planning scope: path prefixes the feature changes, and the feature ids it needs first.
+      ...optionalStringList(entry.files, 'files'),
+      ...optionalStringList(entry.dependsOn, 'dependsOn'),
     }
   })
   return {
@@ -283,6 +298,7 @@ export class ChainStore {
       chain: join(dir, 'relay.json'),
       features: join(dir, 'features.json'),
       plan: join(dir, 'PLAN.md'),
+      spec: join(dir, 'SPEC.md'),
       progress: join(dir, 'PROGRESS.md'),
       handoff: join(dir, 'HANDOFF.md'),
       history: join(dir, 'history.md'),
@@ -505,6 +521,8 @@ export class ChainStore {
         acceptedBy: null,
         assignedSessionId: null,
         notes: typeof entry?.notes === 'string' ? entry.notes : '',
+        ...optionalStringList(entry?.files, 'files'),
+        ...optionalStringList(entry?.dependsOn, 'dependsOn'),
       })
     }
     const progress = featureProgress(this.writeFeatures(chainId, document))
@@ -780,6 +798,7 @@ export class ChainIndex {
 export function skeletonTruth(objective) {
   return {
     plan: '# PLAN\n\nThe initializer writes the plan this chain follows here. A plan approved in plan mode goes in verbatim.\n',
+    spec: `# SPEC\n\nObjective: ${objective}\n\nThe planning session of a cluster fills this in with the requirements and acceptance criteria.\n`,
     features: {
       version: 1,
       objective,

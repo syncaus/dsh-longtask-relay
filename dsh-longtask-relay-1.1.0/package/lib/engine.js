@@ -14,6 +14,7 @@ import { ChainFingerprints } from './fingerprints.js'
 import { evidenceIssue } from './evidence.js'
 import { sessionTitle } from './labels.js'
 import {
+  renderClusterGroupOpenedNotice, renderClusterLaunchedNotice, renderClusterPlanningPrompt,
   renderContinuePrompt, renderDelegationPrompt, renderHandoffPrompt, renderInitializerPrompt,
   renderReclaimNotice, renderRetireNotice, renderWorkerWrapupPrompt, renderWrapupPrompt,
 } from './prompts.js'
@@ -76,8 +77,67 @@ function chainSummary(chain, progress) {
     // How much of the finished work is actually proven: a feature that only reached its
     // error paths still counts as done, but the panel and status must show the gap.
     coveragePartial: progress?.partial ?? 0,
+    // `cluster` chains plan first and wait for a human to confirm the parallel launch.
+    mode: chain.mode ?? 'relay',
+    launchPending: chain.status === 'planning' && Array.isArray(chain.launchPlan?.groups) && chain.launchPlan.launchedAt === undefined,
+    // Launch groups that wait for features to pass before a worker is opened for them.
+    launchWaiting: Array.isArray(chain.launchPlan?.results) ? chain.launchPlan.results.filter(result => result.waiting === true).length : 0,
   }
 }
+
+/**
+ * Canonical form of a feature scope path: forward slashes, no trailing slash.
+ * @param {string} path - path or directory prefix from a feature's `files`.
+ * @returns {string} comparable path.
+ */
+function scopePath(path) {
+  return String(path).replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+/**
+ * Where a proposed cluster launch would put two sessions on the same files.
+ * Only different `shared` groups can collide: they work in one directory at the same time, while
+ * features inside one group run in order and a `worktree` group has its own copy. A feature without
+ * `files` could touch anything, so it is reported as an unknown scope.
+ * @param {{ features: Array<{ id: string, files?: Array<string> }> }} document - normalized features.
+ * @param {Array<{ id: string, isolation: string, features: Array<string> }>} groups - validated groups.
+ * @returns {Array<object>} conflicts: `overlap` (path equal or one a directory prefix of the other; `path` is the
+ *   covering one) once per feature pair, and `unknown-scope` per scopeless feature in a shared group.
+ */
+export function clusterConflicts(document, groups) {
+  const byId = new Map(document.features.map(feature => [feature.id, feature]))
+  const shared = groups.filter(group => group.isolation === 'shared')
+  const conflicts = []
+  for (let a = 0; a < shared.length; a += 1) {
+    for (let b = a + 1; b < shared.length; b += 1) {
+      for (const idA of shared[a].features) {
+        for (const idB of shared[b].features) {
+          const filesA = (byId.get(idA)?.files ?? []).map(scopePath)
+          const filesB = (byId.get(idB)?.files ?? []).map(scopePath)
+          let path
+          for (const left of filesA) {
+            for (const right of filesB) {
+              if (path !== undefined) break
+              if (left === right || right.startsWith(`${left}/`)) path = left
+              else if (left.startsWith(`${right}/`)) path = right
+            }
+          }
+          if (path !== undefined) conflicts.push({ kind: 'overlap', groups: [shared[a].id, shared[b].id], features: [idA, idB], path })
+        }
+      }
+    }
+  }
+  for (const group of shared) {
+    for (const id of group.features) {
+      const files = byId.get(id)?.files
+      if (!Array.isArray(files) || files.length === 0) conflicts.push({ kind: 'unknown-scope', groups: [group.id], features: [id] })
+    }
+  }
+  return conflicts
+}
+
+/** Why a worktree group is not opened yet; the planning session works its features in order. */
+const WORKTREE_UNAVAILABLE = 'worktree isolation is not available yet; the planning session works these features in order'
 
 /**
  * Clock slack for the legacy freshness check, in milliseconds.
@@ -549,14 +609,37 @@ export class RelayEngine {
    * @param {{ agent: object, objective: string, cwd?: string, maxHandoffs?: number }} input - start input.
    * @returns {object} start result.
    */
-  start({ agent, objective, cwd, maxHandoffs }) {
+  start(input) {
+    return this.beginChain(input, { cluster: false })
+  }
+
+  /**
+   * Start a cluster chain: the calling session becomes the planning session.
+   * Differs from `start` in that plan mode is wanted rather than refused (the session is switched into
+   * it when the Host offers the service), the chain waits in `planning` until a human confirms a launch,
+   * and the session receives the planning prompt instead of the initializer prompt.
+   * @param {{ agent: object, objective: string, cwd?: string, maxHandoffs?: number }} input - start input.
+   * @returns {object} start result, with `mode: 'cluster'`.
+   */
+  startCluster(input) {
+    return this.beginChain(input, { cluster: true })
+  }
+
+  /**
+   * Create a chain and adopt the calling session as its first session.
+   * @param {{ agent: object, objective: string, cwd?: string, maxHandoffs?: number }} input - start input.
+   * @param {{ cluster: boolean }} options - whether this is the cluster variant.
+   * @returns {object} start result.
+   */
+  beginChain({ agent, objective, cwd, maxHandoffs }, { cluster }) {
     const workspace = cwd ?? agent.session.header?.cwd
     if (typeof workspace !== 'string' || workspace.length === 0) {
       throw new RelayError(RELAY_CODES.invalid, 'the session has no working directory; pass cwd explicitly')
     }
     // Nothing is written yet: a chain started from an unapproved plan would lock
-    // the objective in before the plan exists.
-    if (this.planActive(agent)) {
+    // the objective in before the plan exists. A cluster chain is the opposite: it starts
+    // so that the plan can be made.
+    if (!cluster && this.planActive(agent)) {
       throw new RelayError(RELAY_CODES.invalid, 'plan mode is active: finish the plan and have it approved first, then call relay_start and write the approved plan into PLAN.md and features.json')
     }
     const active = this.locate(agent.session)
@@ -572,6 +655,7 @@ export class RelayEngine {
     const skeleton = skeletonTruth(objective)
     store.writeFeatures(chain.chainId, skeleton.features)
     store.writeText(store.paths(chain.chainId).plan, skeleton.plan)
+    if (cluster) store.writeText(store.paths(chain.chainId).spec, skeleton.spec)
     store.writeProgress(chain.chainId, skeleton.progress)
     store.writeHandoff(chain.chainId, skeleton.handoff)
     store.writeText(store.paths(chain.chainId).decisions, skeleton.decisions)
@@ -590,8 +674,10 @@ export class RelayEngine {
         handoffHashAtJoin: handoffHash(skeleton.handoff),
       })
       record.currentSessionId = agent.session.id
-      // The list is not frozen yet; the first accepted checkpoint flips this.
-      record.status = 'initializing'
+      // The list is not frozen yet; the first accepted checkpoint flips this. A cluster chain
+      // stays `planning` until a human launches it.
+      record.status = cluster ? 'planning' : 'initializing'
+      if (cluster) record.mode = 'cluster'
     })
     this.remember(updated, store)
     this.members.set(agent.session.id, { chainId: chain.chainId, truthDir: store.truthDir })
@@ -600,24 +686,35 @@ export class RelayEngine {
     this.record(store, chain.chainId, {
       kind: 'chain.started',
       actor: agent.session.id,
-      detail: { objective, maxHandoffs: chain.maxHandoffs },
+      detail: { objective, maxHandoffs: chain.maxHandoffs, ...(cluster ? { mode: 'cluster' } : {}) },
     })
+    if (cluster) {
+      // Without the service the planning prompt alone has to keep the session from editing code.
+      const planMode = this.ctx.get('planMode')
+      if (typeof planMode?.set === 'function' && !this.planActive(agent)) {
+        try {
+          planMode.set(agent, true)
+        } catch (error) {
+          this.warn(`could not switch ${agent.id} into plan mode: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    }
     try {
-      // A follow-up wakes the session: the initializer instructions must run in
+      // A follow-up wakes the session: the instructions must run in
       // the next turn, not wait for the human to speak again.
-      agent.followup(relayMessage(renderInitializerPrompt({
-        truthDir: join(store.truthDir, chain.chainId),
-        objective,
-        commitTruth: this.config.commitTruth,
-      })))
+      const truthDir = join(store.truthDir, chain.chainId)
+      agent.followup(relayMessage(cluster
+        ? renderClusterPlanningPrompt({ truthDir, objective, maxSessions: this.config.maxClusterSessions })
+        : renderInitializerPrompt({ truthDir, objective, commitTruth: this.config.commitTruth })))
     } catch (error) {
-      this.warn(`could not queue the initializer prompt: ${error instanceof Error ? error.message : String(error)}`)
+      this.warn(`could not queue the ${cluster ? 'planning' : 'initializer'} prompt: ${error instanceof Error ? error.message : String(error)}`)
     }
     return {
       chainId: chain.chainId,
       title: chain.title,
       truthDir: join(store.truthDir, chain.chainId),
       maxHandoffs: chain.maxHandoffs,
+      ...(cluster ? { mode: 'cluster' } : {}),
     }
   }
 
@@ -753,6 +850,7 @@ export class RelayEngine {
     for (const id of appended) {
       this.record(store, chain.chainId, { kind: 'feature.added', actor, detail: { id, reason } })
     }
+    this.releaseWaitingGroups(updated)
     if (ready === true) this.record(store, chain.chainId, { kind: 'session.ready', actor })
     if (blocked === true || blocker !== undefined) {
       this.record(store, chain.chainId, {
@@ -1044,6 +1142,10 @@ export class RelayEngine {
     if (chain.status === 'done' || chain.status === 'failed') {
       throw new RelayError(RELAY_CODES.invalid, `chain ${chain.chainId} is ${chain.status}; it cannot be paused or resumed`)
     }
+    // Resuming would write `active` and skip the human's launch confirmation.
+    if (chain.status === 'planning') {
+      throw new RelayError(RELAY_CODES.invalid, `chain ${chain.chainId} is planning; launch it or delete it`)
+    }
     store.update(chain.chainId, record => {
       if (paused) {
         record.status = 'paused'
@@ -1129,6 +1231,9 @@ export class RelayEngine {
   async handoffNow({ agent, chainId }) {
     const { chain, store } = this.resolveChain(agent, chainId)
     this.assertWriter(chain, agent)
+    if (chain.status === 'planning') {
+      throw new RelayError(RELAY_CODES.invalid, `chain ${chain.chainId} is planning; there is no work to hand off yet`)
+    }
     const current = chain.currentSessionId === null ? undefined : this.ctx.get('agents')?.get(chain.currentSessionId)
     if (current === undefined) {
       throw new RelayError(RELAY_CODES.notFound, `the current session of ${chain.chainId} is not loaded; open it first`)
@@ -1480,7 +1585,13 @@ export class RelayEngine {
         coverage: feature.coverage ?? null,
         acceptedBy: feature.acceptedBy ?? null,
         assignedSessionId: feature.assignedSessionId ?? null,
+        // Cluster planning scope; empty when the planning session wrote none.
+        files: feature.files ?? [],
+        dependsOn: feature.dependsOn ?? [],
       })),
+      mode: chain.mode ?? 'relay',
+      launchPlan: chain.launchPlan ?? null,
+      maxClusterSessions: this.config.maxClusterSessions,
       handoff: store.readHandoff(chainId).slice(0, 8000),
       truthDir: join(store.truthDir, chainId),
       // Whether the current session wrote the brief a successor would receive.
@@ -1528,9 +1639,31 @@ export class RelayEngine {
     if (controller === undefined) throw new RelayError(RELAY_CODES.invalid, 'this Host cannot create sessions')
 
     this.busyChains.add(chain.chainId)
+    try {
+      return await this.spawnWorker(chain, store, agent, selected, { note, agentPreset, actor: agent.session.id })
+    } finally {
+      this.busyChains.delete(chain.chainId)
+    }
+  }
+
+  /**
+   * Create one worker session, hand it the selected features, and deliver its delegation prompt.
+   * Shared by `spawn` (a model delegating) and `launchCluster` (a human confirming a plan), so
+   * the two cannot drift apart. The caller validated the features and owns `busyChains`.
+   * On failure the delegation is released again and `delegation.failed` is recorded.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object} parentAgent - live session the worker continues; it supplies the preset and is the parent.
+   * @param {Array<object>} selected - feature objects the worker owns.
+   * @param {{ note?: string, agentPreset?: string, actor: string, cluster?: boolean }} options - audit actor; `cluster` lets the worker use subagents and skips plan mode inheritance.
+   * @returns {Promise<object>} the created worker session.
+   */
+  async spawnWorker(chain, store, parentAgent, selected, { note, agentPreset, actor, cluster }) {
+    const controller = this.ctx.get('sessionController')
+    if (controller === undefined) throw new RelayError(RELAY_CODES.invalid, 'this Host cannot create sessions')
     let createdSessionId
     try {
-      const preset = agentPreset ?? this.presetFor(agent)
+      const preset = agentPreset ?? this.presetFor(parentAgent)
       const created = await controller.create({
         cwd: chain.cwd,
         ...(preset === undefined ? {} : { agentPreset: preset }),
@@ -1545,7 +1678,7 @@ export class RelayEngine {
       for (const feature of selected) {
         this.record(store, chain.chainId, {
           kind: 'feature.assigned',
-          actor: agent.session.id,
+          actor,
           detail: { id: feature.id, from: null, to: createdSessionId },
         })
       }
@@ -1556,7 +1689,7 @@ export class RelayEngine {
           index: record.sessions.length,
           joinedAt,
           compactions: 0,
-          parentSessionId: agent.session.id,
+          parentSessionId: parentAgent.session.id,
         })
         record.lastError = null
       })
@@ -1568,8 +1701,9 @@ export class RelayEngine {
 
       const child = this.ctx.get('agents')?.get(createdSessionId)
       if (child !== undefined) {
-        const inheritedPreset = this.inheritPermission(chain, store, agent, child)
-        this.inheritPlanMode(chain, store, agent, child)
+        const inheritedPreset = this.inheritPermission(chain, store, parentAgent, child)
+        // A cluster launch happens after the plan was approved, so the worker must not start in plan mode.
+        if (cluster !== true) this.inheritPlanMode(chain, store, parentAgent, child)
         if (inheritedPreset !== undefined) {
           store.update(chain.chainId, record => {
             const entry = record.sessions.find(session => session.sessionId === createdSessionId)
@@ -1587,9 +1721,10 @@ export class RelayEngine {
       const prompt = renderDelegationPrompt({
         chain,
         truthDir: join(store.truthDir, chain.chainId),
-        parentSessionId: agent.session.id,
+        parentSessionId: parentAgent.session.id,
         features: selected,
         note: typeof note === 'string' ? note : '',
+        cluster: cluster === true,
       })
       await controller.prompt({
         requestId: `relay-spawn-${chain.chainId}-${createdSessionId}-${randomUUID().slice(0, 8)}`,
@@ -1600,14 +1735,14 @@ export class RelayEngine {
 
       this.record(store, chain.chainId, {
         kind: 'delegation.created',
-        actor: agent.session.id,
+        actor,
         detail: { childSessionId: createdSessionId, features: selected.map(feature => feature.id), note: note ?? '' },
       })
       return {
         chainId: chain.chainId,
         sessionId: createdSessionId,
         features: selected.map(feature => feature.id),
-        parentSessionId: agent.session.id,
+        parentSessionId: parentAgent.session.id,
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -1624,12 +1759,378 @@ export class RelayEngine {
       }
       this.record(store, chain.chainId, {
         kind: 'delegation.failed',
-        actor: agent.session.id,
+        actor,
         detail: { features: selected.map(feature => feature.id), error: message },
       })
       throw error instanceof RelayError ? error : new RelayError(RELAY_CODES.io, `spawn failed: ${message}`)
+    }
+  }
+
+  /**
+   * Check a cluster launch plan against the feature list and name its groups.
+   * The model's proposal and a human's edit in the panel go through the same rules.
+   * @param {{ features: Array<object> }} document - normalized features.
+   * @param {unknown} groups - candidate groups `{ title, features, isolation, reason }`.
+   * @returns {Array<{ id: string, title: string, features: Array<string>, isolation: string, reason: string }>} groups with ids `G1`... by position.
+   */
+  validateClusterGroups(document, groups) {
+    const max = this.config.maxClusterSessions
+    if (!Array.isArray(groups) || groups.length === 0) {
+      throw new RelayError(RELAY_CODES.invalid, 'groups must be a non-empty array')
+    }
+    if (groups.length > max) {
+      throw new RelayError(RELAY_CODES.invalid, `a cluster launch may open at most ${max} groups, got ${groups.length}`)
+    }
+    const byId = new Map(document.features.map(feature => [feature.id, feature]))
+    /** Feature id to the id of the group that owns it. @type {Map<string, string>} */
+    const owner = new Map()
+    const normalized = groups.map((group, index) => {
+      const id = `G${index + 1}`
+      const label = `groups[${index}]`
+      if (group === null || typeof group !== 'object') throw new RelayError(RELAY_CODES.invalid, `${label} must be an object`)
+      if (typeof group.title !== 'string' || group.title.trim().length === 0) {
+        throw new RelayError(RELAY_CODES.invalid, `${label}.title must be a non-empty string`)
+      }
+      if (!Array.isArray(group.features) || group.features.length === 0 || group.features.some(item => typeof item !== 'string')) {
+        throw new RelayError(RELAY_CODES.invalid, `${label}.features must be a non-empty array of feature ids`)
+      }
+      if (group.isolation !== 'shared' && group.isolation !== 'worktree') {
+        throw new RelayError(RELAY_CODES.invalid, `${label}.isolation must be shared or worktree`)
+      }
+      if (typeof group.reason !== 'string' || group.reason.trim().length === 0) {
+        throw new RelayError(RELAY_CODES.invalid, `${label}.reason must be a non-empty string`)
+      }
+      for (const featureId of group.features) {
+        const feature = byId.get(featureId)
+        if (feature === undefined) throw new RelayError(RELAY_CODES.invalid, `feature ${featureId} does not exist`)
+        if (feature.passes) throw new RelayError(RELAY_CODES.invalid, `feature ${featureId} already passes`)
+        if (typeof feature.assignedSessionId === 'string' && feature.assignedSessionId.length > 0) {
+          throw new RelayError(RELAY_CODES.invalid, `feature ${featureId} is already delegated to ${feature.assignedSessionId}`)
+        }
+        if (owner.has(featureId)) {
+          throw new RelayError(RELAY_CODES.invalid, `feature ${featureId} appears in more than one group (${owner.get(featureId)} and ${id})`)
+        }
+        owner.set(featureId, id)
+      }
+      return { id, title: group.title.trim(), features: group.features.slice(), isolation: group.isolation, reason: group.reason.trim() }
+    })
+    for (const group of normalized) {
+      for (const featureId of group.features) {
+        for (const dependency of byId.get(featureId).dependsOn ?? []) {
+          const dependencyGroup = owner.get(dependency)
+          if (dependencyGroup !== undefined && dependencyGroup !== group.id) {
+            throw new RelayError(
+              RELAY_CODES.invalid,
+              `feature ${featureId} (group ${group.id}) depends on ${dependency} (group ${dependencyGroup}); put both in the same group`,
+            )
+          }
+        }
+      }
+    }
+    return normalized
+  }
+
+  /**
+   * Record the launch plan the planning session proposes; a human confirms it later.
+   * Opens nothing: the only way to start the sessions is `launchCluster`, which no tool reaches.
+   * @param {{ agent: object, groups: Array<object>, note?: string }} input - proposal.
+   * @returns {object} the stored plan and its conflicts.
+   */
+  proposeCluster({ agent, groups, note }) {
+    const membership = this.locate(agent.session)
+    if (membership === undefined) throw new RelayError(RELAY_CODES.invalid, 'this session does not belong to a chain')
+    const { chain, store } = membership
+    if (chain.currentSessionId !== agent.session.id) {
+      throw new RelayError(RELAY_CODES.invalid, 'only the chain\'s current session can propose a launch')
+    }
+    if (chain.status !== 'planning') {
+      throw new RelayError(RELAY_CODES.invalid, `chain ${chain.chainId} is ${chain.status}; only a planning chain can take a launch proposal`)
+    }
+    if (this.planActive(agent)) {
+      throw new RelayError(RELAY_CODES.invalid, 'the plan is not approved yet; present it through exit_plan_mode first')
+    }
+    const document = store.readFeatures(chain.chainId)
+    if (document === undefined) throw new RelayError(RELAY_CODES.notFound, `chain ${chain.chainId} has no features.json`)
+    const validated = this.validateClusterGroups(document, groups)
+    this.freezeFeatures(chain, store, agent.session.id)
+    const conflicts = clusterConflicts(document, validated)
+    store.update(chain.chainId, record => {
+      record.launchPlan = {
+        proposedAt: new Date().toISOString(),
+        proposedBy: agent.session.id,
+        groups: validated,
+        note: typeof note === 'string' ? note : '',
+        conflicts,
+      }
+    })
+    this.record(store, chain.chainId, {
+      kind: 'cluster.proposed',
+      actor: agent.session.id,
+      detail: { groups: validated.length, conflicts: conflicts.length },
+    })
+    return { chainId: chain.chainId, groups: validated, conflicts, waitingFor: 'human' }
+  }
+
+  /**
+   * Open the sessions of a proposed launch plan. Human only: the panel and `/relay launch` call this,
+   * and there is deliberately no tool for it.
+   * `shared` groups each get a worker; `worktree` groups are not opened in this version and their
+   * features stay with the planning session. One group failing does not stop the others.
+   * @param {{ chainId: string, groups?: Array<object> }} input - chain, and the plan as the human edited it.
+   * @returns {Promise<{ chainId: string, status: string, results: Array<object> }>} what happened to each group.
+   */
+  async launchCluster({ chainId, groups }) {
+    const { chain, store } = this.findChain(chainId)
+    if (chain.status !== 'planning') {
+      throw new RelayError(RELAY_CODES.invalid, `chain ${chain.chainId} is ${chain.status}; only a planning chain can be launched`)
+    }
+    if (!Array.isArray(chain.launchPlan?.groups) || chain.launchPlan.groups.length === 0) {
+      throw new RelayError(RELAY_CODES.invalid, `chain ${chain.chainId} has no launch plan yet; the planning session must call relay_propose first`)
+    }
+    if (this.busyChains.has(chain.chainId)) {
+      throw new RelayError(RELAY_CODES.invalid, `chain ${chain.chainId} is busy with another operation; try again in a moment`)
+    }
+    const head = this.ctx.get('agents')?.get(chain.currentSessionId)
+    if (head === undefined) throw new RelayError(RELAY_CODES.notFound, 'the planning session is not loaded; open the planning session first')
+    if (this.planActive(head)) {
+      throw new RelayError(RELAY_CODES.invalid, 'the plan is not approved yet; approve it in the planning session first')
+    }
+    const document = store.readFeatures(chain.chainId)
+    if (document === undefined) throw new RelayError(RELAY_CODES.notFound, `chain ${chain.chainId} has no features.json`)
+    // The stored plan is checked again too: features may have passed or moved since it was proposed.
+    const plan = this.validateClusterGroups(document, Array.isArray(groups) ? groups : chain.launchPlan.groups)
+    const conflicts = clusterConflicts(document, plan)
+
+    this.busyChains.add(chain.chainId)
+    try {
+      const results = []
+      for (const group of plan) {
+        if (group.isolation === 'worktree') {
+          results.push({ id: group.id, launched: false, reason: WORKTREE_UNAVAILABLE })
+          continue
+        }
+        // A worker must not start on work whose foundation does not exist yet.
+        const waitsFor = this.unmetDependencies(store.readFeatures(chain.chainId), group)
+        if (waitsFor.length > 0) {
+          results.push({ id: group.id, launched: false, waiting: true, waitsFor, reason: `waits for ${waitsFor.join(', ')} to pass` })
+          continue
+        }
+        try {
+          results.push(await this.openClusterGroup(chain, store, head, group))
+        } catch (error) {
+          results.push({ id: group.id, launched: false, reason: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      const sharedIds = new Set(plan.filter(group => group.isolation === 'shared').map(group => group.id))
+      const failed = results.filter(result => !result.launched && !result.waiting && sharedIds.has(result.id))
+      const openable = results.filter(result => !result.waiting && sharedIds.has(result.id))
+      if (openable.length > 0 && failed.length === openable.length) {
+        throw new RelayError(RELAY_CODES.io, `no cluster group could be launched: ${failed[0].reason}`)
+      }
+      const launchedAt = new Date().toISOString()
+      const headGoalId = this.config.clusterGoals && this.goalOf(head) === undefined
+        ? this.createChainGoal(chain, store, head)
+        : undefined
+      store.update(chain.chainId, record => {
+        record.status = 'active'
+        record.launchedAt = launchedAt
+        record.launchPlan = { ...record.launchPlan, groups: plan, conflicts, results, launchedAt }
+        record.lastError = failed.length === 0 ? null : `cluster groups not launched: ${failed.map(result => result.id).join(', ')}`
+        const entry = record.sessions.find(session => session.sessionId === head.id)
+        if (entry !== undefined && typeof headGoalId === 'string') {
+          entry.goalId = headGoalId
+          entry.goalSeeded = true
+        }
+      })
+      const settled = store.readChain(chain.chainId)
+      if (settled !== undefined) this.remember(settled, store)
+      this.record(store, chain.chainId, { kind: 'cluster.launched', actor: 'host', detail: { results } })
+
+      // What the planning session still owns, and why, so it does not wait for workers that were never opened.
+      const after = store.readFeatures(chain.chainId)
+      const kept = (after?.features ?? [])
+        .filter(feature => !feature.passes && (typeof feature.assignedSessionId !== 'string' || feature.assignedSessionId.length === 0))
+        .filter(feature => {
+          // A waiting group's features are not the planning session's: the group opens by itself later.
+          const group = plan.find(candidate => candidate.features.includes(feature.id))
+          return results.find(item => item.id === group?.id)?.waiting !== true
+        })
+        .map(feature => {
+          const group = plan.find(candidate => candidate.features.includes(feature.id))
+          const result = group === undefined ? undefined : results.find(item => item.id === group.id)
+          return { id: feature.id, why: result === undefined ? 'it is in no group' : `group ${result.id} was not launched: ${result.reason}` }
+        })
+      try {
+        head.followup(relayMessage(renderClusterLaunchedNotice({
+          chainId: chain.chainId,
+          truthDir: join(store.truthDir, chain.chainId),
+          groups: plan.map(group => ({ ...group, ...results.find(result => result.id === group.id) })),
+          kept,
+        })))
+      } catch (error) {
+        this.warn(`could not queue the cluster launch notice: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      return { chainId: chain.chainId, status: 'active', results }
     } finally {
       this.busyChains.delete(chain.chainId)
+    }
+  }
+
+  /**
+   * Start `launchWaitingGroups` in the background when a cluster chain has waiting groups.
+   * The cheap check comes first so other chains pay nothing; the caller never waits for the result.
+   * @param {object|undefined} chain - chain record.
+   * @returns {void}
+   */
+  releaseWaitingGroups(chain) {
+    if (chain?.mode !== 'cluster' || !Array.isArray(chain.launchPlan?.results)
+      || !chain.launchPlan.results.some(result => result.waiting === true)) return
+    void this.launchWaitingGroups(chain.chainId).catch(error => {
+      this.warn(`could not release the waiting groups of ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
+
+  /**
+   * Feature ids a launch group is still waiting for.
+   * A dependency in the same group runs in order and does not count; any other dependency must pass first.
+   * A dependency that is not in features.json counts as unmet.
+   * @param {{ features: Array<object> }|undefined} document - normalized features.
+   * @param {{ features: Array<string> }} group - the launch group.
+   * @returns {Array<string>} unmet dependency ids, without repeats.
+   */
+  unmetDependencies(document, group) {
+    const byId = new Map((document?.features ?? []).map(feature => [feature.id, feature]))
+    const own = new Set(group.features)
+    const unmet = []
+    for (const id of group.features) {
+      for (const dependency of byId.get(id)?.dependsOn ?? []) {
+        if (own.has(dependency) || unmet.includes(dependency)) continue
+        if (byId.get(dependency)?.passes !== true) unmet.push(dependency)
+      }
+    }
+    return unmet
+  }
+
+  /**
+   * Open one shared group: select its features, create the worker, and give it a goal.
+   * Used by the launch and by the later release of a waiting group. Throws when the worker cannot be opened.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object} head - the live planning session, the worker's parent.
+   * @param {{ id: string, title: string, reason: string, features: Array<string> }} group - the group.
+   * @returns {Promise<{ id: string, launched: true, sessionId: string }>} the result entry.
+   */
+  async openClusterGroup(chain, store, head, group) {
+    const current = store.readFeatures(chain.chainId)
+    const selected = group.features.map(id => current?.features.find(feature => feature.id === id))
+    if (selected.some(feature => feature === undefined)) {
+      throw new RelayError(RELAY_CODES.invalid, `group ${group.id} names a feature that is no longer in features.json`)
+    }
+    const taken = selected.find(feature => feature.passes || (typeof feature.assignedSessionId === 'string' && feature.assignedSessionId.length > 0))
+    if (taken !== undefined) {
+      throw new RelayError(RELAY_CODES.invalid, `feature ${taken.id} of group ${group.id} already passes or is already delegated`)
+    }
+    const worker = await this.spawnWorker(chain, store, head, selected, {
+      note: `Cluster group ${group.id}: ${group.title}. ${group.reason}`,
+      actor: 'host',
+      cluster: true,
+    })
+    this.seedClusterWorkerGoal(chain, store, worker.sessionId, group)
+    return { id: group.id, launched: true, sessionId: worker.sessionId }
+  }
+
+  /**
+   * Open the launch groups that were waiting for features to pass, once those pass.
+   * Called after checkpoints and evaluations; it never throws for a chain that has nothing to do.
+   * A group that fails to open becomes a plain failure, so it is not retried forever.
+   * @param {string} chainId - chain identity.
+   * @returns {Promise<void>} settles when every releasable group was handled.
+   */
+  async launchWaitingGroups(chainId) {
+    let found
+    try {
+      found = this.findChain(chainId)
+    } catch {
+      return
+    }
+    const { chain, store } = found
+    const stored = chain.launchPlan?.results
+    if (chain.mode !== 'cluster' || chain.status !== 'active' || !Array.isArray(stored) || !stored.some(result => result.waiting === true)) return
+    if (this.busyChains.has(chain.chainId)) return
+    const head = this.ctx.get('agents')?.get(chain.currentSessionId)
+    if (head === undefined) return
+    this.busyChains.add(chain.chainId)
+    try {
+      const document = store.readFeatures(chain.chainId)
+      const results = stored.slice()
+      const opened = []
+      const failed = []
+      for (let index = 0; index < results.length; index += 1) {
+        if (results[index].waiting !== true) continue
+        const group = chain.launchPlan.groups?.find(candidate => candidate.id === results[index].id)
+        if (group === undefined || this.unmetDependencies(document, group).length > 0) continue
+        try {
+          results[index] = await this.openClusterGroup(chain, store, head, group)
+          opened.push({ ...group, sessionId: results[index].sessionId })
+          this.record(store, chain.chainId, { kind: 'cluster.group-launched', actor: 'host', detail: { id: group.id, sessionId: results[index].sessionId } })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          results[index] = { id: group.id, launched: false, reason: message }
+          failed.push(group.id)
+          this.record(store, chain.chainId, { kind: 'cluster.group-failed', actor: 'host', detail: { id: group.id, error: message } })
+        }
+      }
+      if (opened.length === 0 && failed.length === 0) return
+      store.update(chain.chainId, record => {
+        record.launchPlan = { ...record.launchPlan, results }
+        if (failed.length > 0) record.lastError = `cluster groups not launched: ${failed.join(', ')}`
+      })
+      const settled = store.readChain(chain.chainId)
+      if (settled !== undefined) this.remember(settled, store)
+      if (opened.length > 0) {
+        try {
+          head.followup(relayMessage(renderClusterGroupOpenedNotice({ chainId: chain.chainId, groups: opened })))
+        } catch (error) {
+          this.warn(`could not queue the group-opened notice: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    } finally {
+      this.busyChains.delete(chain.chainId)
+    }
+  }
+
+  /**
+   * Give a launched cluster worker a goal for its own features, so it does not stop after one turn.
+   * Never throws: a missing goals service or a failed create only costs the worker its goal.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {string} sessionId - the worker session.
+   * @param {{ title: string, features: Array<string> }} group - the group the worker owns.
+   * @returns {void}
+   */
+  seedClusterWorkerGoal(chain, store, sessionId, group) {
+    if (!this.config.clusterGoals) return
+    const goals = this.ctx.get('goals')
+    const child = this.ctx.get('agents')?.get(sessionId)
+    if (goals === undefined || typeof goals.create !== 'function' || child === undefined) {
+      this.warn(`worker ${sessionId} has no goal: the goals service or the session is unavailable`)
+      return
+    }
+    try {
+      const view = goals.create(child, {
+        objective: `${chain.objective} — cluster group ${group.title}: features ${group.features.join(', ')}`,
+        maxGoalRounds: this.config.goalRoundsPerHandoff,
+      })
+      if (typeof view?.id !== 'string') return
+      store.update(chain.chainId, record => {
+        const entry = record.sessions.find(session => session.sessionId === sessionId)
+        if (entry !== undefined) {
+          entry.goalId = view.id
+          entry.goalSeeded = true
+        }
+      })
+    } catch (error) {
+      this.warn(`could not create a goal for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -1748,11 +2249,11 @@ export class RelayEngine {
    * Long ledgers return their newest part: the tail is what a reader wants from
    * an append-only file.
    * @param {string} chainId - chain identity.
-   * @param {'handoff'|'progress'|'history'|'decisions'|'traps'|'plan'} name - which document.
+   * @param {'handoff'|'progress'|'history'|'decisions'|'traps'|'plan'|'spec'} name - which document.
    * @returns {{ name: string, text: string, truncated: boolean }} document text.
    */
   doc(chainId, name) {
-    if (!['handoff', 'progress', 'history', 'decisions', 'traps', 'plan'].includes(name)) {
+    if (!['handoff', 'progress', 'history', 'decisions', 'traps', 'plan', 'spec'].includes(name)) {
       throw new RelayError(RELAY_CODES.invalid, `unknown document ${String(name)}`)
     }
     const { store } = this.findChain(chainId)
@@ -1981,6 +2482,8 @@ export class RelayEngine {
     if (refreshed === undefined) return
     chain = refreshed
     if (chain.status !== 'active' && chain.status !== 'initializing') return
+    // A restart, or features marked passing by editing the file, still releases waiting groups.
+    this.releaseWaitingGroups(chain)
     this.releasePausedGoal(chain, store, 'system')
     this.rearmGoal(chain, store, agent, entry)
     // A wrap-up that was already sent (a manual handoff on a stale brief, or the
@@ -2850,9 +3353,21 @@ export class RelayEngine {
    */
   seedGoal(chain, store, agent) {
     if (!this.config.seedGoalOnHandoff || agent === undefined) return undefined
+    return this.createChainGoal(chain, store, agent)
+  }
+
+  /**
+   * Create a goal for a session from the chain's objective and progress, whatever the config says.
+   * `seedGoal` (handoff) and `launchCluster` (planning session) each decide on their own setting first.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object} agent - the live session that gets the goal.
+   * @returns {string|undefined} id of the created goal, when any.
+   */
+  createChainGoal(chain, store, agent) {
     const goals = this.ctx.get('goals')
     if (goals === undefined || typeof goals.create !== 'function') {
-      this.warn('seedGoalOnHandoff is on but the goals service is unavailable; the successor has no goal')
+      this.warn(`the goals service is unavailable; ${agent.id} has no goal`)
       return undefined
     }
     const document = store.readFeatures(chain.chainId)

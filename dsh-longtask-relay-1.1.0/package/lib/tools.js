@@ -65,6 +65,11 @@ export function registerTools(ctx, engine) {
         objective: { type: 'string', description: 'The complete task objective, in one paragraph.' },
         cwd: { type: 'string', description: 'Workspace directory; defaults to the session working directory.' },
         maxHandoffs: { type: 'integer', description: 'Handoff cap for this chain; defaults to the plugin setting.' },
+        mode: {
+          type: 'string',
+          enum: ['relay', 'cluster'],
+          description: '`cluster` starts with a planning phase and a human-confirmed parallel launch; the default `relay` is a single chain.',
+        },
       },
       required: ['objective'],
     },
@@ -82,13 +87,17 @@ export function registerTools(ctx, engine) {
       if (args.maxHandoffs !== undefined && (!Number.isInteger(args.maxHandoffs) || args.maxHandoffs < 1)) {
         return { ok: false, code: 'invalid_arguments', message: 'maxHandoffs must be an integer of at least 1.' }
       }
+      if (args.mode !== undefined && args.mode !== 'relay' && args.mode !== 'cluster') {
+        return { ok: false, code: 'invalid_arguments', message: 'mode must be relay or cluster.' }
+      }
       try {
-        return { ok: true, ...engine.start({
+        const input = {
           agent: exec.agent,
           objective: args.objective,
           cwd: args.cwd,
           maxHandoffs: args.maxHandoffs,
-        }) }
+        }
+        return { ok: true, ...(args.mode === 'cluster' ? engine.startCluster(input) : engine.start(input)) }
       } catch (error) {
         return refusal(error)
       }
@@ -348,6 +357,64 @@ export function registerTools(ctx, engine) {
       kind: 'other',
       rawInput: Array.isArray(args?.features) ? args.features.join(', ') : undefined,
     }),
+  })
+
+  ctx.tools.register({
+    name: 'relay_propose',
+    description: 'Cluster mode only: propose how to split the planned features across parallel sessions. Call it once the '
+      + 'plan is approved and features.json lists each feature\'s files and dependsOn. A human confirms or edits the '
+      + 'proposal and starts the sessions; this tool opens nothing, so stop and wait afterwards.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        groups: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              title: { type: 'string', description: 'Short name of the group.' },
+              features: { type: 'array', items: { type: 'string' }, description: 'Feature ids the group owns.' },
+              isolation: { type: 'string', enum: ['shared', 'worktree'], description: 'shared: same directory; worktree: own copy of the repository.' },
+              reason: { type: 'string', description: 'One sentence on why these features and this isolation.' },
+            },
+            required: ['title', 'features', 'isolation', 'reason'],
+          },
+          description: 'The proposed groups; features that are left out stay with this session.',
+        },
+        note: { type: 'string', description: 'Anything the human should know before confirming.' },
+      },
+      required: ['groups'],
+    },
+    output: { schema: ANY_OBJECT, render: renderJson },
+    execute(args, exec) {
+      const refused = call(exec.agent)
+      if (refused !== undefined) return refused
+      if (exec.agent === undefined) return { ok: false, code: 'no_agent', message: 'relay_propose needs a calling agent.' }
+      if (!Array.isArray(args?.groups) || args.groups.length === 0) {
+        return { ok: false, code: 'invalid_arguments', message: 'groups must be a non-empty array.' }
+      }
+      for (const group of args.groups) {
+        if (group === null || typeof group !== 'object' || typeof group.title !== 'string' || typeof group.isolation !== 'string'
+          || typeof group.reason !== 'string' || !Array.isArray(group.features) || group.features.some(id => typeof id !== 'string')) {
+          return { ok: false, code: 'invalid_arguments', message: 'every group needs a title, features (an array of ids), isolation, and reason (strings).' }
+        }
+      }
+      if (args.note !== undefined && typeof args.note !== 'string') {
+        return { ok: false, code: 'invalid_arguments', message: 'note must be a string.' }
+      }
+      try {
+        return {
+          ok: true,
+          ...engine.proposeCluster({ agent: exec.agent, groups: args.groups, note: args.note }),
+          message: 'Proposal recorded. A human confirms the launch in the panel or with /relay launch; do not spawn sessions yourself.',
+        }
+      } catch (error) {
+        return refusal(error)
+      }
+    },
+    presentCall: () => ({ card: 'generic', title: 'Propose the cluster launch', kind: 'other' }),
   })
 
   ctx.tools.register({

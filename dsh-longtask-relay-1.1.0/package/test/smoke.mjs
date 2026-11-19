@@ -6,13 +6,16 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ChainIndex, ChainStore, RELAY_CODES, RelayError } from '../lib/chain-store.js'
+import { ChainIndex, ChainStore, RELAY_CODES, RelayError, skeletonTruth } from '../lib/chain-store.js'
 import { resolveConfig } from '../lib/config.js'
-import { RelayEngine } from '../lib/engine.js'
+import { RelayEngine, clusterConflicts } from '../lib/engine.js'
 import { ChainFingerprints } from '../lib/fingerprints.js'
 import { handleRelayCommand } from '../lib/command.js'
 import { sessionTitle } from '../lib/labels.js'
-import { renderHandoffPrompt, renderInitializerPrompt, renderWrapupPrompt, stateBlockLines } from '../lib/prompts.js'
+import {
+  renderClusterLaunchedNotice, renderClusterPlanningPrompt, renderDelegationPrompt, renderHandoffPrompt,
+  renderInitializerPrompt, renderWrapupPrompt, stateBlockLines, truthPaths,
+} from '../lib/prompts.js'
 import { RelayRemote } from '../lib/remote.js'
 import { registerTools } from '../lib/tools.js'
 
@@ -1846,7 +1849,7 @@ check('a nested truthDir still resolves the workspace cwd', () => {
 
 check('package metadata exposes the test script and version', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(pkg.version, '1.3.2')
+  assert.equal(pkg.version, '1.4.0')
   assert.match(pkg.scripts.test, /node test\/smoke\.mjs/)
 })
 
@@ -2578,6 +2581,796 @@ await checkAsync('/relay pause acts as the human: the goal pauses and the audit 
   assert.equal(goals.views.get('session-old').phase, 'paused')
   assert.equal(auditOf(world, 'chain.paused')[0].actor, 'host')
   world.engine.dispose()
+})
+
+// --- cluster mode: host half ---
+
+check('cluster config: maxClusterSessions and clusterGoals defaults and validation', () => {
+  const defaults = resolveConfig({})
+  assert.equal(defaults.maxClusterSessions, 4)
+  assert.equal(defaults.clusterGoals, true)
+  assert.equal(resolveConfig({ maxClusterSessions: 12 }).maxClusterSessions, 12)
+  assert.equal(resolveConfig({ clusterGoals: false }).clusterGoals, false)
+  assert.throws(() => resolveConfig({ maxClusterSessions: 0 }), /maxClusterSessions must be an integer from 1 to 12/)
+  assert.throws(() => resolveConfig({ maxClusterSessions: 13 }), /maxClusterSessions must be an integer from 1 to 12/)
+  assert.throws(() => resolveConfig({ maxClusterSessions: 2.5 }), /maxClusterSessions/)
+  assert.throws(() => resolveConfig({ clusterGoals: 'yes' }), /clusterGoals must be a boolean/)
+})
+
+check('store: files and dependsOn survive write, read and appendFeatures; malformed ones are dropped', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'relay-cluster-store-'))
+  const local = ChainStore.forCwd(dir)
+  const chain = local.create({ objective: 'scope', cwd: dir })
+  local.writeFeatures(chain.chainId, {
+    version: 1,
+    objective: 'scope',
+    features: [
+      { id: 'F001', title: 'one', files: ['src/a', 'lib/b.js'], dependsOn: ['F002'] },
+      { id: 'F002', title: 'two' },
+      { id: 'F003', title: 'three', files: 'src/a', dependsOn: ['F001', ''] },
+      { id: 'F004', title: 'four', files: ['ok', 3], dependsOn: [] },
+    ],
+  })
+  const read = local.readFeatures(chain.chainId).features
+  assert.deepEqual(read[0].files, ['src/a', 'lib/b.js'])
+  assert.deepEqual(read[0].dependsOn, ['F002'])
+  assert.equal('files' in read[1], false, 'an absent field must stay absent')
+  assert.equal('dependsOn' in read[1], false)
+  assert.equal('files' in read[2], false, 'a non-array files value is dropped')
+  assert.equal('dependsOn' in read[2], false, 'an array holding an empty string is dropped')
+  assert.equal('files' in read[3], false, 'an array holding a non-string is dropped')
+  assert.deepEqual(read[3].dependsOn, [], 'an empty well-formed array is kept')
+  local.appendFeatures(chain.chainId, [{ id: 'F005', title: 'five', files: ['docs'], dependsOn: ['F001'] }, { id: 'F006', title: 'six', files: [''] }], 'found later')
+  const appended = local.readFeatures(chain.chainId).features
+  assert.deepEqual(appended[4].files, ['docs'])
+  assert.deepEqual(appended[4].dependsOn, ['F001'])
+  assert.equal('files' in appended[5], false)
+  // The frozen fingerprint hashes only id and title.
+  const home = mkdtempSync(join(tmpdir(), 'relay-cluster-fp-'))
+  const prints = new ChainFingerprints(home)
+  prints.set(chain.chainId, appended)
+  assert.deepEqual(prints.get(chain.chainId).features[0], { id: 'F001', title: 'one' })
+  assert.equal(local.paths(chain.chainId).spec, join(local.paths(chain.chainId).dir, 'SPEC.md'))
+  assert.match(skeletonTruth('obj').spec, /^# SPEC[\s\S]*obj[\s\S]*planning session/)
+})
+
+check('cluster prompts: planning, launched notice and the delegation subagent rule', () => {
+  const truthDir = '/work/.relay/chain-x'
+  assert.ok(truthPaths({ truthDir }).spec.endsWith('SPEC.md'))
+  const planning = renderClusterPlanningPrompt({ truthDir, objective: 'build it', maxSessions: 3 })
+  assert.match(planning, /^<relay_cluster_planning>/)
+  assert.match(planning, /<\/relay_cluster_planning>$/)
+  for (const needle of ['exit_plan_mode', 'SPEC.md', 'PLAN.md', 'features.json', 'relay_propose', 'worktree', '"dependsOn"', '"files"', 'relay_spawn', 'at most 3']) {
+    assert.ok(planning.includes(needle), `planning prompt lacks ${needle}`)
+  }
+  assert.ok(planning.length < 3000, `planning prompt is ${planning.length} chars`)
+  const notice = renderClusterLaunchedNotice({
+    chainId: 'chain-x',
+    truthDir,
+    groups: [{ id: 'G1', launched: true, sessionId: 'session-w1', features: ['F002', 'F003'] }],
+    kept: [{ id: 'F004', why: 'group G2 uses worktree isolation, which is not available yet' }],
+  })
+  assert.match(notice, /^<relay_cluster_launched>/)
+  assert.ok(notice.includes('session-w1') && notice.includes('F002, F003'))
+  assert.ok(notice.includes('F004') && notice.includes('worktree'))
+  assert.ok(notice.includes('relay_finish'))
+  const base = { chain: { objective: 'o', chainId: 'chain-x' }, truthDir, parentSessionId: 'p', features: [{ id: 'F002', title: 't' }], note: '' }
+  const plain = renderDelegationPrompt(base)
+  assert.equal(renderDelegationPrompt({ ...base, cluster: false }), plain, 'cluster:false must not change the prompt')
+  assert.ok(plain.includes('Do not start a chain, spawn sessions, or hand off; the parent owns that.'))
+  const clustered = renderDelegationPrompt({ ...base, cluster: true })
+  assert.ok(clustered.includes('relay_spawn') && clustered.includes('subagent'))
+  assert.ok(!clustered.includes('spawn sessions, or hand off; the parent owns that.'))
+})
+
+/** A planning session in a fresh workspace; `sent` collects the follow-up prompts it receives. */
+function plannerIn(world, id = 'session-planner') {
+  const { dir } = outsiderIn(world, id)
+  const sent = []
+  const agent = {
+    id,
+    session: { id, header: { cwd: dir } },
+    status: 'idle',
+    inbox: { nextTurn: [], nextStep: [] },
+    followup(message) { sent.push(message.content[0].text) },
+    inject() {},
+  }
+  return { agent, dir, sent }
+}
+
+await checkAsync('startCluster opens a planning chain, switches plan mode on and sends the planning prompt', async () => {
+  const world = fakeWorld()
+  const plan = withPlanMode(world, { 'session-planner': { active: false } })
+  const { agent, dir, sent } = plannerIn(world)
+  const started = world.engine.startCluster({ agent, objective: 'cluster work' })
+  assert.equal(started.mode, 'cluster')
+  const store = world.engine.storeFor(world.engine.members.get('session-planner').truthDir)
+  const chain = store.readChain(started.chainId)
+  assert.equal(chain.status, 'planning')
+  assert.equal(chain.mode, 'cluster')
+  assert.match(readFileSync(store.paths(started.chainId).spec, 'utf8'), /^# SPEC/)
+  assert.deepEqual(plan.sets, [{ sessionId: 'session-planner', active: true }])
+  assert.equal(sent.length, 1)
+  assert.match(sent[0], /<relay_cluster_planning>/)
+  assert.ok(sent[0].includes('at most 4'), 'the prompt must carry maxClusterSessions')
+  assert.ok(!sent.some(text => /<relay_start>/.test(text)), 'the initializer prompt must not be sent')
+  assert.deepEqual(world.engine.audit(started.chainId, 10).find(record => record.kind === 'chain.started').detail, { objective: 'cluster work', maxHandoffs: 32, mode: 'cluster' })
+  assert.equal(existsSync(join(dir, '.relay')), true)
+  // A planning chain is never wrapped up or handed off, whatever the pressure.
+  world.setRatio(0.9)
+  await world.engine.evaluate(agent)
+  assert.equal(sent.length, 1, 'a planning chain must not receive a wrap-up')
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0)
+  // The status label survives a round trip through the validator.
+  assert.equal(world.engine.status().find(item => item.chainId === started.chainId).status, 'planning')
+})
+
+await checkAsync('startCluster without a plan mode service still starts, and does not touch a session already in plan mode', async () => {
+  const bare = fakeWorld()
+  const first = plannerIn(bare)
+  const started = bare.engine.startCluster({ agent: first.agent, objective: 'no service' })
+  assert.equal(started.mode, 'cluster')
+  const world = fakeWorld()
+  const plan = withPlanMode(world, { 'session-planner': { active: true } })
+  const second = plannerIn(world)
+  world.engine.startCluster({ agent: second.agent, objective: 'already planning' })
+  assert.equal(plan.sets.length, 0, 'plan mode was already on')
+  // A plan mode service whose set throws only warns.
+  const failing = fakeWorld()
+  const original = failing.engine.ctx.get
+  failing.engine.ctx.get = name => (name === 'planMode' ? { get: () => ({ active: false }), set: () => { throw new Error('nope') } } : original(name))
+  const third = plannerIn(failing)
+  assert.equal(failing.engine.startCluster({ agent: third.agent, objective: 'set throws' }).mode, 'cluster')
+})
+
+check('start still refuses in plan mode when the cluster entry exists', () => {
+  const world = fakeWorld()
+  withPlanMode(world, { 'session-planner': { active: true } })
+  const { agent } = plannerIn(world)
+  assert.throws(
+    () => world.engine.start({ agent, objective: 'plain start' }),
+    error => error instanceof RelayError && /plan mode is active/.test(error.message),
+  )
+  const normal = plannerIn(fakeWorld(), 'session-other')
+  const started = world.engine.start({ agent: normal.agent, objective: 'plain start' })
+  assert.equal(started.mode, undefined, 'start keeps its old result shape')
+  const store = world.engine.storeFor(world.engine.members.get('session-other').truthDir)
+  assert.equal(store.readChain(started.chainId).status, 'initializing')
+  assert.equal(store.readChain(started.chainId).mode, undefined)
+})
+
+/**
+ * A planning chain with a loaded head session, a registry of live agents, and a controller that
+ * mints one distinct worker id per create (`session-w1`, `session-w2`, ...).
+ * `failCreate` lists the 1-based create calls that must throw.
+ */
+function clusterWorld({ failCreate = [], ...overrides } = {}) {
+  const config = resolveConfig({ cooldownMs: 0, ...overrides })
+  const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-cluster-'))
+  const indexHome = mkdtempSync(join(tmpdir(), 'relay-cluster-home-'))
+  const local = ChainStore.forCwd(workspaceDir)
+  const chain = local.create({ objective: 'cluster objective', cwd: workspaceDir, maxHandoffs: 4 })
+  local.writeFeatures(chain.chainId, {
+    version: 1,
+    objective: 'cluster objective',
+    features: [
+      { id: 'F001', title: 'done already', passes: true, evidence: 'ran true', verify: 'true', files: ['src/a'] },
+      { id: 'F002', title: 'second', verify: 'node two.mjs', files: ['src/a'] },
+      { id: 'F003', title: 'third', verify: 'node three.mjs', files: ['src/b'] },
+      { id: 'F004', title: 'fourth', verify: 'node four.mjs', files: ['src/a/deep'], dependsOn: ['F002'] },
+      { id: 'F005', title: 'fifth' },
+      { id: 'F006', title: 'sixth', files: ['docs'], dependsOn: ['F003'] },
+    ],
+  })
+  local.update(chain.chainId, record => {
+    record.sessions.push({ sessionId: 'session-head', role: 'initializer', index: 0, joinedAt: new Date().toISOString(), parentSessionId: null })
+    record.currentSessionId = 'session-head'
+    record.status = 'planning'
+    record.mode = 'cluster'
+  })
+  const calls = []
+  const agents = new Map()
+  const makeAgent = id => {
+    const agent = {
+      id,
+      session: { id, header: { cwd: workspaceDir } },
+      status: 'idle',
+      inbox: { nextTurn: [], nextStep: [] },
+      followup(message) { calls.push({ kind: 'followup', sessionId: id, text: message.content[0].text }) },
+      inject() {},
+    }
+    agents.set(id, agent)
+    return agent
+  }
+  const head = makeAgent('session-head')
+  let created = 0
+  const services = {
+    agents: { get: id => agents.get(id) },
+    sessionController: {
+      async create(request) {
+        created += 1
+        calls.push({ kind: 'create', cwd: request.cwd })
+        if (failCreate.includes(created)) throw new Error(`create ${created} refused`)
+        const id = `session-w${created}`
+        makeAgent(id)
+        return { sessionId: id }
+      },
+      async prompt(request) {
+        calls.push({ kind: 'prompt', sessionId: request.sessionId, text: request.content[0].text })
+        return { accepted: true }
+      },
+    },
+    sessions: { flush: async () => true },
+  }
+  const ctx = { logger: { warn: () => {} }, get: name => services[name] }
+  const engine = new RelayEngine(ctx, config, { chainIndex: new ChainIndex(indexHome), fingerprints: new ChainFingerprints(indexHome) })
+  engine.members.set('session-head', { chainId: chain.chainId, truthDir: local.truthDir })
+  engine.remember(local.readChain(chain.chainId), local)
+  return { engine, local, chain, head, agents, makeAgent, calls }
+}
+
+/** One launch group as the model submits it. */
+const clusterGroup = (title, features, isolation = 'shared', reason = `because ${title}`) => ({ title, features, isolation, reason })
+
+/** Propose the standard two-group plan on a cluster world. */
+function proposeTwoGroups(world) {
+  return world.engine.proposeCluster({
+    agent: world.head,
+    groups: [clusterGroup('left', ['F002', 'F004']), clusterGroup('right', ['F003', 'F006'])],
+    note: 'ready',
+  })
+}
+
+/** Assert a RelayError with the given code and a message matching `pattern`. */
+const refusal = (pattern, code = RELAY_CODES.invalid) => error => error instanceof RelayError && error.code === code && pattern.test(error.message)
+
+check('proposeCluster refuses every malformed or unsafe proposal', () => {
+  const world = clusterWorld()
+  const propose = (groups, agent = world.head) => () => world.engine.proposeCluster({ agent, groups })
+  const outsider = outsiderIn(world, 'session-outsider').agent
+  assert.throws(propose([clusterGroup('a', ['F002'])], outsider), refusal(/does not belong to a chain/))
+  world.local.update(world.chain.chainId, record => {
+    record.sessions.push({ sessionId: 'session-other', role: 'worker', index: 1, joinedAt: new Date().toISOString(), parentSessionId: 'session-head' })
+  })
+  const other = world.makeAgent('session-other')
+  assert.throws(propose([clusterGroup('a', ['F002'])], other), refusal(/only the chain's current session/))
+  // groups shape
+  assert.throws(propose(undefined), refusal(/groups must be a non-empty array/))
+  assert.throws(propose([]), refusal(/groups must be a non-empty array/))
+  assert.throws(propose([1, 2, 3, 4, 5].map(n => clusterGroup(`g${n}`, ['F002']))), refusal(/at most 4 groups/))
+  assert.throws(propose([clusterGroup('', ['F002'])]), refusal(/groups\[0\]\.title/))
+  assert.throws(propose([clusterGroup('a', [])]), refusal(/groups\[0\]\.features/))
+  assert.throws(propose([clusterGroup('a', [7])]), refusal(/groups\[0\]\.features/))
+  assert.throws(propose([clusterGroup('a', ['F002'], 'copy')]), refusal(/groups\[0\]\.isolation/))
+  assert.throws(propose([clusterGroup('a', ['F002'], 'shared', '  ')]), refusal(/groups\[0\]\.reason/))
+  // feature state
+  assert.throws(propose([clusterGroup('a', ['F404'])]), refusal(/feature F404 does not exist/))
+  assert.throws(propose([clusterGroup('a', ['F001'])]), refusal(/feature F001 already passes/))
+  assert.throws(propose([clusterGroup('a', ['F002']), clusterGroup('b', ['F002'])]), refusal(/feature F002 appears in more than one group \(G1 and G2\)/))
+  assert.throws(propose([clusterGroup('a', ['F002', 'F004']), clusterGroup('b', ['F004'])]), refusal(/feature F004 appears in more than one group/))
+  assert.throws(propose([clusterGroup('a', ['F002']), clusterGroup('b', ['F004'])]), refusal(/F004 \(group G2\) depends on F002 \(group G1\); put both in the same group/))
+  world.local.patchFeatures(world.chain.chainId, [{ id: 'F003', assignedSessionId: 'session-other' }])
+  assert.throws(propose([clusterGroup('a', ['F003'])]), refusal(/feature F003 is already delegated to session-other/))
+  // chain state
+  const plan = withPlanMode(world, { 'session-head': { active: true } })
+  assert.throws(propose([clusterGroup('a', ['F002'])]), refusal(/plan is not approved yet; present it through exit_plan_mode first/))
+  plan.states.set('session-head', { active: false })
+  world.local.update(world.chain.chainId, record => { record.status = 'active' })
+  assert.throws(propose([clusterGroup('a', ['F002'])]), refusal(/is active; only a planning chain/))
+  assert.equal(world.local.readChain(world.chain.chainId).launchPlan, undefined, 'a refusal must write nothing')
+  assert.equal(world.engine.fingerprints.get(world.chain.chainId), undefined, 'a refusal must not freeze the list')
+})
+
+check('proposeCluster stores the launch plan, freezes the list, audits, and status shows launchPending', () => {
+  const world = clusterWorld()
+  const chainId = world.chain.chainId
+  const before = world.engine.status().find(item => item.chainId === chainId)
+  assert.equal(before.launchPending, false)
+  assert.equal(before.mode, 'cluster')
+  const result = proposeTwoGroups(world)
+  assert.equal(result.waitingFor, 'human')
+  assert.deepEqual(result.conflicts, [])
+  assert.deepEqual(result.groups.map(group => group.id), ['G1', 'G2'])
+  assert.deepEqual(result.groups[0], { id: 'G1', title: 'left', features: ['F002', 'F004'], isolation: 'shared', reason: 'because left' })
+  const record = world.local.readChain(chainId)
+  assert.equal(record.status, 'planning')
+  assert.equal(record.launchPlan.proposedBy, 'session-head')
+  assert.equal(record.launchPlan.note, 'ready')
+  assert.equal(typeof record.launchPlan.proposedAt, 'string')
+  assert.deepEqual(record.launchPlan.groups, result.groups)
+  assert.ok(world.engine.fingerprints.get(chainId) !== undefined, 'the feature list must be frozen')
+  assert.equal(auditOf(world, 'features.frozen').length, 1)
+  assert.deepEqual(auditOf(world, 'cluster.proposed')[0].detail, { groups: 2, conflicts: 0 })
+  const after = world.engine.status().find(item => item.chainId === chainId)
+  assert.equal(after.launchPending, true, 'the status cache must notice the new launch plan')
+  // A second proposal overwrites the first and keeps the freeze.
+  world.engine.proposeCluster({ agent: world.head, groups: [clusterGroup('only', ['F002'])] })
+  const second = world.local.readChain(chainId).launchPlan
+  assert.equal(second.groups.length, 1)
+  assert.equal(second.note, '')
+  assert.equal(auditOf(world, 'features.frozen').length, 1)
+  assert.equal(auditOf(world, 'cluster.proposed').length, 2)
+})
+
+check('clusterConflicts: exact path, directory prefix, sibling that is not a prefix, worktree ignored, unknown scope', () => {
+  const doc = features => ({ features: features.map(([id, files]) => ({ id, title: id, ...(files === undefined ? {} : { files }) })) })
+  const shared = (id, features) => ({ id, isolation: 'shared', features })
+  const exact = clusterConflicts(doc([['A', ['src\\x.js']], ['B', ['src/x.js']]]), [shared('G1', ['A']), shared('G2', ['B'])])
+  assert.deepEqual(exact, [{ kind: 'overlap', groups: ['G1', 'G2'], features: ['A', 'B'], path: 'src/x.js' }])
+  const prefix = clusterConflicts(doc([['A', ['a/b/']], ['B', ['a/b/c.js']]]), [shared('G1', ['A']), shared('G2', ['B'])])
+  assert.equal(prefix.length, 1)
+  assert.equal(prefix[0].kind, 'overlap')
+  assert.equal(prefix[0].path, 'a/b', 'the covering directory is reported')
+  const reversed = clusterConflicts(doc([['A', ['a/b/c.js']], ['B', ['a/b']]]), [shared('G1', ['A']), shared('G2', ['B'])])
+  assert.equal(reversed.length, 1, 'the prefix may sit on either side')
+  const sibling = clusterConflicts(doc([['A', ['a/b']], ['B', ['a/bc.js']]]), [shared('G1', ['A']), shared('G2', ['B'])])
+  assert.deepEqual(sibling, [], 'a/b is not a prefix of a/bc.js')
+  const worktree = clusterConflicts(doc([['A', ['a']], ['B', ['a']]]), [shared('G1', ['A']), { id: 'G2', isolation: 'worktree', features: ['B'] }])
+  assert.deepEqual(worktree, [], 'a worktree group cannot collide with a shared one')
+  const same = clusterConflicts(doc([['A', ['a']], ['B', ['a']]]), [shared('G1', ['A', 'B'])])
+  assert.deepEqual(same, [], 'features in one group run in order and cannot collide')
+  const unknown = clusterConflicts(doc([['A', undefined], ['B', ['x']], ['C', undefined]]), [shared('G1', ['A', 'B']), { id: 'G2', isolation: 'worktree', features: ['C'] }])
+  assert.deepEqual(unknown, [{ kind: 'unknown-scope', groups: ['G1'], features: ['A'] }])
+})
+
+check('proposeCluster reports overlap and unknown scope as conflicts without refusing', () => {
+  const world = clusterWorld()
+  world.local.writeFeatures(world.chain.chainId, {
+    version: 1,
+    objective: 'cluster objective',
+    features: [
+      { id: 'F002', title: 'second', files: ['src/a'] },
+      { id: 'F003', title: 'third', files: ['src/a/deep'] },
+      { id: 'F005', title: 'fifth' },
+    ],
+  })
+  const result = world.engine.proposeCluster({
+    agent: world.head,
+    groups: [clusterGroup('a', ['F002']), clusterGroup('b', ['F003']), clusterGroup('c', ['F005'])],
+  })
+  assert.deepEqual(result.conflicts.map(item => item.kind).sort(), ['overlap', 'unknown-scope'])
+  const overlap = result.conflicts.find(item => item.kind === 'overlap')
+  assert.deepEqual(overlap, { kind: 'overlap', groups: ['G1', 'G2'], features: ['F002', 'F003'], path: 'src/a' })
+  assert.deepEqual(world.local.readChain(world.chain.chainId).launchPlan.conflicts, result.conflicts)
+  assert.deepEqual(auditOf(world, 'cluster.proposed')[0].detail, { groups: 3, conflicts: 2 })
+})
+
+await checkAsync('launchCluster opens one worker per shared group and activates the chain', async () => {
+  const world = clusterWorld()
+  const goals = withGoals(world)
+  const plan = withPlanMode(world, { 'session-head': { active: false } })
+  proposeTwoGroups(world)
+  const result = await world.engine.launchCluster({ chainId: world.chain.chainId })
+  assert.equal(result.status, 'active')
+  assert.deepEqual(result.results, [
+    { id: 'G1', launched: true, sessionId: 'session-w1' },
+    { id: 'G2', launched: true, sessionId: 'session-w2' },
+  ])
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.status, 'active')
+  assert.equal(typeof chain.launchedAt, 'string')
+  assert.equal(chain.lastError, null)
+  assert.deepEqual(chain.launchPlan.results, result.results)
+  assert.equal(typeof chain.launchPlan.launchedAt, 'string')
+  assert.equal(chain.launchPlan.groups.length, 2, 'the plan stays for the panel to show')
+  const owner = id => world.local.readFeatures(world.chain.chainId).features.find(feature => feature.id === id).assignedSessionId
+  assert.deepEqual(['F002', 'F004', 'F003', 'F006', 'F005'].map(owner), ['session-w1', 'session-w1', 'session-w2', 'session-w2', null])
+  const worker = chain.sessions.find(session => session.sessionId === 'session-w1')
+  assert.equal(worker.role, 'worker')
+  assert.equal(worker.parentSessionId, 'session-head')
+  const prompts = world.calls.filter(call => call.kind === 'prompt')
+  assert.equal(prompts.length, 2)
+  assert.match(prompts[0].text, /<relay_delegation>/)
+  assert.ok(prompts[0].text.includes('subagent') && prompts[0].text.includes('relay_spawn'))
+  assert.ok(prompts[0].text.includes('Cluster group G1: left. because left'), 'the group note reaches the worker')
+  assert.equal(auditOf(world, 'cluster.launched').length, 1)
+  assert.deepEqual(auditOf(world, 'cluster.launched')[0].detail, { results: result.results })
+  assert.equal(auditOf(world, 'delegation.created')[0].actor, 'host')
+  const notice = world.calls.find(call => call.kind === 'followup' && call.sessionId === 'session-head')
+  assert.match(notice.text, /<relay_cluster_launched>/)
+  assert.ok(notice.text.includes('session-w1') && notice.text.includes('F002, F004') && notice.text.includes('F005'))
+  // goals: one for the head and one per worker, each recorded as the plugin's own
+  assert.deepEqual(goals.ops('create').map(op => op.agentId), ['session-w1', 'session-w2', 'session-head'])
+  assert.equal(goals.ops('create')[0].objective, 'cluster objective — cluster group left: features F002, F004')
+  assert.equal(goals.ops('create')[0].maxGoalRounds, 16)
+  const entry = id => chain.sessions.find(session => session.sessionId === id)
+  assert.equal(entry('session-w1').goalId, 'goal-for-session-w1')
+  assert.equal(entry('session-w1').goalSeeded, true)
+  assert.equal(entry('session-head').goalId, 'goal-for-session-head')
+  assert.equal(entry('session-head').goalSeeded, true)
+  assert.equal(plan.sets.length, 0)
+})
+
+await checkAsync('launchCluster creates no goals when clusterGoals is off, and keeps an existing head goal', async () => {
+  const off = clusterWorld({ clusterGoals: false })
+  const offGoals = withGoals(off)
+  proposeTwoGroups(off)
+  await off.engine.launchCluster({ chainId: off.chain.chainId })
+  assert.equal(offGoals.ops('create').length, 0)
+  const kept = clusterWorld()
+  const keptGoals = withGoals(kept, { 'session-head': goalView() })
+  proposeTwoGroups(kept)
+  await kept.engine.launchCluster({ chainId: kept.chain.chainId })
+  assert.deepEqual(keptGoals.ops('create').map(op => op.agentId), ['session-w1', 'session-w2'], 'the head already had a goal')
+  assert.equal(kept.local.readChain(kept.chain.chainId).sessions[0].goalId, undefined)
+  // A missing goals service is not an error.
+  const bare = clusterWorld()
+  proposeTwoGroups(bare)
+  assert.equal((await bare.engine.launchCluster({ chainId: bare.chain.chainId })).status, 'active')
+})
+
+await checkAsync('launchCluster leaves a worktree group to the planning session', async () => {
+  const world = clusterWorld()
+  world.engine.proposeCluster({ agent: world.head, groups: [clusterGroup('fast', ['F002']), clusterGroup('heavy', ['F003'], 'worktree')] })
+  const result = await world.engine.launchCluster({ chainId: world.chain.chainId })
+  assert.equal(result.results[0].launched, true)
+  assert.equal(result.results[1].launched, false)
+  assert.match(result.results[1].reason, /worktree isolation is not available yet/)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 1)
+  const features = world.local.readFeatures(world.chain.chainId).features
+  assert.equal(features.find(feature => feature.id === 'F003').assignedSessionId, null)
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'active')
+  assert.equal(world.local.readChain(world.chain.chainId).lastError, null, 'a worktree group is expected, not an error')
+  const notice = world.calls.find(call => call.kind === 'followup' && call.sessionId === 'session-head').text
+  assert.ok(notice.includes('F003') && /worktree/.test(notice))
+})
+
+await checkAsync('launchCluster keeps going when one group fails and records which', async () => {
+  const world = clusterWorld({ failCreate: [1] })
+  proposeTwoGroups(world)
+  const result = await world.engine.launchCluster({ chainId: world.chain.chainId })
+  assert.deepEqual(result.results[0], { id: 'G1', launched: false, reason: 'spawn failed: create 1 refused' })
+  assert.deepEqual(result.results[1], { id: 'G2', launched: true, sessionId: 'session-w2' })
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.status, 'active')
+  assert.equal(chain.lastError, 'cluster groups not launched: G1')
+  const features = world.local.readFeatures(world.chain.chainId).features
+  assert.equal(features.find(feature => feature.id === 'F002').assignedSessionId, null, 'the failed group keeps its features')
+  assert.equal(features.find(feature => feature.id === 'F003').assignedSessionId, 'session-w2')
+  assert.equal(auditOf(world, 'cluster.launched').length, 1)
+})
+
+await checkAsync('launchCluster keeps the plan when every shared group fails', async () => {
+  const world = clusterWorld({ failCreate: [1, 2] })
+  proposeTwoGroups(world)
+  await assert.rejects(() => world.engine.launchCluster({ chainId: world.chain.chainId }), refusal(/create 1 refused/, RELAY_CODES.io))
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.status, 'planning')
+  assert.equal(chain.launchPlan.launchedAt, undefined)
+  assert.equal(auditOf(world, 'cluster.launched').length, 0)
+  assert.equal(world.engine.busyChains.has(world.chain.chainId), false, 'the busy mark must be released')
+})
+
+await checkAsync('launchCluster refuses unsafe states', async () => {
+  const world = clusterWorld()
+  const launch = groups => () => world.engine.launchCluster({ chainId: world.chain.chainId, groups })
+  await assert.rejects(launch(), refusal(/has no launch plan/))
+  proposeTwoGroups(world)
+  const plan = withPlanMode(world, { 'session-head': { active: true } })
+  await assert.rejects(launch(), refusal(/plan is not approved yet/))
+  plan.states.set('session-head', { active: false })
+  world.engine.busyChains.add(world.chain.chainId)
+  await assert.rejects(launch(), refusal(/busy/))
+  world.engine.busyChains.delete(world.chain.chainId)
+  world.agents.delete('session-head')
+  await assert.rejects(launch(), refusal(/open the planning session first/, RELAY_CODES.notFound))
+  world.agents.set('session-head', world.head)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0, 'nothing may be created by a refused launch')
+  world.local.update(world.chain.chainId, record => { record.status = 'active' })
+  await assert.rejects(launch(), refusal(/is active; only a planning chain/))
+})
+
+await checkAsync('launchCluster validates groups edited by the human and launches them as edited', async () => {
+  const world = clusterWorld()
+  proposeTwoGroups(world)
+  const launch = groups => () => world.engine.launchCluster({ chainId: world.chain.chainId, groups })
+  await assert.rejects(launch([clusterGroup('a', ['F002']), clusterGroup('b', ['F002'])]), refusal(/appears in more than one group/))
+  await assert.rejects(launch([clusterGroup('a', ['F002']), clusterGroup('b', ['F004'])]), refusal(/put both in the same group/))
+  await assert.rejects(launch([1, 2, 3, 4, 5].map(n => clusterGroup(`g${n}`, ['F002']))), refusal(/at most 4 groups/))
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'planning')
+  const edited = [clusterGroup('solo', ['F003', 'F002', 'F004'], 'shared', 'human merged them')]
+  const result = await world.engine.launchCluster({ chainId: world.chain.chainId, groups: edited })
+  assert.equal(result.results.length, 1)
+  const stored = world.local.readChain(world.chain.chainId).launchPlan
+  assert.deepEqual(stored.groups.map(group => group.features), [['F003', 'F002', 'F004']])
+  assert.equal(world.local.readFeatures(world.chain.chainId).features.find(feature => feature.id === 'F006').assignedSessionId, null)
+})
+
+await checkAsync('spawnWorker skips plan mode inheritance for a cluster worker only', async () => {
+  const world = clusterWorld()
+  const plan = withPlanMode(world, { 'session-head': { active: true } })
+  const chain = world.local.readChain(world.chain.chainId)
+  const features = world.local.readFeatures(world.chain.chainId).features
+  await world.engine.spawnWorker(chain, world.local, world.head, [features[1]], { actor: 'host', cluster: true })
+  assert.equal(plan.sets.length, 0)
+  await world.engine.spawnWorker(chain, world.local, world.head, [features[2]], { actor: 'host' })
+  assert.deepEqual(plan.sets, [{ sessionId: 'session-w2', active: true }])
+})
+
+check('a planning chain cannot be paused or resumed but can be deleted', () => {
+  const world = clusterWorld()
+  const chainId = world.chain.chainId
+  assert.throws(() => world.engine.setPaused({ chainId, paused: true }), refusal(/is planning; launch it or delete it/))
+  assert.throws(() => world.engine.setPaused({ chainId, paused: false }), refusal(/is planning; launch it or delete it/))
+  assert.equal(world.local.readChain(chainId).status, 'planning')
+  const deleted = world.engine.deleteChain(chainId)
+  assert.equal(deleted.status, 'planning')
+  assert.equal(existsSync(world.local.paths(chainId).dir), false)
+  assert.deepEqual(world.engine.chainIndex.entries(), [])
+})
+
+check('detail, doc and the session view carry the cluster fields', () => {
+  const world = clusterWorld()
+  const chainId = world.chain.chainId
+  world.local.writeText(world.local.paths(chainId).spec, '# SPEC\n\nacceptance: it works\n')
+  assert.match(world.engine.doc(chainId, 'spec').text, /acceptance: it works/)
+  const empty = world.engine.detail(chainId)
+  assert.equal(empty.mode, 'cluster')
+  assert.equal(empty.launchPlan, null)
+  assert.equal(empty.maxClusterSessions, 4)
+  assert.deepEqual(empty.features.find(feature => feature.id === 'F004').files, ['src/a/deep'])
+  assert.deepEqual(empty.features.find(feature => feature.id === 'F004').dependsOn, ['F002'])
+  assert.deepEqual(empty.features.find(feature => feature.id === 'F005').files, [])
+  assert.deepEqual(empty.features.find(feature => feature.id === 'F005').dependsOn, [])
+  proposeTwoGroups(world)
+  assert.equal(world.engine.detail(chainId).launchPlan.groups.length, 2)
+  const view = world.engine.sessionView('session-head')
+  assert.equal(view.chain.mode, 'cluster')
+  assert.equal(view.chain.launchPending, true)
+  const plain = fakeWorld()
+  assert.equal(plain.engine.status()[0].mode, 'relay')
+  assert.equal(plain.engine.status()[0].launchPending, false)
+})
+
+check('relay_start with mode cluster starts a planning chain', () => {
+  const world = fakeWorld()
+  const registered = new Map()
+  registerTools({ tools: { register: definition => registered.set(definition.name, definition) } }, world.engine)
+  const start = registered.get('relay_start')
+  assert.deepEqual(start.parameters.properties.mode.enum, ['relay', 'cluster'])
+  const { agent, sent } = plannerIn(world)
+  assert.equal(start.execute({ objective: 'x', mode: 'bogus' }, { agent }).code, 'invalid_arguments')
+  const result = start.execute({ objective: 'planned together', mode: 'cluster' }, { agent })
+  assert.equal(result.ok, true)
+  assert.equal(result.mode, 'cluster')
+  assert.match(sent[0], /<relay_cluster_planning>/)
+  const plain = plannerIn(world, 'session-plain')
+  const normal = start.execute({ objective: 'plain', mode: 'relay' }, { agent: plain.agent })
+  assert.equal(normal.ok, true)
+  assert.equal(normal.mode, undefined)
+  assert.match(plain.sent[0], /<relay_start>/)
+})
+
+check('relay_propose records a proposal, and refuses bad input and bad state', () => {
+  const world = clusterWorld()
+  const registered = new Map()
+  registerTools({ tools: { register: definition => registered.set(definition.name, definition) } }, world.engine)
+  const propose = registered.get('relay_propose')
+  assert.equal(propose.presentCall({}).title, 'Propose the cluster launch')
+  const exec = { agent: world.head }
+  assert.equal(propose.execute({}, exec).code, 'invalid_arguments')
+  assert.equal(propose.execute({ groups: 'all' }, exec).code, 'invalid_arguments')
+  assert.equal(propose.execute({ groups: [clusterGroup('a', 'F002')] }, exec).code, 'invalid_arguments')
+  assert.equal(propose.execute({ groups: [{ ...clusterGroup('a', ['F002']), isolation: 3 }] }, exec).code, 'invalid_arguments')
+  assert.equal(propose.execute({ groups: [clusterGroup('a', ['F002'])], note: 4 }, exec).code, 'invalid_arguments')
+  assert.equal(propose.execute({ groups: [clusterGroup('a', ['F002'])] }, {}).code, 'no_agent')
+  const refused = propose.execute({ groups: [clusterGroup('a', ['F404'])] }, exec)
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, RELAY_CODES.invalid)
+  assert.match(refused.message, /F404 does not exist/)
+  const ok = propose.execute({ groups: [clusterGroup('left', ['F002']), clusterGroup('right', ['F003'])], note: 'n' }, exec)
+  assert.equal(ok.ok, true)
+  assert.equal(ok.waitingFor, 'human')
+  assert.equal(ok.groups.length, 2)
+  assert.match(ok.message, /do not spawn sessions yourself/)
+  assert.equal(world.local.readChain(world.chain.chainId).launchPlan.note, 'n')
+})
+
+await checkAsync('the remote exposes launchCluster and forwards the human edit', async () => {
+  const world = clusterWorld()
+  const remote = new RelayRemote(world.engine)
+  const descriptor = Object.getOwnPropertyDescriptor(RelayRemote.prototype, '@deepseek-ai/dsh-typert-protocol/remote-methods')
+  assert.ok(descriptor.value.methods.some(method => method.method === 'launchCluster'))
+  await assert.rejects(() => remote.launchCluster(''), error => error instanceof RelayError && /chainId is required/.test(error.message))
+  await assert.rejects(() => remote.launchCluster(world.chain.chainId), refusal(/has no launch plan/))
+  proposeTwoGroups(world)
+  const edited = [clusterGroup('merged', ['F002', 'F003', 'F004', 'F006'])]
+  const result = await remote.launchCluster(world.chain.chainId, edited)
+  assert.equal(result.status, 'active')
+  assert.equal(result.results.length, 1, 'the edited groups, not the stored ones, were launched')
+  const plain = clusterWorld()
+  proposeTwoGroups(plain)
+  const stored = await new RelayRemote(plain.engine).launchCluster(plain.chain.chainId, 'not an array')
+  assert.equal(stored.results.length, 2, 'a non-array groups argument falls back to the stored plan')
+})
+
+await checkAsync('/relay cluster starts a planning chain and /relay launch opens the sessions', async () => {
+  const world = fakeWorld()
+  withPlanMode(world, { 'session-planner': { active: false } })
+  const { agent, sent } = plannerIn(world)
+  const missing = await handleRelayCommand(world.engine, commandInvocation(agent, 'cluster'))
+  assert.equal(missing.kind, 'error')
+  assert.match(missing.text, /objective is required/)
+  const started = await handleRelayCommand(world.engine, commandInvocation(agent, 'cluster build the thing together'))
+  assert.equal(started.kind, 'success', started.text)
+  assert.match(started.text, /planning prompt/)
+  assert.match(started.text, /\/relay launch/)
+  assert.match(sent[0], /<relay_cluster_planning>/)
+  assert.equal(world.engine.locate(agent.session).chain.status, 'planning')
+  const early = await handleRelayCommand(world.engine, commandInvocation(agent, 'launch'))
+  assert.equal(early.kind, 'error')
+  assert.match(early.text, /has no launch plan/)
+  assert.match((await handleRelayCommand(world.engine, commandInvocation(agent, 'explode'))).text, /cluster <objective> \| launch/, 'the usage text lists cluster and launch')
+
+  const cluster = clusterWorld()
+  cluster.engine.proposeCluster({ agent: cluster.head, groups: [clusterGroup('fast', ['F002']), clusterGroup('heavy', ['F003'], 'worktree')] })
+  const launched = await handleRelayCommand(cluster.engine, commandInvocation(cluster.head, 'launch'))
+  assert.equal(launched.kind, 'success', launched.text)
+  assert.ok(launched.text.includes('session-w1'))
+  assert.match(launched.text, /G2/)
+  assert.match(launched.text, /worktree isolation is not available yet/)
+  assert.equal(cluster.local.readChain(cluster.chain.chainId).status, 'active')
+})
+
+// --- cluster mode: staged launch ---
+
+/** The head's follow-up messages, newest last. */
+const headTexts = world => world.calls.filter(call => call.kind === 'followup' && call.sessionId === 'session-head').map(call => call.text)
+
+/** Pass F002 through a checkpoint from the head, as a session would. */
+const passF002 = world => world.engine.checkpoint({
+  agent: world.head,
+  features: [{ id: 'F002', passes: true, evidence: 'node two.mjs -> exit 0, 3/3 passed' }],
+})
+
+/** A planning world with a waiting group G1 (F004 needs the ungrouped F002) and a ready group G2. */
+async function waitingWorld(overrides = {}) {
+  const world = clusterWorld(overrides)
+  world.engine.proposeCluster({ agent: world.head, groups: [clusterGroup('late', ['F004']), clusterGroup('now', ['F003'])] })
+  const result = await world.engine.launchCluster({ chainId: world.chain.chainId })
+  return { world, result }
+}
+
+await checkAsync('launchCluster holds back a group whose dependency is outside every group and unfinished', async () => {
+  const { world, result } = await waitingWorld()
+  assert.deepEqual(result.results[0], { id: 'G1', launched: false, waiting: true, waitsFor: ['F002'], reason: 'waits for F002 to pass' })
+  assert.equal(result.results[1].launched, true)
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.status, 'active')
+  assert.equal(chain.lastError, null, 'a waiting group is not a failure')
+  const owner = id => world.local.readFeatures(world.chain.chainId).features.find(feature => feature.id === id).assignedSessionId
+  assert.equal(owner('F004'), null)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 1)
+  const notice = headTexts(world)[0]
+  assert.ok(notice.includes('F002'), 'the dependency stays with the planning session')
+  assert.match(notice, /group G1.*waits for F002/)
+  assert.match(notice, /opened automatically/)
+  assert.ok(!/- F004:/.test(notice), 'a waiting feature is not kept by the planning session')
+  const summary = world.engine.status().find(item => item.chainId === world.chain.chainId)
+  assert.equal(summary.launchWaiting, 1)
+})
+
+await checkAsync('launchCluster still activates the chain when every shared group waits', async () => {
+  const world = clusterWorld()
+  world.engine.proposeCluster({ agent: world.head, groups: [clusterGroup('a', ['F004']), clusterGroup('b', ['F006'])] })
+  const result = await world.engine.launchCluster({ chainId: world.chain.chainId })
+  assert.deepEqual(result.results.map(item => item.waiting), [true, true])
+  assert.deepEqual(result.results[1].waitsFor, ['F003'])
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'active')
+  assert.equal(world.local.readChain(world.chain.chainId).lastError, null)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0)
+})
+
+await checkAsync('a dependency that already passes does not make a group wait', async () => {
+  const world = clusterWorld()
+  world.local.writeFeatures(world.chain.chainId, {
+    version: 1,
+    objective: 'cluster objective',
+    features: [
+      { id: 'F001', title: 'done', passes: true, evidence: 'ran true', files: ['x'] },
+      { id: 'F002', title: 'second', files: ['a'], dependsOn: ['F001'] },
+      { id: 'F003', title: 'third', files: ['b'], dependsOn: ['F404'] },
+    ],
+  })
+  world.engine.proposeCluster({ agent: world.head, groups: [clusterGroup('a', ['F002']), clusterGroup('b', ['F003'])] })
+  const result = await world.engine.launchCluster({ chainId: world.chain.chainId })
+  assert.equal(result.results[0].launched, true, 'F001 passes, so G1 opens')
+  assert.equal(result.results[1].waiting, true, 'a dependency that does not exist counts as unmet')
+  assert.deepEqual(result.results[1].waitsFor, ['F404'])
+})
+
+await checkAsync('launchWaitingGroups opens the group once its dependency passes, and checkpoint triggers it', async () => {
+  const { world } = await waitingWorld()
+  const chainId = world.chain.chainId
+  await world.engine.launchWaitingGroups(chainId)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 1, 'nothing opens while the dependency is open')
+  const original = world.engine.launchWaitingGroups.bind(world.engine)
+  const triggered = []
+  world.engine.launchWaitingGroups = id => { triggered.push(id); return Promise.resolve() }
+  passF002(world)
+  assert.deepEqual(triggered, [chainId], 'checkpoint must trigger the release')
+  world.engine.launchWaitingGroups = original
+  await world.engine.launchWaitingGroups(chainId)
+  const chain = world.local.readChain(chainId)
+  const late = chain.launchPlan.results.find(item => item.id === 'G1')
+  assert.equal(late.launched, true)
+  assert.equal(late.waiting, undefined)
+  assert.ok(world.agents.has(late.sessionId))
+  const owner = world.local.readFeatures(chainId).features.find(feature => feature.id === 'F004').assignedSessionId
+  assert.equal(owner, late.sessionId)
+  assert.equal(chain.sessions.find(session => session.sessionId === late.sessionId).parentSessionId, 'session-head')
+  assert.deepEqual(auditOf(world, 'cluster.group-launched')[0].detail, { id: 'G1', sessionId: late.sessionId })
+  const notice = headTexts(world).at(-1)
+  assert.match(notice, /<relay_cluster_group_opened>/)
+  assert.ok(notice.includes(late.sessionId) && notice.includes('F004'))
+  assert.equal(world.engine.status().find(item => item.chainId === chainId).launchWaiting, 0)
+  await world.engine.launchWaitingGroups(chainId)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 2, 'an opened group is not opened twice')
+  // A relay-mode checkpoint never reaches it.
+  const plain = fakeWorld()
+  let touched = false
+  plain.engine.launchWaitingGroups = () => { touched = true; return Promise.resolve() }
+  plain.engine.checkpoint({ agent: plain.oldAgent, note: 'x' })
+  assert.equal(touched, false)
+})
+
+await checkAsync('evaluate also releases waiting groups for the chain head', async () => {
+  const { world } = await waitingWorld()
+  world.local.patchFeatures(world.chain.chainId, [{ id: 'F002', passes: true, evidence: 'node two.mjs -> exit 0, 3/3 passed' }])
+  const opened = []
+  const original = world.engine.launchWaitingGroups.bind(world.engine)
+  world.engine.launchWaitingGroups = id => { opened.push(id); return original(id) }
+  await world.engine.evaluate(world.head)
+  assert.deepEqual(opened, [world.chain.chainId])
+})
+
+await checkAsync('a waiting group whose open fails becomes a plain failure and is not retried', async () => {
+  const { world } = await waitingWorld({ failCreate: [2] })
+  const chainId = world.chain.chainId
+  world.local.patchFeatures(chainId, [{ id: 'F002', passes: true, evidence: 'node two.mjs -> exit 0, 3/3 passed' }])
+  await world.engine.launchWaitingGroups(chainId)
+  const chain = world.local.readChain(chainId)
+  assert.deepEqual(chain.launchPlan.results.find(item => item.id === 'G1'), { id: 'G1', launched: false, reason: 'spawn failed: create 2 refused' })
+  assert.match(chain.lastError, /cluster groups not launched: G1/)
+  assert.match(auditOf(world, 'cluster.group-failed')[0].detail.error, /create 2 refused/)
+  assert.equal(world.engine.busyChains.has(chainId), false)
+  await world.engine.launchWaitingGroups(chainId)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 2, 'no retry')
+})
+
+await checkAsync('launchWaitingGroups does nothing for relay chains, paused chains, a busy chain, or an unloaded head', async () => {
+  const relay = fakeWorld()
+  await relay.engine.launchWaitingGroups(relay.chain.chainId)
+  assert.equal(relay.calls.filter(call => call.kind === 'create').length, 0)
+  await relay.engine.launchWaitingGroups('chain-00000000-0000-4000-8000-000000000000')
+
+  const { world } = await waitingWorld()
+  const chainId = world.chain.chainId
+  world.local.patchFeatures(chainId, [{ id: 'F002', passes: true, evidence: 'node two.mjs -> exit 0, 3/3 passed' }])
+  const creates = () => world.calls.filter(call => call.kind === 'create').length
+  world.engine.setPaused({ chainId, paused: true })
+  await world.engine.launchWaitingGroups(chainId)
+  assert.equal(creates(), 1, 'a paused chain opens nothing')
+  world.local.update(chainId, record => { record.status = 'active' })
+  world.engine.busyChains.add(chainId)
+  await world.engine.launchWaitingGroups(chainId)
+  assert.equal(creates(), 1, 'a busy chain opens nothing')
+  world.engine.busyChains.delete(chainId)
+  world.agents.delete('session-head')
+  await world.engine.launchWaitingGroups(chainId)
+  assert.equal(creates(), 1, 'an unloaded head opens nothing')
+  world.agents.set('session-head', world.head)
+  await world.engine.launchWaitingGroups(chainId)
+  assert.equal(creates(), 2)
+})
+
+await checkAsync('handoffNow refuses a planning chain, from the engine and from /relay handoff', async () => {
+  const world = clusterWorld()
+  await assert.rejects(() => world.engine.handoffNow({ chainId: world.chain.chainId }), refusal(/is planning; there is no work to hand off yet/))
+  const result = await handleRelayCommand(world.engine, commandInvocation(world.head, 'handoff'))
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /there is no work to hand off yet/)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0)
 })
 
 rmSync(workspace, { recursive: true, force: true })

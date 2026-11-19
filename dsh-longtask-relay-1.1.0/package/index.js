@@ -79,7 +79,7 @@ export function apply(ctx, config) {
       const dispose = scope.commands.register({
         name: 'relay',
         description: 'Start or inspect a long-task relay chain',
-        input: { hint: '[start <objective> | status | pause | resume | handoff]' },
+        input: { hint: '[start <objective> | cluster <objective> | launch | status | pause | resume | handoff]' },
         handler: invocation => handleRelayCommand(engine, invocation),
       })
       return () => dispose()
