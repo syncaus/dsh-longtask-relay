@@ -416,6 +416,11 @@ function withPresets(world, initial) {
     ? {
       current: session => current.get(session.id) ?? 'workspace-write',
       set: (session, preset) => { current.set(session.id, preset); switches.push({ sessionId: session.id, preset }) },
+      resolve: name => ({
+        'workspace-write': { sandbox: 'workspace-write', approval: 'ask' },
+        'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' },
+        'read-only': { sandbox: 'read-only', approval: 'ask' },
+      })[name],
     }
     : original(name))
   return { current, switches }
@@ -1841,7 +1846,7 @@ check('a nested truthDir still resolves the workspace cwd', () => {
 
 check('package metadata exposes the test script and version', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(pkg.version, '1.3.0')
+  assert.equal(pkg.version, '1.3.1')
   assert.match(pkg.scripts.test, /node test\/smoke\.mjs/)
 })
 
@@ -2093,8 +2098,173 @@ await checkAsync('a goal is not re-armed while a handoff of its chain is in flig
   world.engine.rearmGoal(chain, world.local, world.oldAgent, chain.sessions[0])
   assert.equal(goals.ops('resume').length, 0, 'the goal was re-armed in the middle of a handoff')
   world.engine.busyChains.delete(chain.chainId)
+  // A reload is what forgets that this session was already checked.
+  world.engine.stats.delete('session-old')
   world.engine.rearmGoal(chain, world.local, world.oldAgent, chain.sessions[0])
   assert.equal(goals.ops('resume').length, 1)
+})
+
+await checkAsync('a goal the user disarmed after the handoff is not re-armed on a later idle', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  await handOffOnce(world)
+  assert.equal(goals.views.get('session-new').activation, 'armed')
+  goals.views.get('session-new').activation = 'disarmed'
+  world.setRatio(0.3)
+  await world.engine.evaluate(world.newAgent)
+  assert.equal(goals.views.get('session-new').activation, 'disarmed', 'a goal disarmed on purpose was re-armed')
+  assert.equal(auditOf(world, 'goal.rearmed').length, 0)
+})
+
+/** Hand the chain head off a second time, to a third session. */
+async function handOffAgain(world) {
+  const third = {
+    id: 'session-third',
+    session: { id: 'session-third', header: world.newAgent.session.header, events: [] },
+    status: 'idle',
+    inbox: { nextTurn: [], nextStep: [] },
+    followup() {},
+    inject() {},
+  }
+  world.engine.ctx.get('sessionController').create = async () => ({ sessionId: 'session-third' })
+  const agents = world.engine.ctx.get('agents')
+  const original = agents.get
+  agents.get = id => (id === 'session-third' ? third : original(id))
+  world.setRatio(0.7)
+  await world.engine.evaluate(world.newAgent)
+  world.engine.statsFor('session-new').ready = true
+  await world.engine.evaluate(world.newAgent)
+  return third
+}
+
+await checkAsync('a goal the plugin seeded is not inherited; each handoff seeds a fresh one', async () => {
+  const world = fakeWorld({ seedGoalOnHandoff: true, inheritGoal: true })
+  const goals = withGoals(world, { 'session-old': goalView({ phase: 'complete' }) })
+  await handOffOnce(world)
+  assert.equal(auditOf(world, 'goal.seeded').length, 1)
+  goals.views.get('session-new').roundsStarted = 5
+  await handOffAgain(world)
+  assert.equal(world.local.readChain(world.chain.chainId).currentSessionId, 'session-third')
+  assert.equal(goals.views.get('session-third').maxGoalRounds, world.engine.config.goalRoundsPerHandoff)
+  assert.equal(auditOf(world, 'goal.seeded').length, 2)
+  assert.equal(auditOf(world, 'goal.inherited').length, 0, 'a seeded goal was inherited')
+})
+
+await checkAsync('a user goal with no rounds left is not replaced and the chain waits for a human', async () => {
+  const world = fakeWorld({ seedGoalOnHandoff: true })
+  const goals = withGoals(world, { 'session-old': goalView({ roundsStarted: 10 }) })
+  await handOffOnce(world)
+  assert.equal(goals.ops('create').length, 0)
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.blocker?.kind, 'external', 'nothing tells the human the goal ran out')
+  assert.match(chain.blocker.action, /ran out of rounds/)
+  assert.equal(chain.status, 'paused')
+  assert.equal(chain.pausedBy, 'blocker')
+})
+
+await checkAsync('a blocked user goal is not replaced by a seeded one', async () => {
+  const world = fakeWorld({ seedGoalOnHandoff: true, pauseOnExternalBlocker: false })
+  const goals = withGoals(world, { 'session-old': goalView({ phase: 'blocked' }) })
+  await handOffOnce(world)
+  assert.equal(world.local.readChain(world.chain.chainId).currentSessionId, 'session-new')
+  assert.equal(goals.ops('create').length, 0, 'a goal was created over a blocked user goal')
+})
+
+await checkAsync('a panel pause then a manual handoff still carries the user goal', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  const chainId = world.chain.chainId
+  world.engine.setPaused({ chainId, paused: true })
+  assert.equal(goals.views.get('session-old').phase, 'paused')
+  const result = await world.engine.handoffNow({ chainId })
+  assert.equal(result.newSessionId, 'session-new')
+  assert.deepEqual(goals.ops('create'), [{ op: 'create', agentId: 'session-new', objective: 'old objective', maxGoalRounds: 7 }])
+  assert.equal(world.local.readChain(chainId).goalPausedByRelay ?? null, null)
+  world.engine.dispose()
+})
+
+await checkAsync('the pause marker waits for the session when the head is not loaded', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  const chainId = world.chain.chainId
+  world.engine.setPaused({ chainId, paused: true })
+  const agents = world.engine.ctx.get('agents')
+  const original = agents.get
+  agents.get = () => undefined
+  world.engine.setPaused({ chainId, paused: false })
+  assert.deepEqual(world.local.readChain(chainId).goalPausedByRelay, { sessionId: 'session-old', goalId: 'goal-old' })
+  agents.get = original
+  world.setRatio(0.3)
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(goals.views.get('session-old').phase, 'active')
+  assert.equal(world.local.readChain(chainId).goalPausedByRelay, null)
+  assert.equal(auditOf(world, 'goal.resumed').length, 1)
+  world.engine.dispose()
+})
+
+await checkAsync('a handoff that fails without a wrap-up gives the goal rounds back', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  world.engine.ctx.get('sessionController').prompt = async () => { throw new Error('flush failed') }
+  await assert.rejects(() => world.engine.handoffNow({ chainId: world.chain.chainId }))
+  assert.equal(auditOf(world, 'goal.held').length, 1)
+  assert.equal(goals.views.get('session-old').activation, 'armed', 'the goal stayed disarmed after the failed handoff')
+  assert.deepEqual(auditOf(world, 'goal.released')[0].detail, { sessionId: 'session-old', goalId: 'goal-old', why: 'handoff-failed' })
+})
+
+await checkAsync('a handoff that fails after a wrap-up keeps the goal held', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  world.local.update(world.chain.chainId, record => { record.wrapupAt = new Date().toISOString() })
+  world.engine.ctx.get('sessionController').prompt = async () => { throw new Error('flush failed') }
+  await assert.rejects(() => world.engine.handoffNow({ chainId: world.chain.chainId }))
+  assert.equal(goals.views.get('session-old').activation, 'disarmed')
+  assert.equal(auditOf(world, 'goal.released').length, 0)
+})
+
+await checkAsync('a handoff that fails after the successor took over does not restart the retired session', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  world.engine.remember = () => { throw new Error('index write failed') }
+  await assert.rejects(() => world.engine.handoffNow({ chainId: world.chain.chainId }))
+  assert.equal(world.local.readChain(world.chain.chainId).currentSessionId, 'session-new')
+  assert.equal(goals.views.get('session-old').activation, 'disarmed', 'the retired session got its goal rounds back')
+  assert.equal(auditOf(world, 'goal.released').length, 0)
+})
+
+await checkAsync('with autoHandoff off a manual wrap-up still ends in its handoff', async () => {
+  const world = fakeWorld({ autoHandoff: false })
+  const chainId = world.chain.chainId
+  world.local.writeHandoff(chainId, '# HANDOFF\n\nnothing yet\n')
+  const refused = await world.engine.handoffNow({ chainId })
+  assert.equal(refused.code, 'handoff_not_ready')
+  assert.match(refused.message, /the handoff follows when it reports ready/)
+  world.local.writeHandoff(chainId, '# HANDOFF\n\n<!-- relay:state -->\n- step: F001 done\n<!-- /relay:state -->\n')
+  assert.notEqual(world.engine.checkpoint({ agent: world.oldAgent, ready: true }).ok, false)
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.local.readChain(chainId).handoffCount, 1, 'the wrap-up never reached its handoff')
+  world.engine.dispose()
+})
+
+await checkAsync('a custom session falls back to the recorded preset only for the plugin approval override', async () => {
+  const run = (recorded, overrides) => {
+    const world = fakeWorld(overrides)
+    const presets = withPresets(world, { 'session-old': 'custom' })
+    world.local.update(world.chain.chainId, record => {
+      record.sessions.find(session => session.sessionId === 'session-old').permissionPreset = recorded
+    })
+    const chain = world.local.readChain(world.chain.chainId)
+    const third = { id: 'session-third', session: { id: 'session-third' } }
+    return { carried: world.engine.inheritPermission(chain, world.local, world.oldAgent, third), presets }
+  }
+  const inherit = run('read-only', { workerApproval: 'inherit' })
+  assert.equal(inherit.carried, undefined, 'the user custom combination was undone under workerApproval=inherit')
+  assert.deepEqual(inherit.presets.switches, [])
+  const same = run('danger-full-access', { workerApproval: 'never' })
+  assert.equal(same.carried, undefined, 'the override changes nothing for this preset, so custom is the user choice')
+  assert.deepEqual(same.presets.switches, [])
+  const overridden = run('workspace-write', { workerApproval: 'never' })
+  assert.equal(overridden.carried, 'workspace-write')
 })
 
 await checkAsync('plan mode is carried to the successor on handoff', async () => {
