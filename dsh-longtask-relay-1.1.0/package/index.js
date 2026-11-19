@@ -41,8 +41,9 @@ export function apply(ctx, config) {
         engine.sessionLoaded(agent.id)
         const located = engine.locate(agent.session)
         // A session that is already idle emits no further idle event, so a goal
-        // left disarmed by a restart would never be looked at without this.
-        if (located?.chain.currentSessionId === agent.id) engine.scheduleEvaluate(agent.id, 2000)
+        // left disarmed by a restart would never be looked at without this. A loaded
+        // worker is idle too and would otherwise never be looked at.
+        if (located !== undefined) engine.scheduleEvaluate(agent.id, 2000)
         // A reload in the middle of a wrap-up re-attaches its deadline here.
         engine.scheduleWrapupDeadline(agent)
       } catch (error) {

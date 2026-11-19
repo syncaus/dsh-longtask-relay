@@ -99,7 +99,7 @@ relay_propose                AI 提交启动方案：分组、隔离方式、理
 
 `engine.launchCluster({ chainId, groups? })`，入口是面板按钮（Remote `launchCluster`）和 `/relay launch`。模型没有对应工具。
 
-- 链必须是 `planning` 且有 `launchPlan`。传了 `groups` 就是人改过的方案，按 `relay_propose` 的同一套规则再校验一遍。
+- 链必须是 `planning` 且有 `launchPlan`，并且没有未解除的阻塞。功能清单在状态转成 `active` 的同一步冻结。传了 `groups` 就是人改过的方案，按 `relay_propose` 的同一套规则再校验一遍。
 - `shared` 组：逐组开子会话，复用 `spawn` 的内部逻辑（抽出不要求调用者是模型的那部分）。子会话照旧继承权限预设；计划模式不继承（主会话此时已退出计划模式）。
 - 依赖没完成的组先不开（按推荐，实现审查时补）：组里的功能依赖了不在任何组里、且还没通过的功能时，这一组记为「待启动」。前置功能通过后（`relay_checkpoint` 或下一次空闲检查时）插件自动把它开出来，开的是你确认过的同一份方案，不再问一次。常见情形是主会话先做一个地基功能，其余各组等它。
 - `worktree` 组：第一期不开会话，功能留给主会话顺序做，结果里标明。
