@@ -88,6 +88,28 @@ window.__ModuleLoader__.load({
       acceptCoverage: '接受',
       revokeCoverage: '撤销接受',
       raiseHandoffLimit: '调高交接上限',
+      docSpec: '需求',
+      launchTitle: '启动方案',
+      launchPlanning: '主会话正在规划：谈需求、交计划、写 SPEC.md 和 PLAN.md。计划批准后它会提交启动方案，由你在这里确认。',
+      launchSessions: '个并行会话',
+      launchShared: '共用目录',
+      launchWorktree: 'worktree',
+      launchWorktreeNote: '本期不开会话，由主会话顺序执行',
+      launchKept: '留给主会话',
+      launchNewGroup: '新建一组',
+      launchByHuman: '人工调整',
+      launchGo: '启动',
+      launchConfirm: '确认启动',
+      launchNote: '会按上面的分组开出会话并开始执行',
+      launchOverlap: '可能互相覆盖',
+      launchUnknown: '没写文件范围',
+      attnLaunch: '等你确认启动',
+      launchWaitingTitle: '待启动的组',
+      launchWaitingSub: '前置功能通过后自动开会话',
+      launchWaitsFor: '等',
+      launchWaitsNote: '通过后才开会话',
+      pausePlanning: '规划中的链不能暂停；要取消就删除这条链',
+      handoffPlanning: '规划中的链还没有可交接的工作',
       paused_manual: '手动暂停',
       paused_blocker: '因阻塞暂停',
       paused_handoff_failed: '交接失败后暂停',
@@ -210,6 +232,7 @@ window.__ModuleLoader__.load({
       status_active: '进行中',
       status_paused: '已暂停',
       status_initializing: '初始化',
+      status_planning: '规划中',
       status_done: '已完成',
       status_failed: '失败',
       role_initializer: '初始化',
@@ -343,6 +366,28 @@ window.__ModuleLoader__.load({
       acceptCoverage: 'Accept',
       revokeCoverage: 'Revoke',
       raiseHandoffLimit: 'Raise handoff limit',
+      docSpec: 'Spec',
+      launchTitle: 'Launch plan',
+      launchPlanning: 'The main session is planning: requirements, the plan, SPEC.md and PLAN.md. Once the plan is approved it proposes a launch for you to confirm here.',
+      launchSessions: 'parallel sessions',
+      launchShared: 'Shared directory',
+      launchWorktree: 'worktree',
+      launchWorktreeNote: 'Not launched yet; the main session works these in order',
+      launchKept: 'Kept by the main session',
+      launchNewGroup: 'New group',
+      launchByHuman: 'Adjusted by a human',
+      launchGo: 'Launch',
+      launchConfirm: 'Confirm launch',
+      launchNote: 'Sessions are created for the groups above and start working',
+      launchOverlap: 'May overwrite each other',
+      launchUnknown: 'No file scope given',
+      attnLaunch: 'Waiting for you to launch',
+      launchWaitingTitle: 'Groups not opened yet',
+      launchWaitingSub: 'Opened automatically once their dependencies pass',
+      launchWaitsFor: 'waits for',
+      launchWaitsNote: 'to pass before its session opens',
+      pausePlanning: 'A planning chain cannot be paused; delete it to cancel',
+      handoffPlanning: 'A planning chain has no work to hand off yet',
       paused_manual: 'Paused by hand',
       paused_blocker: 'Paused by a blocker',
       paused_handoff_failed: 'Paused after a failed handoff',
@@ -465,6 +510,7 @@ window.__ModuleLoader__.load({
       status_active: 'Active',
       status_paused: 'Paused',
       status_initializing: 'Initializing',
+      status_planning: 'Planning',
       status_done: 'Done',
       status_failed: 'Failed',
       role_initializer: 'Initializer',
@@ -552,6 +598,7 @@ window.__ModuleLoader__.load({
      */
     const DOCS = [
       { id: 'handoff', label: 'handoff', inline: true },
+      { id: 'spec', label: 'docSpec', inline: false, cluster: true },
       { id: 'plan', label: 'docPlan', inline: false },
       { id: 'progress', label: 'docProgress', inline: false },
       { id: 'history', label: 'docHistory', inline: false },
@@ -593,6 +640,8 @@ window.__ModuleLoader__.load({
           { key: 'rearmGoalOnReload', label: '重启后恢复目标续行', kind: 'boolean', hint: 'DSH 重启或插件重载后，恢复本插件建的 goal 的自动续行；关掉后需要人在输入框里手动恢复（用户自己建的 goal 不受影响）' },
           { key: 'pauseGoalOnRetire', label: '退役时暂停旧目标', kind: 'boolean', hint: '交接后暂停旧会话的 goal' },
           { key: 'inheritPlanMode', label: '新会话继承计划模式', kind: 'boolean', hint: '旧会话处于计划模式时，接力会话和子会话也以计划模式启动；关掉后新会话退出计划模式' },
+          { key: 'maxClusterSessions', label: '集群最多分几组', kind: 'int', min: 1, hint: '集群模式一次启动最多开几个并行会话' },
+          { key: 'clusterGoals', label: '集群启动时建目标', kind: 'boolean', hint: '启动时给主会话和每个子会话各建一个 goal，子会话不会跑一轮就停' },
         ],
       },
       {
@@ -662,7 +711,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 
 .relay-status { display: inline-flex; align-items: center; flex: none; height: 18px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 999px; font-size: 11px; font-weight: 600; line-height: 16px; white-space: nowrap; color: var(--dsw-alias-label-secondary); }
 .relay-status.is-active, .relay-status.is-running { color: var(--dsw-alias-state-success-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 40%, var(--dsw-alias-border-l2)); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); }
-.relay-status.is-paused, .relay-status.is-initializing, .relay-status.is-warn { color: var(--dsw-alias-state-warn-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 40%, var(--dsw-alias-border-l2)); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); }
+.relay-status.is-paused, .relay-status.is-initializing, .relay-status.is-planning, .relay-status.is-warn { color: var(--dsw-alias-state-warn-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 40%, var(--dsw-alias-border-l2)); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); }
 .relay-status.is-failed { color: var(--dsw-alias-state-error-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 40%, var(--dsw-alias-border-l2)); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); }
 .relay-status.is-done { color: var(--dsw-alias-state-business-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 40%, var(--dsw-alias-border-l2)); background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent); }
 .relay-status.is-unloaded { border-style: dashed; color: var(--dsw-alias-label-tertiary); }
@@ -712,7 +761,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-row:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .relay-row.is-selected { border-color: var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2); }
 :is(.relay-row, .relay-detail, .relay-card).is-active { --relay-hue: var(--dsw-alias-state-success-primary); }
-:is(.relay-row, .relay-detail, .relay-card).is-paused, :is(.relay-row, .relay-detail, .relay-card).is-initializing { --relay-hue: var(--dsw-alias-state-warn-primary); }
+:is(.relay-row, .relay-detail, .relay-card).is-paused, :is(.relay-row, .relay-detail, .relay-card).is-initializing, :is(.relay-row, .relay-detail, .relay-card).is-planning { --relay-hue: var(--dsw-alias-state-warn-primary); }
 :is(.relay-row, .relay-detail, .relay-card).is-failed { --relay-hue: var(--dsw-alias-state-error-primary); }
 :is(.relay-row, .relay-detail, .relay-card).is-done { --relay-hue: var(--dsw-alias-state-business-primary); }
 .relay-row-head { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
@@ -877,6 +926,13 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-input { box-sizing: border-box; width: 100%; height: 26px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; }
 .relay-input:focus { border-color: var(--dsw-alias-label-secondary); }
 .relay-input.is-invalid { border-color: var(--dsw-alias-state-error-primary); }
+.relay-launch-group { padding: 8px 0; border-top: 1px solid var(--dsw-alias-border-l1); }
+.relay-launch-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.relay-launch-name { font-size: 12.5px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.relay-launch-feature { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; font-size: 12.5px; line-height: 18px; }
+.relay-launch-feature > span:nth-child(2) { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.relay-launch-feature .relay-input { flex: none; width: auto; max-width: 45%; height: 22px; padding: 0 4px; }
+.relay-launch-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 .relay-check-field { display: flex; justify-content: flex-end; }
 .relay-switch { position: relative; flex: none; width: 32px; height: 18px; margin: 0; border: 0; border-radius: 9px; background: var(--dsw-alias-border-l3); appearance: none; -webkit-appearance: none; cursor: pointer; transition: background-color var(--relay-ease); }
 .relay-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--dsw-alias-bg-layer-1); transition: transform var(--relay-ease); }
@@ -1646,7 +1702,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           return h('section', { className: 'relay-card' },
             h(CardTitle, {
               tools: h(Seg, {
-                options: DOCS.map(doc => ({ id: doc.id, label: t(doc.label) })),
+                options: DOCS.filter(doc => doc.cluster !== true || detail.mode === 'cluster').map(doc => ({ id: doc.id, label: t(doc.label) })),
                 value: hits === null ? name : null,
                 onChange: (next) => { setHits(null); setName(next) },
               }),
@@ -1801,6 +1857,169 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
         }
 
         /** Everything about the selected chain. */
+        /**
+         * Overlaps between shared groups, by the rule the Host applies at launch.
+         * Recomputed here so the warnings follow the human's regrouping.
+         */
+        const launchConflicts = (groups, features) => {
+          const byId = new Map(features.map(feature => [feature.id, feature]))
+          const scope = id => (Array.isArray(byId.get(id)?.files) ? byId.get(id).files : []).map(path => String(path).replace(/\\/g, '/').replace(/\/+$/, ''))
+          const hits = (a, b) => a === b || b.startsWith(`${a}/`) || a.startsWith(`${b}/`)
+          const shared = groups.filter(group => group.isolation === 'shared')
+          const found = []
+          for (const group of shared) {
+            for (const id of group.features) {
+              if (scope(id).length === 0) found.push({ key: `unknown:${id}`, kind: 'launchUnknown', text: id })
+            }
+          }
+          for (let a = 0; a < shared.length; a += 1) {
+            for (let b = a + 1; b < shared.length; b += 1) {
+              for (const left of shared[a].features) {
+                for (const right of shared[b].features) {
+                  const other = scope(right)
+                  const path = scope(left).find(mine => other.some(theirs => hits(mine, theirs)))
+                  if (path !== undefined) found.push({ key: `overlap:${left}:${right}`, kind: 'launchOverlap', text: `${left} / ${right}: ${path}` })
+                }
+              }
+            }
+          }
+          return found
+        }
+
+        /**
+         * The launch proposal of a planning cluster chain.
+         * The model only proposes; this card is where a human regroups the
+         * features, picks the isolation, and starts the sessions.
+         */
+        function LaunchCard({ chain, detail, onAct, busy }) {
+          const plan = detail.launchPlan ?? null
+          const features = Array.isArray(detail.features) ? detail.features : []
+          const proposed = Array.isArray(plan?.groups) ? plan.groups : []
+          const [groups, setGroups] = useState(proposed)
+          // A new proposal replaces whatever was regrouped locally.
+          useEffect(() => { setGroups(proposed) }, [plan?.proposedAt])
+          if (proposed.length === 0) {
+            return h('section', { className: 'relay-card' },
+              h(CardTitle, { icon: true }, t('launchTitle')),
+              h('div', { className: 'relay-text' }, t('launchPlanning')),
+            )
+          }
+          const limit = detail.maxClusterSessions ?? 4
+          const titleOf = id => features.find(feature => feature.id === id)?.title ?? ''
+          const grouped = new Set(groups.flatMap(group => group.features))
+          const kept = features.filter(feature => !feature.passes && !grouped.has(feature.id)
+            && (feature.assignedSessionId === null || feature.assignedSessionId === undefined))
+          const move = (featureId, target) => setGroups((current) => {
+            const next = current.map(group => ({ ...group, features: group.features.filter(id => id !== featureId) }))
+            if (target === 'new') {
+              next.push({ id: `new-${featureId}`, title: titleOf(featureId) || featureId, features: [featureId], isolation: 'shared', reason: t('launchByHuman') })
+            } else if (target !== 'keep') {
+              const group = next.find(candidate => candidate.id === target)
+              if (group !== undefined) group.features = [...group.features, featureId]
+            }
+            return next.filter(group => group.features.length > 0)
+          })
+          const isolate = (groupId, isolation) => setGroups(current => current.map(group => (group.id === groupId ? { ...group, isolation } : group)))
+          const sharedCount = groups.filter(group => group.isolation === 'shared').length
+          // A group that depends on unfinished work outside itself opens later, by the Host's rule.
+          const waitsFor = (group) => {
+            const own = new Set(group.features)
+            const unmet = new Set()
+            for (const id of group.features) {
+              const feature = features.find(candidate => candidate.id === id)
+              for (const dependency of (Array.isArray(feature?.dependsOn) ? feature.dependsOn : [])) {
+                if (!own.has(dependency) && features.find(candidate => candidate.id === dependency)?.passes !== true) unmet.add(dependency)
+              }
+            }
+            return [...unmet]
+          }
+          const conflicts = launchConflicts(groups, features)
+          const picker = (featureId, value) => h('select', {
+            className: 'relay-input',
+            value,
+            disabled: busy,
+            onChange: event => move(featureId, event.target.value),
+          },
+            groups.map(group => h('option', { key: group.id, value: group.id }, group.title)),
+            h('option', { value: 'keep' }, t('launchKept')),
+            groups.length < limit ? h('option', { value: 'new' }, t('launchNewGroup')) : null,
+          )
+          const featureLine = (featureId, value) => h('div', { key: featureId, className: 'relay-launch-feature' },
+            h('span', { className: 'relay-mono' }, featureId),
+            h('span', {}, titleOf(featureId)),
+            picker(featureId, value),
+          )
+          return h('section', { className: 'relay-card' },
+            h(CardTitle, { icon: true, sub: `${sharedCount} ${t('launchSessions')}` }, t('launchTitle')),
+            typeof plan.note === 'string' && plan.note.length > 0 ? h('p', { className: 'relay-text' }, plan.note) : null,
+            conflicts.map(conflict => h('div', { key: conflict.key, className: 'relay-blocker is-code' },
+              h('span', { className: 'relay-blocker-kind' }, t(conflict.kind)),
+              h('span', { className: 'relay-blocker-text' }, conflict.text),
+            )),
+            groups.map(group => h('div', { key: group.id, className: 'relay-launch-group' },
+              h('div', { className: 'relay-launch-head' },
+                h('span', { className: 'relay-launch-name' }, group.title),
+                h(Seg, {
+                  options: [{ id: 'shared', label: t('launchShared') }, { id: 'worktree', label: t('launchWorktree') }],
+                  value: group.isolation,
+                  onChange: next => isolate(group.id, next),
+                }),
+                group.isolation === 'worktree' ? h('span', { className: 'relay-tag' }, t('launchWorktreeNote')) : null,
+                group.isolation === 'shared' && waitsFor(group).length > 0
+                  ? h('span', { className: 'relay-chip' }, `${t('launchWaitsFor')} ${waitsFor(group).join(', ')} ${t('launchWaitsNote')}`)
+                  : null,
+              ),
+              typeof group.reason === 'string' && group.reason.length > 0 ? h('div', { className: 'relay-text' }, group.reason) : null,
+              group.features.map(featureId => featureLine(featureId, group.id)),
+            )),
+            kept.length === 0
+              ? null
+              : h('div', { className: 'relay-launch-group' },
+                h('div', { className: 'relay-launch-head' }, h('span', { className: 'relay-launch-name' }, t('launchKept'))),
+                kept.map(feature => featureLine(feature.id, 'keep')),
+              ),
+            h('div', { className: 'relay-launch-foot' },
+              h(ConfirmButton, {
+                primary: true,
+                disabled: busy || groups.length === 0,
+                confirmLabel: t('launchConfirm'),
+                note: t('launchNote'),
+                onConfirm: () => {
+                  void onAct('relay/launchCluster', {
+                    chainId: chain.chainId,
+                    groups: groups.map(group => ({ title: group.title, features: group.features, isolation: group.isolation, reason: group.reason })),
+                  })
+                },
+              }, t('launchGo')),
+            ),
+          )
+        }
+
+        /**
+         * Groups of a launched cluster that still wait for a dependency.
+         * Without this they would vanish from the panel between the launch
+         * and the moment the Host opens their session.
+         */
+        function WaitingGroupsCard({ detail }) {
+          const plan = detail.launchPlan ?? null
+          const results = Array.isArray(plan?.results) ? plan.results.filter(result => result.waiting === true) : []
+          if (results.length === 0) return null
+          const groups = Array.isArray(plan.groups) ? plan.groups : []
+          return h('section', { className: 'relay-card' },
+            h(CardTitle, { icon: true, sub: t('launchWaitingSub') }, t('launchWaitingTitle')),
+            results.map((result) => {
+              const group = groups.find(candidate => candidate.id === result.id)
+              return h('div', { key: result.id, className: 'relay-launch-group' },
+                h('div', { className: 'relay-launch-head' },
+                  h('span', { className: 'relay-launch-name' }, group?.title ?? result.id),
+                  h('span', { className: 'relay-chip' }, `${t('launchWaitsFor')} ${(result.waitsFor ?? []).join(', ')}`),
+                  h('span', { className: 'relay-tag' }, (group?.features ?? []).join(', ')),
+                ),
+              )
+            }),
+          )
+        }
+
         function ChainDetail({ detail, onAct, busy, waiting }) {
           const [section, setSection] = useState('features')
           const chain = detail.chain ?? {}
@@ -1817,6 +2036,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const pressure = live ? (current.pressureRatio ?? 0) : null
           const isPaused = chain.status === 'paused'
           const isDone = chain.status === 'done'
+          const isPlanning = chain.status === 'planning'
           const deletable = chain.status !== 'active' && chain.status !== 'initializing'
           const blocker = chain.blocker ?? null
           const phase = phaseOf(chain)
@@ -1833,7 +2053,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           if ((chain.coveragePartial ?? 0) > 0) {
             metas.push({ label: t('partialCoverage'), value: `${chain.coveragePartial}`, tone: 'warn' })
           }
-          const handoffBlocked = isDone ? t('handoffDone') : (current === null || !live ? t('handoffUnloaded') : undefined)
+          const handoffBlocked = isDone ? t('handoffDone') : isPlanning ? t('handoffPlanning') : (current === null || !live ? t('handoffUnloaded') : undefined)
           const sections = [
             { id: 'features', label: t('features'), count: `${done}/${total}` },
             { id: 'docs', label: t('docs') },
@@ -1858,8 +2078,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                   h('button', {
                     type: 'button',
                     className: 'relay-btn',
-                    disabled: busy || isDone,
-                    title: isDone ? t('pauseDone') : undefined,
+                    disabled: busy || isDone || isPlanning,
+                    title: isDone ? t('pauseDone') : isPlanning ? t('pausePlanning') : undefined,
                     onClick: () => { void onAct('relay/setPaused', { chainId: chain.chainId, paused: !isPaused }) },
                   }, isPaused ? t('resume') : t('pause')),
                   h(ConfirmButton, {
@@ -1955,6 +2175,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 ),
               ),
             ),
+            isPlanning ? h(LaunchCard, { chain, detail, onAct, busy }) : h(WaitingGroupsCard, { detail }),
             h('section', { className: 'relay-card' },
               h(CardTitle, { icon: true, sub: `${chain.handoffCount ?? 0}/${handoffCap} ${t('statHandoffs')}` }, t('track')),
               sessions.length === 0
@@ -2565,7 +2786,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           }, [refresh])
 
           const sessionsOf = chain => (Array.isArray(chain.sessionsDetail) ? chain.sessionsDetail : [])
-          const isActive = chain => chain.status === 'active' || chain.status === 'initializing'
+          const isActive = chain => chain.status === 'active' || chain.status === 'initializing' || chain.status === 'planning'
           const active = chains.filter(isActive).length
           const paused = chains.filter(chain => chain.status === 'paused' || chain.status === 'failed').length
           const doneChains = chains.filter(chain => chain.status === 'done').length
@@ -2594,6 +2815,16 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             })
           }
           for (const chain of chains) {
+            if (chain.launchPending === true) {
+              attention.push({
+                key: `launch:${chain.chainId}`,
+                tone: 'warn',
+                kind: t('attnLaunch'),
+                text: chain.objective ?? '',
+                meta: chain.title ?? '',
+                action: { label: t('viewChain'), run: () => focusChain(chain.chainId) },
+              })
+            }
             if (chain.blocker !== null && chain.blocker !== undefined) {
               attention.push({
                 key: `blocker:${chain.chainId}`,
