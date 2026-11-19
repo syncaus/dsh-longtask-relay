@@ -30,6 +30,15 @@ window.__ModuleLoader__.load({
     const STRINGS = {
       panel: '长任务接力',
       refresh: '刷新',
+      updateNow: '更新到 v{version}',
+      updating: '更新中…',
+      updateDone: '已更新，正在重载…',
+      updateManual: '已更新，请到插件页重载一次',
+      updateDirty: '工作区有未提交改动，先提交再更新',
+      updateFailed: '更新失败',
+      updateHint: '从 git 上游拉取最新提交',
+      updateBanner: '插件有新版本 v{latest}（当前 v{current}），更新后会自动重载',
+      checkingUpdate: '检查更新…',
       openPluginPage: '插件设置',
       emptyTitle: '还没有接力任务',
       emptyBody: '长任务跑久了上下文会满。开一条链后，接近上限时先让当前会话收尾，再开一个干净的会话接手。',
@@ -59,6 +68,7 @@ window.__ModuleLoader__.load({
       statRunning: '运行中',
       chains: '任务链',
       filterAll: '全部',
+      acceptAllPartial: '接受全部 {count} 条部分验证',
       filterPending: '未完成',
       filterEmpty: '这个筛选下没有内容',
       loading: '加载中…',
@@ -321,6 +331,15 @@ window.__ModuleLoader__.load({
     const STRINGS_EN = {
       panel: 'Long-task relay',
       refresh: 'Refresh',
+      updateNow: 'Update to v{version}',
+      updating: 'Updating…',
+      updateDone: 'Updated; reloading…',
+      updateManual: 'Updated; reload the plugin from its page once',
+      updateDirty: 'The working tree has uncommitted changes; commit them first',
+      updateFailed: 'Update failed',
+      updateHint: 'Pull the newest commits from the git upstream',
+      updateBanner: 'A newer plugin build is available: v{latest} (current v{current}); updating reloads it',
+      checkingUpdate: 'Checking for updates…',
       openPluginPage: 'Plugin settings',
       emptyTitle: 'No relay chain yet',
       emptyBody: 'Long tasks fill their context window. Start a chain and the plugin closes the current session at the limit, then opens a clean one.',
@@ -350,6 +369,7 @@ window.__ModuleLoader__.load({
       statRunning: 'running',
       chains: 'Chains',
       filterAll: 'All',
+      acceptAllPartial: 'Accept all {count} partial',
       filterPending: 'Pending',
       filterEmpty: 'Nothing matches this filter',
       loading: 'Loading…',
@@ -699,6 +719,10 @@ window.__ModuleLoader__.load({
 .relay-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; padding-top: 16px; margin-bottom: 12px; }
 .relay-title { flex: 1; min-width: 0; margin: 0; font-size: 20px; font-weight: 500; line-height: 28px; white-space: nowrap; }
 .relay-head-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.relay-version { color: var(--dsw-alias-label-tertiary); font-size: 12px; white-space: nowrap; }
+.relay-card.is-update { border-color: var(--relay-tone); }
+.relay-update { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.relay-update-text { flex: 1; min-width: 0; }
 
 .relay-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
 .relay-kpi { display: flex; flex-direction: column; gap: 1px; min-width: 0; padding: 9px 12px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; }
@@ -1038,6 +1062,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
             return result.value
           })
+
+        /** The npm package name this bundle is installed under, for detail slots. */
+        const PACKAGE_NAME = '@local/longtask-relay'
 
         /** Message of a caught failure. */
         const messageOf = failure => (failure instanceof Error ? failure.message : String(failure))
@@ -1629,17 +1656,39 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
         }
 
         /** The chain's feature list with a pass-state filter. */
-        function FeatureCard({ features, onAccept, planMode = false }) {
+        function FeatureCard({ chainId, features, onAccept, onAcceptAll, planMode = false }) {
           const [filter, setFilter] = useState('all')
           const done = features.filter(feature => feature.passes).length
-          const shown = features.filter(feature => (filter === 'all' ? true : filter === 'done' ? feature.passes : !feature.passes))
+          const partial = features.filter(feature => feature.passes
+            && typeof feature.coverage === 'string' && feature.coverage !== 'full'
+            && feature.acceptedBy !== 'human')
+          const shown = features.filter(feature => {
+            if (filter === 'pending') return !feature.passes
+            if (filter === 'done') return feature.passes
+            if (filter === 'partial') return partial.includes(feature)
+            return true
+          })
           const options = [
             { id: 'all', label: t('filterAll'), count: features.length },
             { id: 'pending', label: t('filterPending'), count: features.length - done },
+            { id: 'partial', label: t('partialCoverage'), count: partial.length },
             { id: 'done', label: t('statPassed'), count: done },
           ]
+          const acceptAll = onAcceptAll !== undefined && partial.length > 0
+            ? h('button', {
+              type: 'button',
+              className: 'relay-btn is-small',
+              onClick: () => onAcceptAll(partial.map(feature => feature.id)),
+            }, t('acceptAllPartial').replace('{count}', String(partial.length)))
+            : null
           return h('section', { className: 'relay-card' },
-            h(CardTitle, { tools: features.length === 0 ? null : h(Seg, { options, value: filter, onChange: setFilter }) }, t('features')),
+            h(CardTitle, {
+              tools: features.length === 0
+                ? null
+                : h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+                  acceptAll,
+                  h(Seg, { options, value: filter, onChange: setFilter })),
+            }, t('features')),
             features.length === 0
               ? h('div', { className: 'relay-text' }, planMode ? t('planModeNote') : t('noFeatures'))
               : shown.length === 0
@@ -2237,10 +2286,14 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             h('div', { style: { marginBottom: '8px' } }, h(Seg, { options: sections, value: section, onChange: setSection })),
             section === 'features'
               ? h(FeatureCard, {
+                chainId: chain.chainId,
                 features,
                 planMode: head.planMode === true,
                 onAccept: (target, accepted) => {
                   void onAct('relay/acceptCoverage', { chainId: chain.chainId, featureId: target.id, accepted })
+                },
+                onAcceptAll: (featureIds) => {
+                  void onAct('relay/acceptCoverageMany', { chainId: chain.chainId, featureIds })
                 },
               })
               : null,
@@ -2586,6 +2639,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const [status, setStatus] = useState(null)
           const [loading, setLoading] = useState(() => configCache.value === null)
           const [busy, setBusy] = useState(false)
+          const { update, busy: updateBusy, note: updateNote, run: runUpdate } = usePluginUpdate()
 
           const load = useCallback(async () => {
             try {
@@ -2720,6 +2774,23 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             h('style', { 'data-plugin': 'longtask-relay' }, CSS),
             h('div', { className: 'relay-config-title' }, t('configTitle')),
             h('div', { className: 'relay-config-note' }, t('configNote')),
+            update === null
+              ? h('div', { className: 'relay-config-status' }, t('checkingUpdate'))
+              : update.available
+                ? h('div', { className: 'relay-update' },
+                  h('span', { className: 'relay-update-text' },
+                    t('updateBanner')
+                      .replace('{current}', update.currentVersion ?? '?')
+                      .replace('{latest}', update.latestVersion ?? '?')),
+                  updateNote === null ? null : h('span', { className: 'relay-version' }, updateNote),
+                  h('button', {
+                    type: 'button',
+                    className: 'relay-btn is-primary',
+                    disabled: updateBusy,
+                    onClick: () => { void runUpdate() },
+                  }, updateBusy ? t('updating') : t('updateNow').replace('{version}', update.latestVersion ?? '')),
+                )
+                : h('div', { className: 'relay-config-status' }, `v${update.currentVersion ?? '?'}`),
             body,
           )
         }
@@ -2729,6 +2800,88 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
          * `chains === null` means nothing has loaded yet.
          */
         const panelCache = { chains: null, detail: null, selectedId: null }
+
+        /**
+         * Shared plugin self-update state: checks once per mount, then applies a
+         * fast-forward and toggles the profile entry so the Host reloads it.
+         * @param {boolean} [enabled] - false skips the git check entirely, so a
+         *   detail action mounted on other plugins' pages does not fetch.
+         */
+        function usePluginUpdate(enabled = true) {
+          const [update, setUpdate] = useState(null)
+          const [busy, setBusy] = useState(false)
+          const [note, setNote] = useState(null)
+          useEffect(() => {
+            if (!enabled) return undefined
+            let live = true
+            call('relay/checkUpdate')
+              .then((value) => { if (live) setUpdate(value) })
+              .catch(() => { /* an update check never breaks the panel */ })
+            return () => { live = false }
+          }, [enabled])
+          const run = useCallback(async () => {
+            setBusy(true)
+            setNote(null)
+            try {
+              const result = await call('relay/applyUpdate')
+              if (result?.ok !== true) {
+                setNote(result?.reason === 'dirty' ? t('updateDirty') : t('updateFailed'))
+                return
+              }
+              setNote(t('updateDone'))
+              const entryId = result.entryId
+              if (typeof entryId !== 'string') {
+                setNote(t('updateManual'))
+                return
+              }
+              // Toggle the profile entry so the Host loads the pulled code.
+              try {
+                await call('pluginManager/setPluginEnabled', { entryId, enabled: false })
+                await new Promise(resolve => setTimeout(resolve, 400))
+                await call('pluginManager/setPluginEnabled', { entryId, enabled: true })
+                window.location.reload()
+              } catch {
+                setNote(t('updateManual'))
+              }
+            } catch {
+              setNote(t('updateFailed'))
+            } finally {
+              setBusy(false)
+            }
+          }, [])
+          return { update, busy, note, run }
+        }
+
+        /**
+         * `plugins.detail.actions` entry: the update control at the head of this
+         * bundle's detail page, beside the page's own switch and uninstall.
+         * The page renders this list for every detail page, so a subject that is
+         * not this bundle returns null before the git check even starts.
+         */
+        function UpdateAction({ subject }) {
+          const mine = subject?.kind === 'bundle' && subject.pkg?.name === PACKAGE_NAME
+          const { update, busy, note, run } = usePluginUpdate(mine)
+          if (!mine || update === null || !update.available) return null
+          return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
+            note === null
+              ? null
+              : h('span', { style: { color: 'var(--dsw-alias-label-tertiary, inherit)', fontSize: '12px' } }, note),
+            h('button', {
+              type: 'button',
+              disabled: busy,
+              style: {
+                padding: '3px 10px',
+                borderRadius: '6px',
+                border: '1px solid var(--dsw-alias-border-l2, #555)',
+                background: 'var(--dsw-alias-bg-elevated, transparent)',
+                color: 'var(--dsw-alias-label-primary, inherit)',
+                fontSize: '12px',
+                cursor: busy ? 'default' : 'pointer',
+              },
+              onClick: () => { void run() },
+            }, busy ? t('updating') : t('updateNow').replace('{version}', update.latestVersion ?? '')),
+          )
+        }
 
         /** The panel: every chain on the left, one chain in full on the right. */
         function RelayPage() {
@@ -2744,6 +2897,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const selectedRef = useRef(focus.chainId ?? panelCache.selectedId)
           const splitRef = useRef(null)
           const decisions = usePendingDecisions()
+          const { update, busy: updateBusy, note: updateNote, run: runUpdate } = usePluginUpdate()
 
           const refresh = useCallback(async () => {
             try {
@@ -2923,10 +3077,35 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 h('div', { className: 'relay-head' },
                   h('h2', { className: 'relay-title' }, t('panel')),
                   h('div', { className: 'relay-head-actions' },
+                    updateNote !== null
+                      ? h('span', { className: 'relay-version' }, updateNote)
+                      : update === null
+                        ? h('span', { className: 'relay-version' }, t('checkingUpdate'))
+                        : h('span', { className: 'relay-version' }, `v${update.currentVersion ?? '?'}`),
                     h('button', { type: 'button', className: 'relay-btn', onClick: openPluginPage }, t('openPluginPage')),
                     h('button', { type: 'button', className: 'relay-btn', onClick: () => { void refresh() } }, t('refresh')),
                   ),
                 ),
+                update !== null && update.available
+                  ? h('section', { className: 'relay-card is-update' },
+                    h('div', { className: 'relay-update' },
+                      h('span', { className: 'relay-update-text' },
+                        t('updateBanner')
+                          .replace('{current}', update.currentVersion ?? '?')
+                          .replace('{latest}', update.latestVersion ?? '?')),
+                      updateNote === null
+                        ? null
+                        : h('span', { className: 'relay-version' }, updateNote),
+                      h('button', {
+                        type: 'button',
+                        className: 'relay-btn is-primary',
+                        disabled: updateBusy,
+                        title: t('updateHint'),
+                        onClick: () => { void runUpdate() },
+                      }, updateBusy ? t('updating') : t('updateNow').replace('{version}', update.latestVersion ?? '')),
+                    ),
+                  )
+                  : null,
                 chains.length === 0 ? null : h(Kpis, { items: kpis }),
                 error === null ? null : h('div', { className: 'relay-error' }, `${t('failed')}: ${error}`),
                 actionError === null ? null : h('div', { className: 'relay-error', role: 'alert' },
@@ -2995,6 +3174,15 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           name: 'plugins.bundle.config',
           key: '@local/longtask-relay',
         }, PluginConfigCard))
+
+        // A `link:` bundle has no registry spec, so the page's own update
+        // control never appears for it; this puts the update button at the head
+        // of its detail page instead, beside the switch and uninstall.
+        ctx.slots.inject('plugins.detail.actions', () => ctx.slots.register({
+          name: 'plugins.detail.actions',
+          id: 'relay-update',
+          locale: 'relay',
+        }, UpdateAction))
 
         // Session tabs: what this session delegated, and what it was given.
         // Registration order is the tab order, so children come before tasks.
