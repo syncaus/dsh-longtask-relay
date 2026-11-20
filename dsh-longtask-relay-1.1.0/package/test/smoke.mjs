@@ -1878,6 +1878,39 @@ check('two chains in one workspace report the paths they share', () => {
   assert.equal(after[0].chainId, other.chainId)
 })
 
+// A session that hands a long command to a background job ends its turn: the
+// agent is idle while the job keeps working, so `idle` alone reads as "stopped".
+check('a head that ended its turn with a live background job is not idle', () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  const summary = () => world.engine.status().find(item => item.chainId === chainId)
+  const running = { id: 'pwsh-1', kind: 'pwsh', label: 'full rig', status: 'running', startedAt: Date.now() }
+  const jobs = {
+    list: caller => (caller === 'session-old'
+      ? [running, { id: 'pwsh-0', kind: 'pwsh', label: 'previous', status: 'completed', startedAt: Date.now() - 1000 }]
+      // An unowned job is listed for every caller; it must still count once.
+      : [{ id: 'pwsh-9', kind: 'pwsh', label: 'unowned tool', status: 'running', startedAt: Date.now() }]),
+  }
+  const original = world.engine.ctx.get
+  world.engine.ctx.get = name => (name === 'jobs' ? jobs : original(name))
+  // A job may outlive the session that started it, so every session of the chain counts.
+  world.local.update(chainId, record => {
+    record.sessions.push({ sessionId: 'session-worker', role: 'worker', index: 1, joinedAt: new Date().toISOString(), parentSessionId: null })
+  })
+  const reported = summary()
+  assert.deepEqual(reported.jobs, { running: 2, labels: ['full rig', 'unowned tool'] }, 'live jobs must be reported once each, with their labels')
+  assert.equal(world.engine.detail(chainId).chain.jobs.running, 2, 'detail must carry the jobs')
+  assert.equal(world.engine.sessionView('session-old').chain.jobs.running, 2, 'the session view must carry the jobs')
+  // A settled record stays listed by the registry, but it is not work in flight.
+  world.local.update(chainId, () => {})
+  jobs.list = () => [{ id: 'pwsh-1', kind: 'pwsh', label: 'full rig', status: 'completed', startedAt: Date.now() }]
+  assert.equal(summary().jobs, null, 'a completed job must not count as running')
+  // A Host without the registry is not an error.
+  world.local.update(chainId, () => {})
+  world.engine.ctx.get = original
+  assert.equal(summary().jobs, null, 'a Host without a jobs registry reports none')
+})
+
 check('starting a chain clears the negative locate cache', () => {
   const world = fakeWorld()
   const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-later-'))

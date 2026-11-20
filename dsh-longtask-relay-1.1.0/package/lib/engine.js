@@ -47,10 +47,10 @@ export function relayMessage(text) {
 /**
  * Render a chain summary for tools and the panel.
  * @param {object} chain - chain record.
- * @param {{ progress?: { total: number, done: number }, stall?: { minutes: number }|null, conflicts?: Array<object> }} [state] - readings the panel shows beside the record.
+ * @param {{ progress?: { total: number, done: number }, stall?: { minutes: number }|null, conflicts?: Array<object>, jobs?: { running: number, labels: Array<string> }|null }} [state] - readings the panel shows beside the record.
  * @returns {object} summary.
  */
-function chainSummary(chain, { progress, stall = null, conflicts = [] } = {}) {
+function chainSummary(chain, { progress, stall = null, conflicts = [], jobs = null } = {}) {
   const current = chain.sessions.find(session => session.sessionId === chain.currentSessionId)
   return {
     chainId: chain.chainId,
@@ -85,6 +85,9 @@ function chainSummary(chain, { progress, stall = null, conflicts = [] } = {}) {
     stall,
     // Paths another chain in the same workspace is also working on.
     conflicts,
+    // Background jobs the head started and still runs: a session that hands a
+    // long command to a job ends its turn and reports `idle` while work goes on.
+    jobs,
   }
 }
 
@@ -1716,6 +1719,43 @@ export class RelayEngine {
     }
   }
 
+  /**
+   * Background jobs the chain still runs.
+   * A session that started a long command as a job ends its turn and reports
+   * `idle` while the job keeps working, so the agent status alone cannot tell
+   * "nothing left to do" from "waiting on a job". Jobs of every session in the
+   * chain count: one may outlive the session that started it.
+   * @param {object} chain - chain record.
+   * @returns {{ running: number, labels: Array<string> }|null} the running jobs, or null when there are none.
+   */
+  jobsOf(chain) {
+    const registry = this.ctx.get('jobs')
+    if (registry === undefined || typeof registry.list !== 'function') return null
+    const sessions = Array.isArray(chain.sessions) ? chain.sessions : []
+    const ordered = [chain.currentSessionId, ...sessions.map(session => session.sessionId)]
+    const seen = new Set()
+    const labels = []
+    let running = 0
+    for (const sessionId of ordered) {
+      let listed = []
+      try {
+        listed = registry.list(sessionId)
+      } catch {
+        // A session without a live agent is a normal case, not a reason to fail a read.
+        continue
+      }
+      for (const job of listed) {
+        if (job.status !== 'running' && job.status !== 'stopping') continue
+        // An unowned job is listed for every caller, so count each id once.
+        if (seen.has(job.id)) continue
+        seen.add(job.id)
+        running += 1
+        if (labels.length < 3) labels.push(job.label)
+      }
+    }
+    return running === 0 ? null : { running, labels }
+  }
+
   /** Snapshot every chain this Host knows about. */
   status() {
     const signature = this.statusSignature()
@@ -1750,6 +1790,7 @@ export class RelayEngine {
               progress,
               stall: this.stallOf(chain),
               conflicts: this.crossChainConflicts(chain, document),
+              jobs: this.jobsOf(chain),
             }),
             sessionsDetail: chain.sessions.map(session => this.sessionSnapshot(session)),
             head: this.headState(chain),
@@ -1863,6 +1904,7 @@ export class RelayEngine {
         progress: document === undefined ? undefined : featureProgress(document),
         stall: this.stallOf(chain),
         conflicts: this.crossChainConflicts(chain, document),
+        jobs: this.jobsOf(chain),
       }),
       features: (document?.features ?? []).map(feature => ({
         id: feature.id,
@@ -2770,6 +2812,7 @@ export class RelayEngine {
         progress: document === undefined ? undefined : featureProgress(document),
         stall: this.stallOf(chain),
         conflicts: this.crossChainConflicts(chain, document),
+        jobs: this.jobsOf(chain),
       }),
       head: this.headState(chain),
       self: describe(self),

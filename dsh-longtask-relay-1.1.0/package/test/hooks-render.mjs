@@ -374,6 +374,14 @@ const twoActive = boot({
         // The other chain in this workspace is building one of the same files.
         conflicts: [{ chainId: 'chain-a', title: 'alpha', paths: ['src/a'], features: { mine: ['F003'], other: ['F001'] } }],
       },
+      {
+        chainId: 'chain-c', status: 'active', title: 'gamma', objective: 'gamma', featuresTotal: 3, featuresDone: 0,
+        handoffCount: 0, maxHandoffs: 32, sessions: 1, currentSessionId: 'session-gamma',
+        sessionsDetail: [{ sessionId: 'session-gamma', role: 'initializer', running: false, loaded: true, pressureRatio: 0.02, peakRatio: 0.1 }],
+        head: { goal: null, planMode: false, goalHeld: false, goalPausedByRelay: false },
+        // Its turn ended while its own long command keeps running in a job.
+        jobs: { running: 1, labels: ['pwsh: full rig'] },
+      },
     ],
   },
 })
@@ -382,15 +390,18 @@ const twoActiveTree = await twoActive.react.settle(panelEntry.component, {})
 const twoActiveText = collectText(twoActiveTree)
 assert.ok(twoActiveText.includes('rowRunning'), 'a chain with a generating session must say it is running')
 assert.ok(twoActiveText.includes('rowIdle'), 'a second active chain that is not generating must read as idle')
+assert.ok(twoActiveText.includes('rowBusy'), 'a head whose background job still runs must not read as idle')
+assert.ok(twoActiveText.includes('jobChip'), 'the row must name how many background jobs run')
 assert.ok(twoActiveText.includes('rowParallel'), 'a chain with two live sessions must show the parallel count')
 assert.ok(twoActiveText.includes('stallChip'), 'a running head with no progress must be called out instead of looking alive')
 assert.ok(twoActiveText.includes('conflictChip'), 'a chain sharing files with another chain must say so')
 const liveMarkers = nodesOf(twoActiveTree).filter(node => typeof node.props?.className === 'string' && node.props.className.includes('is-live'))
-assert.equal(liveMarkers.length, 1, 'only the chain that is generating gets the live marker')
+// alpha generates, gamma waits on its own job: both are live. beta is idle.
+assert.equal(liveMarkers.length, 2, 'only chains with live work (a running session or a running job) get the marker')
 
 const openButtons = nodesOf(twoActiveTree).filter(node => typeof node.props?.className === 'string' && node.props.className.includes('relay-row-open'))
-assert.equal(openButtons.length, 2, 'every chain row must offer a way into its conversation')
+assert.equal(openButtons.length, 3, 'every chain row must offer a way into its conversation')
 for (const button of openButtons) button.props.onClick({ stopPropagation: () => undefined })
-assert.deepEqual(opened, ['session-alpha', 'session-beta'], 'a row must open the chain head session it shows')
+assert.deepEqual(opened, ['session-alpha', 'session-beta', 'session-gamma'], 'a row must open the chain head session it shows')
 
 console.log('session tab render check passed: hook order holds, a read error clears after recovery, and the panel shows the peak ratio')
