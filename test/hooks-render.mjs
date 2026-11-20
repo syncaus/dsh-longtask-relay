@@ -133,7 +133,7 @@ function createFakeReact() {
  * components plus the RPC stub.
  * @returns {{ registrations: object[], calls: object[] }}
  */
-function boot({ failSessionViewOnce = false, headPlanMode = true } = {}) {
+function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null, onOpenSession = null } = {}) {
   const react = createFakeReact()
   const registrations = []
   const calls = []
@@ -157,7 +157,7 @@ function boot({ failSessionViewOnce = false, headPlanMode = true } = {}) {
   }
 
   const chainSummary = { chainId: 'chain-1', status: 'active', title: 'demo', objective: 'ship it', featuresTotal: 2, featuresDone: 1, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null, sessions: 1 }
-  const panelChains = {
+  const panelChains = chains ?? {
     chains: [{
       ...chainSummary,
       blocker: { kind: 'external', who: 'human', action: 'grant access' },
@@ -211,6 +211,7 @@ function boot({ failSessionViewOnce = false, headPlanMode = true } = {}) {
       bind: () => (key) => key,
     },
     layout: { selectPanel: () => undefined },
+    uiWorkspace: { openSession: (sessionId) => { if (onOpenSession !== null) onOpenSession(sessionId) } },
     get: () => undefined,
   }
 
@@ -323,5 +324,66 @@ assert.ok(panelText.includes('planModeChip'), 'the panel must show the plan mode
 assert.ok(panelText.includes('goalRow'), 'the panel must show the goal row')
 assert.ok(panelText.includes('goalBudget'), 'the chain detail must label the goal rounds as a chain-wide budget')
 assert.ok(panelText.includes('goalHeld'), 'the chain detail must explain a held goal')
+
+/**
+ * Every element of a rendered tree, rendering child components where possible.
+ * Hook-owning components throw here and are skipped: the top-level settle has
+ * already rendered them.
+ */
+function nodesOf(node, out = []) {
+  if (node === null || node === undefined || node === false) return out
+  if (Array.isArray(node)) {
+    for (const child of node) nodesOf(child, out)
+    return out
+  }
+  if (typeof node === 'object') {
+    out.push(node)
+    if (typeof node.type === 'function') {
+      try { nodesOf(node.type(node.props), out) } catch { /* the child owns hooks */ }
+    }
+    nodesOf(node.children, out)
+  }
+  return out
+}
+
+// Several chains can be active at once, and chain status alone cannot tell them
+// apart. The row has to say which one is generating, how many sessions run in
+// it, and open the conversation it lives in.
+const opened = []
+const twoActive = boot({
+  onOpenSession: id => opened.push(id),
+  chains: {
+    chains: [
+      {
+        chainId: 'chain-a', status: 'active', title: 'alpha', objective: 'alpha', featuresTotal: 4, featuresDone: 1,
+        handoffCount: 0, maxHandoffs: 32, sessions: 2, currentSessionId: 'session-alpha',
+        sessionsDetail: [
+          { sessionId: 'session-alpha', role: 'initializer', running: true, loaded: true, pressureRatio: 0.1, peakRatio: 0.2 },
+          { sessionId: 'session-kid', role: 'worker', parentSessionId: 'session-alpha', running: true, loaded: true, pressureRatio: 0.1, peakRatio: 0.1 },
+        ],
+        head: { goal: null, planMode: false, goalHeld: false, goalPausedByRelay: false },
+      },
+      {
+        chainId: 'chain-b', status: 'active', title: 'beta', objective: 'beta', featuresTotal: 4, featuresDone: 2,
+        handoffCount: 0, maxHandoffs: 32, sessions: 1, currentSessionId: 'session-beta',
+        sessionsDetail: [{ sessionId: 'session-beta', role: 'initializer', running: false, loaded: true, pressureRatio: 0.05, peakRatio: 0.3 }],
+        head: { goal: null, planMode: false, goalHeld: false, goalPausedByRelay: false },
+      },
+    ],
+  },
+})
+const panelEntry = twoActive.registrations.find(entry => entry.options.name === 'main')
+const twoActiveTree = await twoActive.react.settle(panelEntry.component, {})
+const twoActiveText = collectText(twoActiveTree)
+assert.ok(twoActiveText.includes('rowRunning'), 'a chain with a generating session must say it is running')
+assert.ok(twoActiveText.includes('rowIdle'), 'a second active chain that is not generating must read as idle')
+assert.ok(twoActiveText.includes('rowParallel'), 'a chain with two live sessions must show the parallel count')
+const liveMarkers = nodesOf(twoActiveTree).filter(node => typeof node.props?.className === 'string' && node.props.className.includes('is-live'))
+assert.equal(liveMarkers.length, 1, 'only the chain that is generating gets the live marker')
+
+const openButtons = nodesOf(twoActiveTree).filter(node => typeof node.props?.className === 'string' && node.props.className.includes('relay-row-open'))
+assert.equal(openButtons.length, 2, 'every chain row must offer a way into its conversation')
+for (const button of openButtons) button.props.onClick({ stopPropagation: () => undefined })
+assert.deepEqual(opened, ['session-alpha', 'session-beta'], 'a row must open the chain head session it shows')
 
 console.log('session tab render check passed: hook order holds, a read error clears after recovery, and the panel shows the peak ratio')

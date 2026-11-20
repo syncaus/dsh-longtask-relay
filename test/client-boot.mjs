@@ -99,7 +99,7 @@ function boot(options = {}) {
   vm.createContext(sandbox)
   vm.runInContext(source, sandbox, { filename: 'client.js' })
   assert.ok(sandbox.loaded, 'the bundle never registered a factory')
-  assert.equal(sandbox.loaded.id, '@local/longtask-relay')
+  assert.equal(sandbox.loaded.id, 'dsh-longtask-relay')
   return { registrations, injected, locales, onCalls }
 }
 
@@ -114,7 +114,7 @@ const names = strict.registrations.map(entry => entry.options.name).sort()
 assert.deepEqual(names, ['conversation.view', 'conversation.view', 'main', 'plugins.bundle.config', 'plugins.detail.actions', 'sidebar.panellist'])
 assert.equal(strict.registrations.find(entry => entry.options.name === 'main').options.key, 'relay')
 assert.equal(strict.registrations.find(entry => entry.options.name === 'sidebar.panellist').options.id, 'relay')
-assert.equal(strict.registrations.find(entry => entry.options.name === 'plugins.bundle.config').options.key, '@local/longtask-relay')
+assert.equal(strict.registrations.find(entry => entry.options.name === 'plugins.bundle.config').options.key, 'dsh-longtask-relay')
 assert.equal(strict.registrations.find(entry => entry.options.name === 'plugins.detail.actions').options.locale, 'relay')
 assert.equal(strict.registrations.find(entry => entry.options.name === 'plugins.detail.actions').options.id, 'relay-update')
 const viewIds = strict.registrations
