@@ -371,6 +371,8 @@ const twoActive = boot({
         handoffCount: 0, maxHandoffs: 32, sessions: 1, currentSessionId: 'session-beta',
         sessionsDetail: [{ sessionId: 'session-beta', role: 'initializer', running: false, loaded: true, pressureRatio: 0.05, peakRatio: 0.3 }],
         head: { goal: null, planMode: false, goalHeld: false, goalPausedByRelay: false },
+        // The other chain in this workspace is building one of the same files.
+        conflicts: [{ chainId: 'chain-a', title: 'alpha', paths: ['src/a'], features: { mine: ['F003'], other: ['F001'] } }],
       },
     ],
   },
@@ -382,6 +384,7 @@ assert.ok(twoActiveText.includes('rowRunning'), 'a chain with a generating sessi
 assert.ok(twoActiveText.includes('rowIdle'), 'a second active chain that is not generating must read as idle')
 assert.ok(twoActiveText.includes('rowParallel'), 'a chain with two live sessions must show the parallel count')
 assert.ok(twoActiveText.includes('stallChip'), 'a running head with no progress must be called out instead of looking alive')
+assert.ok(twoActiveText.includes('conflictChip'), 'a chain sharing files with another chain must say so')
 const liveMarkers = nodesOf(twoActiveTree).filter(node => typeof node.props?.className === 'string' && node.props.className.includes('is-live'))
 assert.equal(liveMarkers.length, 1, 'only the chain that is generating gets the live marker')
 

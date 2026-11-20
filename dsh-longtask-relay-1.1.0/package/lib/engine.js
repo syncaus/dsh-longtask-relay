@@ -47,11 +47,10 @@ export function relayMessage(text) {
 /**
  * Render a chain summary for tools and the panel.
  * @param {object} chain - chain record.
- * @param {{ total: number, done: number }|undefined} progress - feature progress.
- * @param {{ minutes: number }|null} [stall] - how long the head has run without progress, when it has.
+ * @param {{ progress?: { total: number, done: number }, stall?: { minutes: number }|null, conflicts?: Array<object> }} [state] - readings the panel shows beside the record.
  * @returns {object} summary.
  */
-function chainSummary(chain, progress, stall) {
+function chainSummary(chain, { progress, stall = null, conflicts = [] } = {}) {
   const current = chain.sessions.find(session => session.sessionId === chain.currentSessionId)
   return {
     chainId: chain.chainId,
@@ -83,7 +82,9 @@ function chainSummary(chain, progress, stall) {
     launchPending: chain.status === 'planning' && Array.isArray(chain.launchPlan?.groups) && chain.launchPlan.launchedAt === undefined,
     // A head that is running but has not touched the truth source for a while is
     // either inside one long command or stuck; status alone cannot tell them apart.
-    stall: stall ?? null,
+    stall,
+    // Paths another chain in the same workspace is also working on.
+    conflicts,
   }
 }
 
@@ -135,6 +136,36 @@ function overlapPath(left, right) {
     }
   }
   return undefined
+}
+
+/**
+ * Comparable form of a workspace path, so two chains count as sharing one
+ * workspace across slash direction and trailing separators.
+ * @param {string} cwd - the chain's working directory.
+ * @returns {string|null} the key, or null when the directory is unknown.
+ */
+function workspaceKey(cwd) {
+  if (typeof cwd !== 'string' || cwd.length === 0) return null
+  return cwd.replace(/\\/g, '/').replace(/\/+$/u, '').toLowerCase()
+}
+
+/**
+ * The paths one chain's unfinished features claim.
+ * A feature that already passes is done work, and a feature without `files`
+ * claims nothing, so neither can collide with another chain.
+ * @param {{ features?: Array<object> }|undefined} document - features document.
+ * @param {string} cwd - the chain's working directory, to resolve relative scopes.
+ * @returns {Array<{ id: string, paths: Array<string> }>} claims.
+ */
+function claimsOf(document, cwd) {
+  const claims = []
+  for (const feature of document?.features ?? []) {
+    if (feature.passes === true) continue
+    const files = Array.isArray(feature.files) ? feature.files : []
+    if (files.length === 0) continue
+    claims.push({ id: feature.id, paths: files.map(file => scopePath(file, cwd)) })
+  }
+  return claims
 }
 
 /**
@@ -973,6 +1004,9 @@ export class RelayEngine {
       featuresTotal: progress.total,
       featuresDone: progress.done,
       pending: progress.pending.map(feature => feature.id).slice(0, 20),
+      // Another chain in this workspace is building the same paths right now:
+      // the session cannot pause it, so this is for the model to report upward.
+      conflicts: this.crossChainConflicts(updated ?? chain, store.readFeatures(chain.chainId)),
     }
   }
 
@@ -1620,15 +1654,57 @@ export class RelayEngine {
     return minutes >= this.config.stallMinutes ? { minutes } : null
   }
 
-  /** Snapshot every chain this Host knows about. */
-  status() {
-    const signature = this.statusSignature()
-    if (this.statusCache !== null && this.statusCache.signature === signature
-      && Date.now() - this.statusCache.at < 1000) {
-      return this.statusCache.items
+  /**
+   * Paths this chain shares with another chain in the same workspace.
+   * Scopes are file-level, so two chains touching one file conflict even when
+   * they edit different functions; a feature that passes stops claiming, and a
+   * chain that is done or failed is no longer building anything.
+   * @param {object} chain - chain record.
+   * @param {{ features?: Array<object> }|undefined} document - this chain's features.
+   * @returns {Array<{ chainId: string, title: string, paths: Array<string>, features: { mine: Array<string>, other: Array<string> } }>} conflicts.
+   */
+  crossChainConflicts(chain, document) {
+    const key = workspaceKey(chain.cwd)
+    const mine = claimsOf(document, chain.cwd)
+    if (key === null || mine.length === 0) return []
+    this.ensureStores()
+    const found = []
+    for (const [, store] of this.stores) {
+      let ids = []
+      try {
+        ids = store.listChainIds()
+      } catch {
+        continue
+      }
+      for (const otherId of ids) {
+        if (otherId === chain.chainId) continue
+        const other = store.readChain(otherId)
+        if (other === undefined || other.status === 'done' || other.status === 'failed') continue
+        if (workspaceKey(other.cwd) !== key) continue
+        const theirs = claimsOf(store.readFeatures(otherId), other.cwd)
+        if (theirs.length === 0) continue
+        const paths = []
+        const mineIds = []
+        const theirIds = []
+        for (const a of mine) {
+          for (const b of theirs) {
+            const path = overlapPath(a.paths, b.paths)
+            if (path === undefined) continue
+            if (!paths.includes(path)) paths.push(path)
+            if (!mineIds.includes(a.id)) mineIds.push(a.id)
+            if (!theirIds.includes(b.id)) theirIds.push(b.id)
+          }
+        }
+        // One entry per other chain: the panel names the chain once, with the
+        // paths and features that collide.
+        if (paths.length > 0) found.push({ chainId: otherId, title: other.title, paths, features: { mine: mineIds, other: theirIds } })
+      }
     }
-    // The index is the authority for which chains exist; the stores are only
-    // the ones this lifetime has touched.
+    return found
+  }
+
+  /** Make every truth directory the index knows about readable, as `status()` needs. */
+  ensureStores() {
     let indexed = []
     try {
       indexed = this.chainIndex.entries()
@@ -1638,6 +1714,18 @@ export class RelayEngine {
     for (const entry of indexed) {
       if (!this.stores.has(entry.truthDir)) this.stores.set(entry.truthDir, this.storeFor(entry.truthDir))
     }
+  }
+
+  /** Snapshot every chain this Host knows about. */
+  status() {
+    const signature = this.statusSignature()
+    if (this.statusCache !== null && this.statusCache.signature === signature
+      && Date.now() - this.statusCache.at < 1000) {
+      return this.statusCache.items
+    }
+    // The index is the authority for which chains exist; the stores are only
+    // the ones this lifetime has touched.
+    this.ensureStores()
     const seen = new Set()
     const items = []
     for (const [truthDir, store] of this.stores) {
@@ -1658,7 +1746,11 @@ export class RelayEngine {
           const document = store.readFeatures(chainId)
           const progress = document === undefined ? undefined : featureProgress(document)
           items.push({
-            ...chainSummary(chain, progress, this.stallOf(chain)),
+            ...chainSummary(chain, {
+              progress,
+              stall: this.stallOf(chain),
+              conflicts: this.crossChainConflicts(chain, document),
+            }),
             sessionsDetail: chain.sessions.map(session => this.sessionSnapshot(session)),
             head: this.headState(chain),
           })
@@ -1767,7 +1859,11 @@ export class RelayEngine {
     const { chain, store } = this.findChain(chainId)
     const document = store.readFeatures(chainId)
     return {
-      chain: chainSummary(chain, document === undefined ? undefined : featureProgress(document), this.stallOf(chain)),
+      chain: chainSummary(chain, {
+        progress: document === undefined ? undefined : featureProgress(document),
+        stall: this.stallOf(chain),
+        conflicts: this.crossChainConflicts(chain, document),
+      }),
       features: (document?.features ?? []).map(feature => ({
         id: feature.id,
         title: feature.title,
@@ -2670,7 +2766,11 @@ export class RelayEngine {
         }
       })
     return {
-      chain: chainSummary(chain, document === undefined ? undefined : featureProgress(document), this.stallOf(chain)),
+      chain: chainSummary(chain, {
+        progress: document === undefined ? undefined : featureProgress(document),
+        stall: this.stallOf(chain),
+        conflicts: this.crossChainConflicts(chain, document),
+      }),
       head: this.headState(chain),
       self: describe(self),
       parent: self.parentSessionId === null || self.parentSessionId === undefined
