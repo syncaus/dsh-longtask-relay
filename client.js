@@ -69,6 +69,9 @@ window.__ModuleLoader__.load({
       rowRunning: '运行中',
       rowIdle: '空闲',
       rowParallel: '并行',
+      rowBusy: '后台运行',
+      jobChip: '后台作业 {n}',
+      jobNote: '链头这一轮已经结束，但它起的后台作业还在跑：{labels}。这不是空闲，作业结束或你去看它的输出都行。',
       stallChip: '{n} 分钟无进展',
       stallNote: '链头在运行，但这条链的真理源已经 {n} 分钟没有更新：可能卡在一条长命令或后台作业里。打开会话看它当前在等什么，必要时暂停这条链。',
       conflictChip: '跨链冲突',
@@ -377,6 +380,9 @@ window.__ModuleLoader__.load({
       rowRunning: 'running',
       rowIdle: 'idle',
       rowParallel: 'parallel',
+      rowBusy: 'background',
+      jobChip: '{n} background job(s)',
+      jobNote: 'The head finished its turn but the background job it started still runs: {labels}. This is not idle; wait for the job or read its output.',
       stallChip: 'no progress {n} min',
       stallNote: 'The chain head is running but has written nothing to the truth source for {n} minutes: it may be stuck in one long command or background job. Open the conversation to see what it waits on, and pause the chain if it is stuck.',
       conflictChip: 'cross-chain conflict',
@@ -1281,6 +1287,19 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
         }
 
         /**
+         * The chip for a head that ended its turn while its own background job
+         * still runs: reporting that as idle made the chain look abandoned.
+         */
+        const jobChip = (chain) => {
+          const jobs = chain.jobs
+          if (jobs === null || jobs === undefined || jobs.running === 0) return null
+          return h('span', {
+            className: 'relay-chip',
+            title: t('jobNote').replace('{labels}', (jobs.labels ?? []).join('\n')),
+          }, t('jobChip').replace('{n}', String(jobs.running)))
+        }
+
+        /**
          * Pending human decisions, keyed by request.
          * The built-in composer card stays the answering surface; these
          * handlers only observe so the panel can list and link to them.
@@ -1542,6 +1561,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           // Two active chains carry the same status. What tells them apart is
           // whether their sessions are generating right now, and how many are.
           const live = sessions.filter(session => session.running === true).length
+          const jobs = chain.jobs ?? null
+          const jobCount = jobs?.running ?? 0
           const headSession = sessions.find(session => session.sessionId === chain.currentSessionId)
             ?? sessions[sessions.length - 1]
           const phase = phaseOf(chain)
@@ -1565,11 +1586,11 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             },
               h('span', { className: 'relay-row-head' },
                 h('span', { className: 'relay-row-title' }, chain.title || chain.chainId),
-                h('span', { className: `relay-row-status${live > 0 ? ' is-live' : ''}` },
+                h('span', { className: `relay-row-status${live > 0 || jobCount > 0 ? ' is-live' : ''}` },
                   phase !== null
                     ? t(phase)
                     : chain.status === 'active'
-                      ? t(live > 0 ? 'rowRunning' : 'rowIdle')
+                      ? t(live > 0 ? 'rowRunning' : jobCount > 0 ? 'rowBusy' : 'rowIdle')
                       : (chain.status === 'paused' && typeof chain.pausedBy === 'string' ? label('paused', chain.pausedBy) : label('status', chain.status))),
               ),
               h('span', { className: 'relay-row-where' },
@@ -1605,12 +1626,13 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                   : null,
               ),
               hasBlocker || hasError || waiting || chain.head?.planMode === true || (chain.stall ?? null) !== null
-                || (Array.isArray(chain.conflicts) && chain.conflicts.length > 0)
+                || (Array.isArray(chain.conflicts) && chain.conflicts.length > 0) || jobCount > 0
                 ? h('span', { className: 'relay-pills' },
                   waiting ? h('span', { className: 'relay-chip is-warn' }, t('decisionShort')) : null,
                   chain.head?.planMode === true ? h('span', { className: 'relay-chip is-human' }, t('planModeChip')) : null,
                   stallChip(chain),
                   conflictChip(chain),
+                  jobChip(chain),
                   hasBlocker
                     ? h('span', { className: `relay-chip is-${chain.blocker.kind === 'external' ? 'error' : 'warn'}` }, label('blocker', chain.blocker.kind))
                     : null,
@@ -2251,6 +2273,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                     phase === null ? null : h('span', { className: 'relay-status is-warn' }, t(phase)),
                     stallChip(chain),
                     conflictChip(chain),
+                    jobChip(chain),
                     blocker === null
                       ? null
                       : h('span', { className: `relay-status is-${blocker.kind === 'external' ? 'failed' : 'paused'}` }, label('blocker', blocker.kind)),
@@ -2463,6 +2486,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 phase === null ? null : h('span', { className: 'relay-status is-warn' }, t(phase)),
                 stallChip(chain),
                 conflictChip(chain),
+                jobChip(chain),
                 blocker === null
                   ? null
                   : h('span', { className: `relay-status is-${blocker.kind === 'external' ? 'failed' : 'paused'}`, title: blocker.action }, label('blocker', blocker.kind)),
