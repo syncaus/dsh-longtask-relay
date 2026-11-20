@@ -33,6 +33,13 @@ export const DEFAULT_CONFIG = Object.freeze({
   /** Minutes a wrapped-up session may sit idle before the handoff happens anyway. */
   wrapupTimeoutMinutes: 10,
   /**
+   * Minutes a running chain head may go without writing to its truth source
+   * before the panel reports it as stalled. A session blocked in one long
+   * command or background job keeps its `running` status and writes nothing,
+   * so without this a chain looks alive while it stands still.
+   */
+  stallMinutes: 15,
+  /**
    * Minutes a session gets to produce a fresh HANDOFF.md before a stale one is
    * accepted anyway (the handoff brief then carries a warning).
    */
@@ -143,7 +150,7 @@ function issueFor(name, value) {
     if (!Number.isInteger(value) || value < 0) return `${name} must be a non-negative integer`
     return undefined
   }
-  if (name === 'wrapupTimeoutMinutes' || name === 'staleHandoffMinutes') {
+  if (name === 'wrapupTimeoutMinutes' || name === 'staleHandoffMinutes' || name === 'stallMinutes') {
     if (!Number.isInteger(value) || value < 1) return `${name} must be an integer of at least 1`
     return undefined
   }

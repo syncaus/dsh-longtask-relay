@@ -479,6 +479,7 @@ subagent 的路由、目录、命名都服务于「委派」语义，用户无�
     hardCompactions: 2          # 立即交接，不等边界
     maxHandoffs: 32             # 单链上限，防跑飞
     staleHandoffMinutes: 5      # 收尾后 HANDOFF 仍陈旧时的宽限
+    stallMinutes: 15            # 链头在跑但这么久没写真理源 → 面板标「无进展」
     autoContinue: false         # 链头空闲时自动续跑
     maxAutoContinues: 20
     commitTruth: true           # 收尾提示里是否要求提交真理源
