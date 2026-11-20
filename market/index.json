@@ -95,6 +95,19 @@
       },
       "versions": [
         {
+          "version": "1.4.4",
+          "publishTimestamp": 1795148792,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/syncaus/dsh-plugins",
+            "commit": "f9dee15259fe0b970d524a2945a1e8018b16d35d",
+            "path": "dsh-longtask-relay-1.1.0/package"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.3"
+          }
+        },
+        {
           "version": "1.4.3",
           "publishTimestamp": 1795141573,
           "source": {
