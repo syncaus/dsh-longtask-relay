@@ -150,6 +150,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 | `cooldownMs` | `5000` | 同一会话两次判定之间的最小间隔 |
 | `wrapupTimeoutMinutes` | `10` | 收尾后空闲多久仍然强制交接 |
 | `staleHandoffMinutes` | `5` | 收尾后多久内必须写出新鲜的 HANDOFF；到期仍陈旧就带着警告交接 |
+| `stallMinutes` | `15` | 链头一直在跑、却这么久没写过真理源时，面板和 `relay_status` 标出「N 分钟无进展」（多半卡在一条长命令或后台作业里）；只做提示，不暂停、不交接 |
 | `autoContinue` | `false` | 链头空闲且无 goal 驱动时，自动续跑下一个功能；`autoHandoff` 关闭时不生效 |
 | `maxAutoContinues` | `20` | 每个会话自动续跑的次数上限，到顶记阻塞并暂停 |
 | `commitTruth` | `true` | 收尾/初始化提示里是否要求提交真理源；关掉只记录 sha256 |

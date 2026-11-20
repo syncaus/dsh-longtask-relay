@@ -1784,6 +1784,44 @@ check('status notices a chain file rewritten within the same file-time tick', ()
   assert.equal(second[0].lastError, 'changed')
 })
 
+// A head blocked inside one long command keeps `running` and writes nothing, so
+// the chain looks alive while it stands still. The summary has to say how long.
+check('a running head that writes nothing reports a stall, and a write clears it', () => {
+  // `update()` stamps updatedAt, so a quiet session is aged by leaving the file
+  // alone; the report has to follow that age, not the last time the engine looked.
+  const ageRecord = (world, minutes) => {
+    const chainFile = world.local.paths(world.chain.chainId).chain
+    const record = JSON.parse(readFileSync(chainFile, 'utf8'))
+    record.updatedAt = new Date(Date.now() - minutes * 60000).toISOString()
+    writeFileSync(chainFile, JSON.stringify(record))
+  }
+  const summaryOf = world => world.engine.status().find(item => item.chainId === world.chain.chainId)
+
+  const running = fakeWorld({ stallMinutes: 10 })
+  running.oldAgent.status = 'running'
+  ageRecord(running, 40)
+  const stalled = summaryOf(running)
+  assert.ok(stalled.stall !== null, 'a running head with an old record must report a stall')
+  assert.ok(stalled.stall.minutes >= 39 && stalled.stall.minutes <= 41, `stall minutes follow the record age, got ${JSON.stringify(stalled.stall)}`)
+  // The detail and the session tab read the same field.
+  assert.ok(running.engine.detail(running.chain.chainId).chain.stall.minutes >= 39, 'detail must carry the stall')
+  assert.ok(running.engine.sessionView('session-old').chain.stall.minutes >= 39, 'the session view must carry the stall')
+  // Any write to the record is progress.
+  running.local.update(running.chain.chainId, () => {})
+  assert.equal(summaryOf(running).stall, null, 'a fresh write must clear the stall')
+
+  // A head that is not running never stalls, however old the record.
+  const idle = fakeWorld({ stallMinutes: 10 })
+  ageRecord(idle, 40)
+  assert.equal(summaryOf(idle).stall, null, 'an idle head is never stalled')
+
+  // The threshold decides, not the age alone.
+  const tolerant = fakeWorld({ stallMinutes: 120 })
+  tolerant.oldAgent.status = 'running'
+  ageRecord(tolerant, 40)
+  assert.equal(summaryOf(tolerant).stall, null, 'a longer threshold must keep a 40 minute head out of the report')
+})
+
 check('starting a chain clears the negative locate cache', () => {
   const world = fakeWorld()
   const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-later-'))
@@ -1855,7 +1893,9 @@ check('a nested truthDir still resolves the workspace cwd', () => {
 
 check('package metadata exposes the test script and version', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(pkg.version, '1.4.3')
+  // A semver, not one pinned release: the market index records the exact version
+  // a build belongs to, and this check must not fail on every bump.
+  assert.match(pkg.version, /^\d+\.\d+\.\d+$/u)
   assert.match(pkg.scripts.test, /node test\/smoke\.mjs/)
 })
 

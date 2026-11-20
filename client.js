@@ -69,6 +69,8 @@ window.__ModuleLoader__.load({
       rowRunning: '运行中',
       rowIdle: '空闲',
       rowParallel: '并行',
+      stallChip: '{n} 分钟无进展',
+      stallNote: '链头在运行，但这条链的真理源已经 {n} 分钟没有更新：可能卡在一条长命令或后台作业里。打开会话看它当前在等什么，必要时暂停这条链。',
       chains: '任务链',
       filterAll: '全部',
       acceptAllPartial: '接受全部 {count} 条部分验证',
@@ -373,6 +375,8 @@ window.__ModuleLoader__.load({
       rowRunning: 'running',
       rowIdle: 'idle',
       rowParallel: 'parallel',
+      stallChip: 'no progress {n} min',
+      stallNote: 'The chain head is running but has written nothing to the truth source for {n} minutes: it may be stuck in one long command or background job. Open the conversation to see what it waits on, and pause the chain if it is stuck.',
       chains: 'Chains',
       filterAll: 'All',
       acceptAllPartial: 'Accept all {count} partial',
@@ -670,6 +674,7 @@ window.__ModuleLoader__.load({
           { key: 'hardCompactions', label: '直接交接的压缩次数', kind: 'int', min: 1, hint: '压缩达到几次后不等边界，直接交接' },
           { key: 'wrapupTimeoutMinutes', label: '收尾超时（分钟）', kind: 'int', min: 1, hint: '收尾后空闲多少分钟仍然强制交接' },
           { key: 'staleHandoffMinutes', label: '交接说明陈旧宽限（分钟）', kind: 'int', min: 1, hint: '收尾后 HANDOFF 仍然陈旧时给多少分钟宽限' },
+          { key: 'stallMinutes', label: '无进展提示（分钟）', kind: 'int', min: 1, hint: '链头一直在跑却这么久没写真理源时，面板标出「N 分钟无进展」；只提示，不暂停也不交接' },
           { key: 'cooldownMs', label: '判定间隔（毫秒）', kind: 'int', min: 0, hint: '同一会话两次判定的最小间隔' },
         ],
       },
@@ -1243,6 +1248,19 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
         }
 
         /**
+         * The chip for a head that is running but has written nothing: without it
+         * an active chain and a chain stuck in one long command look the same.
+         */
+        const stallChip = (chain) => {
+          const stall = chain.stall
+          if (stall === null || stall === undefined) return null
+          return h('span', {
+            className: 'relay-chip is-warn',
+            title: t('stallNote').replace('{n}', String(stall.minutes)),
+          }, t('stallChip').replace('{n}', String(stall.minutes)))
+        }
+
+        /**
          * Pending human decisions, keyed by request.
          * The built-in composer card stays the answering surface; these
          * handlers only observe so the panel can list and link to them.
@@ -1566,10 +1584,11 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                   ? h('span', {}, t('goalRow'), h('b', {}, `${chain.head.goal.roundsStarted ?? 0}/${chain.head.goal.maxGoalRounds ?? 0}`))
                   : null,
               ),
-              hasBlocker || hasError || waiting || chain.head?.planMode === true
+              hasBlocker || hasError || waiting || chain.head?.planMode === true || (chain.stall ?? null) !== null
                 ? h('span', { className: 'relay-pills' },
                   waiting ? h('span', { className: 'relay-chip is-warn' }, t('decisionShort')) : null,
                   chain.head?.planMode === true ? h('span', { className: 'relay-chip is-human' }, t('planModeChip')) : null,
+                  stallChip(chain),
                   hasBlocker
                     ? h('span', { className: `relay-chip is-${chain.blocker.kind === 'external' ? 'error' : 'warn'}` }, label('blocker', chain.blocker.kind))
                     : null,
@@ -2208,6 +2227,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                     h('span', { className: `relay-status is-${chain.status}` },
                       isPaused && typeof chain.pausedBy === 'string' ? label('paused', chain.pausedBy) : label('status', chain.status)),
                     phase === null ? null : h('span', { className: 'relay-status is-warn' }, t(phase)),
+                    stallChip(chain),
                     blocker === null
                       ? null
                       : h('span', { className: `relay-status is-${blocker.kind === 'external' ? 'failed' : 'paused'}` }, label('blocker', blocker.kind)),
@@ -2418,6 +2438,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 h('b', {}, chain.title || chain.chainId),
                 h('span', { className: `relay-status is-${chain.status}` }, label('status', chain.status)),
                 phase === null ? null : h('span', { className: 'relay-status is-warn' }, t(phase)),
+                stallChip(chain),
                 blocker === null
                   ? null
                   : h('span', { className: `relay-status is-${blocker.kind === 'external' ? 'failed' : 'paused'}`, title: blocker.action }, label('blocker', blocker.kind)),

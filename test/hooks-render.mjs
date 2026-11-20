@@ -362,6 +362,9 @@ const twoActive = boot({
           { sessionId: 'session-kid', role: 'worker', parentSessionId: 'session-alpha', running: true, loaded: true, pressureRatio: 0.1, peakRatio: 0.1 },
         ],
         head: { goal: null, planMode: false, goalHeld: false, goalPausedByRelay: false },
+        // A head stuck in one long command still says `running`; this is the only
+        // field that tells the reader it has not written anything for a while.
+        stall: { minutes: 23 },
       },
       {
         chainId: 'chain-b', status: 'active', title: 'beta', objective: 'beta', featuresTotal: 4, featuresDone: 2,
@@ -378,6 +381,7 @@ const twoActiveText = collectText(twoActiveTree)
 assert.ok(twoActiveText.includes('rowRunning'), 'a chain with a generating session must say it is running')
 assert.ok(twoActiveText.includes('rowIdle'), 'a second active chain that is not generating must read as idle')
 assert.ok(twoActiveText.includes('rowParallel'), 'a chain with two live sessions must show the parallel count')
+assert.ok(twoActiveText.includes('stallChip'), 'a running head with no progress must be called out instead of looking alive')
 const liveMarkers = nodesOf(twoActiveTree).filter(node => typeof node.props?.className === 'string' && node.props.className.includes('is-live'))
 assert.equal(liveMarkers.length, 1, 'only the chain that is generating gets the live marker')
 
