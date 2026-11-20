@@ -20,8 +20,10 @@
 2. 切到「发现」标签页，点「添加索引源」，填入：
 
    ```
-   https://raw.githubusercontent.com/syncaus/dsh-plugins/main/market/index.json
+   https://cdn.jsdelivr.net/gh/syncaus/dsh-plugins@main/market/index.json
    ```
+
+   `raw.githubusercontent.com` 的同类地址（`/syncaus/dsh-plugins/main/market/index.json`）在部分网络里连不上，DSH 会报「无法读取此索引」，所以默认给镜像地址。镜像按 `@main` 缓存，发布新版本后可能延迟几分钟到几小时才生效。
 
 3. 在列表里选插件，点「安装」。确认框会显示这个版本对应的仓库、提交和目录，核对后再确认。
 
