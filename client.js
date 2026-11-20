@@ -71,6 +71,8 @@ window.__ModuleLoader__.load({
       rowParallel: '并行',
       stallChip: '{n} 分钟无进展',
       stallNote: '链头在运行，但这条链的真理源已经 {n} 分钟没有更新：可能卡在一条长命令或后台作业里。打开会话看它当前在等什么，必要时暂停这条链。',
+      conflictChip: '跨链冲突',
+      conflictNote: '这条链和「{title}」都在改这些路径：{paths}。先暂停其中一条链，别让两个会话同时改同一批文件。',
       chains: '任务链',
       filterAll: '全部',
       acceptAllPartial: '接受全部 {count} 条部分验证',
@@ -377,6 +379,8 @@ window.__ModuleLoader__.load({
       rowParallel: 'parallel',
       stallChip: 'no progress {n} min',
       stallNote: 'The chain head is running but has written nothing to the truth source for {n} minutes: it may be stuck in one long command or background job. Open the conversation to see what it waits on, and pause the chain if it is stuck.',
+      conflictChip: 'cross-chain conflict',
+      conflictNote: 'This chain and "{title}" both work on {paths}. Pause one of them so two sessions do not edit the same files at once.',
       chains: 'Chains',
       filterAll: 'All',
       acceptAllPartial: 'Accept all {count} partial',
@@ -1261,6 +1265,22 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
         }
 
         /**
+         * The chip for paths another chain in the same workspace is also building.
+         * The plugin only reports it: the human decides which chain to pause.
+         */
+        const conflictChip = (chain) => {
+          const conflicts = Array.isArray(chain.conflicts) ? chain.conflicts : []
+          if (conflicts.length === 0) return null
+          const [first] = conflicts
+          return h('span', {
+            className: 'relay-chip is-error',
+            title: t('conflictNote')
+              .replace('{title}', String(first.title ?? first.chainId))
+              .replace('{paths}', (first.paths ?? []).join(', ')),
+          }, conflicts.length === 1 ? t('conflictChip') : `${t('conflictChip')} +${conflicts.length - 1}`)
+        }
+
+        /**
          * Pending human decisions, keyed by request.
          * The built-in composer card stays the answering surface; these
          * handlers only observe so the panel can list and link to them.
@@ -1585,10 +1605,12 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                   : null,
               ),
               hasBlocker || hasError || waiting || chain.head?.planMode === true || (chain.stall ?? null) !== null
+                || (Array.isArray(chain.conflicts) && chain.conflicts.length > 0)
                 ? h('span', { className: 'relay-pills' },
                   waiting ? h('span', { className: 'relay-chip is-warn' }, t('decisionShort')) : null,
                   chain.head?.planMode === true ? h('span', { className: 'relay-chip is-human' }, t('planModeChip')) : null,
                   stallChip(chain),
+                  conflictChip(chain),
                   hasBlocker
                     ? h('span', { className: `relay-chip is-${chain.blocker.kind === 'external' ? 'error' : 'warn'}` }, label('blocker', chain.blocker.kind))
                     : null,
@@ -2228,6 +2250,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                       isPaused && typeof chain.pausedBy === 'string' ? label('paused', chain.pausedBy) : label('status', chain.status)),
                     phase === null ? null : h('span', { className: 'relay-status is-warn' }, t(phase)),
                     stallChip(chain),
+                    conflictChip(chain),
                     blocker === null
                       ? null
                       : h('span', { className: `relay-status is-${blocker.kind === 'external' ? 'failed' : 'paused'}` }, label('blocker', blocker.kind)),
@@ -2439,6 +2462,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 h('span', { className: `relay-status is-${chain.status}` }, label('status', chain.status)),
                 phase === null ? null : h('span', { className: 'relay-status is-warn' }, t(phase)),
                 stallChip(chain),
+                conflictChip(chain),
                 blocker === null
                   ? null
                   : h('span', { className: `relay-status is-${blocker.kind === 'external' ? 'failed' : 'paused'}`, title: blocker.action }, label('blocker', blocker.kind)),

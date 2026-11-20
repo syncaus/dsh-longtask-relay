@@ -1822,6 +1822,62 @@ check('a running head that writes nothing reports a stall, and a write clears it
   assert.equal(summaryOf(tolerant).stall, null, 'a longer threshold must keep a 40 minute head out of the report')
 })
 
+// Two chains can share one workspace. Feature scopes are file-level, so the
+// panel and the checkpoint result have to name the other chain and the paths.
+check('two chains in one workspace report the paths they share', () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  world.local.appendFeatures(chainId, [{ id: 'F002', title: 'mine', files: ['src/a'] }], 'test fixture')
+  const other = world.local.create({ objective: 'other chain', cwd: world.local.cwd, maxHandoffs: 4 })
+  world.local.writeFeatures(other.chainId, {
+    version: 1,
+    objective: 'other chain',
+    features: [{ id: 'G001', title: 'theirs', files: ['src/a/deep'] }],
+  })
+  world.local.update(other.chainId, record => { record.status = 'active' })
+
+  const summary = () => world.engine.status().find(item => item.chainId === chainId)
+  const conflicts = summary().conflicts
+  assert.equal(conflicts.length, 1, 'the overlap must be reported once per other chain')
+  assert.equal(conflicts[0].chainId, other.chainId)
+  assert.deepEqual(conflicts[0].paths, ['src/a'], 'the covering path is the one a human has to look at')
+  assert.deepEqual(conflicts[0].features, { mine: ['F002'], other: ['G001'] })
+  // The other side sees it too, and the checkpoint result carries it.
+  assert.equal(world.engine.status().find(item => item.chainId === other.chainId).conflicts[0].chainId, chainId)
+  assert.ok(world.engine.detail(chainId).chain.conflicts.length === 1, 'detail must carry the conflict')
+  assert.ok(world.engine.checkpoint({ agent: world.oldAgent }).conflicts.length === 1, 'a checkpoint must report it')
+
+  // Passing work stops claiming, and a finished chain is not building anything.
+  world.local.writeFeatures(other.chainId, {
+    version: 1,
+    objective: 'other chain',
+    features: [{ id: 'G001', title: 'theirs', files: ['src/a/deep'], passes: true, evidence: 'ran it' }],
+  })
+  assert.equal(summary().conflicts.length, 0, 'a passing feature no longer claims its paths')
+  world.local.writeFeatures(other.chainId, {
+    version: 1,
+    objective: 'other chain',
+    features: [{ id: 'G001', title: 'theirs', files: ['src/a/deep'] }],
+  })
+  world.local.update(other.chainId, record => { record.status = 'done' })
+  assert.equal(summary().conflicts.length, 0, 'a done chain is not building anything')
+
+  // A chain in another workspace is never compared, even with the same scope.
+  world.local.update(other.chainId, record => { record.status = 'active' })
+  const elsewhere = ChainStore.forCwd(mkdtempSync(join(tmpdir(), 'relay-other-')))
+  const remote = elsewhere.create({ objective: 'elsewhere', cwd: elsewhere.cwd, maxHandoffs: 4 })
+  elsewhere.writeFeatures(remote.chainId, {
+    version: 1,
+    objective: 'elsewhere',
+    features: [{ id: 'H001', title: 'remote', files: ['src/a'] }],
+  })
+  elsewhere.update(remote.chainId, record => { record.status = 'active' })
+  world.engine.remember(elsewhere.readChain(remote.chainId), elsewhere)
+  const after = summary().conflicts
+  assert.equal(after.length, 1, 'a chain in another workspace must stay out of the comparison')
+  assert.equal(after[0].chainId, other.chainId)
+})
+
 check('starting a chain clears the negative locate cache', () => {
   const world = fakeWorld()
   const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-later-'))

@@ -1,6 +1,6 @@
 {
   "name": "dsh-longtask-relay",
-  "version": "1.4.4",
+  "version": "1.4.5",
   "type": "module",
   "description": "Long-task relay: keep one task moving across fresh sessions through a workspace truth source (plan + features + evidence + decisions + traps), with automatic handoff that carries the permission preset, goal, and plan mode, a cluster mode that plans first and launches parallel sessions on human confirmation, blocker-aware pausing, and a panel to monitor and steer every chain.",
   "license": "MIT",
