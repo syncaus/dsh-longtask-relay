@@ -7,7 +7,7 @@
 同事按仓库的插件索引安装，索引里的每个版本钉在一个具体的提交上：
 
 1. 在 DSH 里打开「插件」，在「实验性插件」下打开「自定义插件索引」；
-2. 切到「发现」标签页，点「添加索引源」，填入 `https://cdn.jsdelivr.net/gh/syncaus/dsh-plugins@main/market/index.json`（`raw.githubusercontent.com` 的同类地址在部分网络里连不上，DSH 会报「无法读取此索引」，镜像按 `@main` 缓存，发新版后可能延迟几分钟到几小时）；
+2. 切到「发现」标签页，点「添加索引源」，填入 `https://cdn.jsdelivr.net/gh/syncaus/dsh-plugins@main/market/index.json`（`raw.githubusercontent.com` 的同类地址在部分网络里连不上，DSH 会报「无法读取此索引」；镜像按 `@main` 缓存，发新版后可能延迟几分钟到几小时，要立刻拿到最新索引用 `https://ghproxy.net/https://raw.githubusercontent.com/syncaus/dsh-plugins/main/market/index.json`）；
 3. 选「长任务接力」→「安装」，确认框里核对仓库、提交和目录。
 
 更新方式是重新从索引装一次新登记的版本，不是 `git pull`。以 `link:` 装在本机 git 工作区的开发副本则相反：用面板或设置卡片里的自更新按钮（`git pull` + 重载插件）。

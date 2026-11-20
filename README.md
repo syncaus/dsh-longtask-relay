@@ -23,7 +23,7 @@
    https://cdn.jsdelivr.net/gh/syncaus/dsh-plugins@main/market/index.json
    ```
 
-   `raw.githubusercontent.com` 的同类地址（`/syncaus/dsh-plugins/main/market/index.json`）在部分网络里连不上，DSH 会报「无法读取此索引」，所以默认给镜像地址。镜像按 `@main` 缓存，发布新版本后可能延迟几分钟到几小时才生效。
+   `raw.githubusercontent.com` 的同类地址（`/syncaus/dsh-plugins/main/market/index.json`）在部分网络里连不上，DSH 会报「无法读取此索引」，所以默认给镜像地址。镜像按 `@main` 缓存，发布新版本后可能延迟几分钟到几小时才生效；要立刻拿到最新索引，用 `https://ghproxy.net/https://raw.githubusercontent.com/syncaus/dsh-plugins/main/market/index.json`（第三方转发，无缓存）。
 
 3. 在列表里选插件，点「安装」。确认框会显示这个版本对应的仓库、提交和目录，核对后再确认。
 
