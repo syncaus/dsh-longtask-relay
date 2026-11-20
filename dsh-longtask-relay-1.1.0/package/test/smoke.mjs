@@ -4207,7 +4207,7 @@ async function updateFixture() {
   const pkgRel = 'dsh-longtask-relay-1.1.0/package'
   const pkgDir = join(workDir, pkgRel)
   mkdirSync(pkgDir, { recursive: true })
-  writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@local/longtask-relay', version: '1.0.0' }))
+  writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: 'dsh-longtask-relay', version: '1.0.0' }))
   const git = (cwd, ...args) => execFileSync('git', args, { cwd, stdio: 'pipe', windowsHide: true })
   mkdirSync(remoteDir)
   git(remoteDir, 'init', '--bare', '-b', 'main')
@@ -4217,7 +4217,7 @@ async function updateFixture() {
   git(workDir, 'remote', 'add', 'origin', remoteDir)
   git(workDir, 'push', '-u', 'origin', 'main')
   git(base, 'clone', remoteDir, peerDir)
-  writeFileSync(join(peerDir, pkgRel, 'package.json'), JSON.stringify({ name: '@local/longtask-relay', version: '1.1.0' }))
+  writeFileSync(join(peerDir, pkgRel, 'package.json'), JSON.stringify({ name: 'dsh-longtask-relay', version: '1.1.0' }))
   git(peerDir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'add', '-A')
   git(peerDir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-m', 'v1.1.0')
   git(peerDir, 'push')
@@ -4243,7 +4243,7 @@ await checkAsync('the update check sees commits behind the upstream branch', asy
 
 await checkAsync('an update refuses a dirty working tree', async () => {
   const { base, pkgDir } = await updateFixture()
-  writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@local/longtask-relay', version: '1.0.0', dirty: true }))
+  writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: 'dsh-longtask-relay', version: '1.0.0', dirty: true }))
   const applied = await applyPluginUpdate(pkgDir)
   assert.equal(applied.ok, false)
   assert.equal(applied.reason, 'dirty')
@@ -4252,7 +4252,7 @@ await checkAsync('an update refuses a dirty working tree', async () => {
 
 await checkAsync('an update check reports a package outside git', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'relay-nogit-'))
-  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: '@local/longtask-relay', version: '1.0.0' }))
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'dsh-longtask-relay', version: '1.0.0' }))
   const check = await checkPluginUpdate(dir)
   assert.equal(check.reason, 'not-git')
   assert.equal(check.currentVersion, '1.0.0')
@@ -4279,6 +4279,23 @@ await checkAsync('a hand-edited acceptedBy does not release the coverage gate', 
   assert.equal(retried.accepted, 1, 'the panel acceptance must re-stamp a hand-written human value')
   const result = world.engine.finish({ agent: world.oldAgent, evidence: 'npm test exit 0: 42/42 passed' })
   assert.equal(result.ok, true)
+})
+
+await checkAsync('a session that wraps itself up hands off without the supervisor prompt', async () => {
+  const world = fakeWorld()
+  // The model sets ready itself: no wrap-up was ever requested, pressure is low.
+  world.setRatio(0.2)
+  world.engine.checkpoint({ agent: world.oldAgent, ready: true })
+  await world.engine.evaluate(world.oldAgent)
+  assert.ok(world.calls.some(call => call.kind === 'create'), 'a self-reported ready must hand off')
+  assert.equal(world.local.readChain(world.chain.chainId).currentSessionId, 'session-new')
+})
+
+check('a reload re-evaluates live chain heads', () => {
+  const world = fakeWorld()
+  world.engine.resumeEvaluations()
+  assert.ok(world.engine.timers.has('session-old'), 'an idle chain head must be re-checked after a reload')
+  world.engine.dispose()
 })
 
 rmSync(workspace, { recursive: true, force: true })

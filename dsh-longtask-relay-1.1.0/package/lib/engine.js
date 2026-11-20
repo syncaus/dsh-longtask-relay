@@ -577,6 +577,45 @@ export class RelayEngine {
   }
 
   /**
+   * Re-check every live chain head once after a plugin reload.
+   * An idle session emits no idle event again, so without this a chain that was
+   * already ready (or wrapped up) would sit still until the next turn.
+   * @returns {void}
+   */
+  resumeEvaluations() {
+    // The host index is the authority after a reload; the stores this lifetime
+    // touched are empty until something reads it.
+    try {
+      for (const entry of this.chainIndex.entries()) {
+        if (!this.stores.has(entry.truthDir)) this.stores.set(entry.truthDir, this.storeFor(entry.truthDir))
+      }
+    } catch {
+      /* an unreadable index still leaves the touched stores */
+    }
+    for (const [, store] of this.stores) {
+      let chainIds = []
+      try {
+        chainIds = store.listChainIds()
+      } catch {
+        continue
+      }
+      for (const chainId of chainIds) {
+        try {
+          const chain = store.readChain(chainId)
+          if (chain === undefined) continue
+          if (chain.status !== 'active' && chain.status !== 'initializing') continue
+          if (chain.currentSessionId === null || chain.currentSessionId === undefined) continue
+          const agent = this.ctx.get('agents')?.get(chain.currentSessionId)
+          if (agent === undefined) continue
+          this.scheduleEvaluate(agent.id, 2000)
+        } catch {
+          /* one unreadable chain must not stop the others */
+        }
+      }
+    }
+  }
+
+  /**
    * Drop every pending re-check of one chain.
    * @param {object} chain - chain record.
    * @returns {void}
@@ -2943,6 +2982,18 @@ export class RelayEngine {
         return
       }
       if (stats.wrapupSentAt === 0) {
+        // A session may wrap itself up without the supervisor's prompt (the
+        // model sets ready when its own plan says the work is handed off);
+        // that is an explicit handoff signal, not a no-op.
+        if (stats.ready) {
+          this.record(store, chain.chainId, {
+            kind: 'supervisor.decision',
+            actor: 'system',
+            detail: { action: 'handoff', reason: 'checkpoint', ratio: Number(pressure.ratio.toFixed(3)) },
+          })
+          await this.handoff(chain, agent, 'checkpoint', store, { stale: !freshness.fresh })
+          return
+        }
         // wrapupRatio starts the wrap-up with half the window still available;
         // handoffRatio only forces a handoff once the wrap-up was already sent.
         const byPressure = pressure.ratio >= this.config.wrapupRatio

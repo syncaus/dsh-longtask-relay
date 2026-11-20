@@ -87,6 +87,10 @@ export function apply(ctx, config) {
     }, 'longtask-relay command')
   })
 
+  // An idle chain head emits no idle event after a reload, so a chain that was
+  // already ready (or wrapped up) would sit still until someone typed again.
+  engine.resumeEvaluations()
+
   // The panel needs per-session compaction counts on every list row; the
   // projection is optional so a composition without projections still runs.
   ctx.inject(['sessionProjections'], (scope) => {

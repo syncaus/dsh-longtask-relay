@@ -2,6 +2,16 @@
 
 把长任务变成一条**会话链**：真理源落在工作区文件里，每个会话只承担一个阶段；上下文逼近上限时自动收尾、开新会话、交接，旧会话退役。侧栏面板监控每条链和每个会话。
 
+## 安装
+
+同事按仓库的插件索引安装，索引里的每个版本钉在一个具体的提交上：
+
+1. 在 DSH 里打开「插件」，在「实验性插件」下打开「自定义插件索引」；
+2. 切到「发现」标签页，点「添加索引源」，填入 `https://raw.githubusercontent.com/syncaus/dsh-plugins/main/market/index.json`；
+3. 选「长任务接力」→「安装」，确认框里核对仓库、提交和目录。
+
+更新方式是重新从索引装一次新登记的版本，不是 `git pull`。以 `link:` 装在本机 git 工作区的开发副本则相反：用面板或设置卡片里的自更新按钮（`git pull` + 重载插件）。
+
 ## 为什么需要它
 
 DSH 自身的自动压缩（`compaction-basic`）能在上下文吃紧时把旧历史摘要掉，让会话继续跑；`goal-round-driver` 能让同一会话自动续轮。但压缩是有损的，反复压缩会让长任务越跑越差，而顶层会话之间没有父子关系，一个会话无法看到或接管另一个会话。
@@ -120,7 +130,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 
 ```yaml
 - id: longtask-relay
-  name: '@local/longtask-relay'
+  name: 'dsh-longtask-relay'
   config:
     handoffRatio: 0.70
     wrapupRatio: 0.50

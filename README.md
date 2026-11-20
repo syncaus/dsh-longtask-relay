@@ -6,7 +6,7 @@
 
 | 插件 | 做什么 | 文档 |
 |---|---|---|
-| 长任务接力 `@local/longtask-relay` | 把一个长任务变成一条会话链：真理源落在工作区文件里，上下文逼近上限时自动收尾、开新会话并交接，新会话沿用权限预设、目标和计划模式。带一个监控和操作每条链的面板。 | [README](dsh-longtask-relay-1.1.0/package/README.md) · [详细说明](dsh-longtask-relay-1.1.0/package/docs/DETAIL.md) · [设计方案](dsh-longtask-relay-1.1.0/DESIGN.md) |
+| 长任务接力 `dsh-longtask-relay` | 把一个长任务变成一条会话链：真理源落在工作区文件里，上下文逼近上限时自动收尾、开新会话并交接，新会话沿用权限预设、目标和计划模式。带一个监控和操作每条链的面板。 | [README](dsh-longtask-relay-1.1.0/package/README.md) · [详细说明](dsh-longtask-relay-1.1.0/package/docs/DETAIL.md) · [设计方案](dsh-longtask-relay-1.1.0/DESIGN.md) |
 | 工作规则与开发流程 `@local/kadda-rules` | 把一份工作规则和六阶段开发流程注入系统提示词，提供 `/dev`、`/verify`、`/review` 命令，并用代码强制两条门禁：计划模式下不能改文件，改完没验证不让回合结束。 | [README](local-kadda-rules-2.0.0/package/README.md) |
 | Playwright 浏览器 `@local/dsh-mcp-playwright` | 把 Playwright MCP 服务接进 DSH，用于网页端到端测试、截图和断言。只有一份配置，没有代码。 | [配置](dsh-mcp-playwright-1.0.0/package/cordis.patch.yml) |
 

@@ -75,7 +75,7 @@
       ]
     },
     {
-      "name": "@local/longtask-relay",
+      "name": "dsh-longtask-relay",
       "title": {
         "en": "Long-task relay",
         "zh": "长任务接力"

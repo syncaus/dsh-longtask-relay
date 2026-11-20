@@ -234,7 +234,7 @@ watching ──(压力到达 wrapup)──> wrapping ──(边界确认 或 到
 ## 4. 架构
 
 ```
-Host 插件 @local/longtask-relay
+Host 插件 dsh-longtask-relay
 ├── ctx.relay (Service)
 │   ├── ChainStore     真源文件读写 + 校验（原子写：临时文件 + rename）
 │   ├── Supervisor     事件订阅 + 判定（每会话一个状态机）
@@ -469,7 +469,7 @@ subagent 的路由、目录、命名都服务于「委派」语义，用户无�
 
 ```yaml
 - id: longtask-relay
-  name: '@local/longtask-relay'
+  name: 'dsh-longtask-relay'
   config:
     truthDir: .relay            # 相对 cwd
     autoHandoff: true

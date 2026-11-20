@@ -19,7 +19,7 @@
  * element so unmounting removes them.
  */
 window.__ModuleLoader__.load({
-  id: '@local/longtask-relay',
+  id: 'dsh-longtask-relay',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -66,6 +66,9 @@ window.__ModuleLoader__.load({
       statBlocked: '被阻塞',
       statAttention: '待处理',
       statRunning: '运行中',
+      rowRunning: '运行中',
+      rowIdle: '空闲',
+      rowParallel: '并行',
       chains: '任务链',
       filterAll: '全部',
       acceptAllPartial: '接受全部 {count} 条部分验证',
@@ -367,6 +370,9 @@ window.__ModuleLoader__.load({
       statBlocked: 'blocked',
       statAttention: 'Needs you',
       statRunning: 'running',
+      rowRunning: 'running',
+      rowIdle: 'idle',
+      rowParallel: 'parallel',
       chains: 'Chains',
       filterAll: 'All',
       acceptAllPartial: 'Accept all {count} partial',
@@ -824,6 +830,13 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-row-progress b { flex: none; font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .relay-row-facts { display: flex; flex-wrap: wrap; gap: 2px 12px; color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 16px; }
 .relay-row-facts b { margin-left: 4px; color: var(--dsw-alias-label-primary); font-variant-numeric: tabular-nums; }
+.relay-row:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
+/* A chain whose sessions are generating: the dot separates it from an idle
+   active chain, which otherwise reads the same as any other running chain. */
+.relay-row-status.is-live::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: currentColor; animation: relay-pulse 1.8s ease-out infinite; }
+@media (prefers-reduced-motion: reduce) { .relay-row-status.is-live::before { animation: none; } }
+.relay-row-open { flex: none; box-sizing: border-box; display: inline-flex; align-items: center; height: 16px; padding: 0 5px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-tertiary); font: inherit; font-size: 10.5px; line-height: 14px; cursor: pointer; transition: color var(--relay-ease), border-color var(--relay-ease); }
+.relay-row-open:hover { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-label-tertiary); }
 
 .relay-detail { min-width: 0; }
 .relay-detail-head { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
@@ -1064,7 +1077,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           })
 
         /** The npm package name this bundle is installed under, for detail slots. */
-        const PACKAGE_NAME = '@local/longtask-relay'
+        const PACKAGE_NAME = 'dsh-longtask-relay'
 
         /** Message of a caught failure. */
         const messageOf = failure => (failure instanceof Error ? failure.message : String(failure))
@@ -1078,7 +1091,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const navigation = ctx.get('pluginNavigation')
           if (navigation !== undefined && typeof navigation.openBundle === 'function') {
             try {
-              navigation.openBundle('@local/longtask-relay')
+              navigation.openBundle('dsh-longtask-relay')
               return
             } catch {
               /* fall through to the panel switch */
@@ -1488,24 +1501,55 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const done = chain.featuresDone ?? 0
           const sessions = Array.isArray(chain.sessionsDetail) ? chain.sessionsDetail : []
           const peak = sessions.reduce((max, session) => Math.max(max, session.peakRatio ?? 0), 0)
+          // Two active chains carry the same status. What tells them apart is
+          // whether their sessions are generating right now, and how many are.
+          const live = sessions.filter(session => session.running === true).length
+          const headSession = sessions.find(session => session.sessionId === chain.currentSessionId)
+            ?? sessions[sessions.length - 1]
           const phase = phaseOf(chain)
           const hasBlocker = chain.blocker !== null && chain.blocker !== undefined
           const hasError = errorOf(chain) !== null
           return h('li', {},
-            h('button', {
-              type: 'button',
+            h('div', {
+              role: 'button',
+              tabIndex: 0,
               className: `relay-row is-${chain.status}${selected ? ' is-selected' : ''}`,
               'aria-current': selected ? 'true' : undefined,
               onClick: () => onSelect(chain.chainId),
+              onKeyDown: (event) => {
+                // A key press on the open button belongs to that button, not to
+                // the row: it would otherwise select the chain as a side effect.
+                if (event.target !== event.currentTarget) return
+                if (event.key !== 'Enter' && event.key !== ' ') return
+                event.preventDefault()
+                onSelect(chain.chainId)
+              },
             },
               h('span', { className: 'relay-row-head' },
                 h('span', { className: 'relay-row-title' }, chain.title || chain.chainId),
-                h('span', { className: 'relay-row-status' },
-                  phase !== null ? t(phase) : (chain.status === 'paused' && typeof chain.pausedBy === 'string' ? label('paused', chain.pausedBy) : label('status', chain.status))),
+                h('span', { className: `relay-row-status${live > 0 ? ' is-live' : ''}` },
+                  phase !== null
+                    ? t(phase)
+                    : chain.status === 'active'
+                      ? t(live > 0 ? 'rowRunning' : 'rowIdle')
+                      : (chain.status === 'paused' && typeof chain.pausedBy === 'string' ? label('paused', chain.pausedBy) : label('status', chain.status))),
               ),
               h('span', { className: 'relay-row-where' },
                 h('span', { title: chain.cwd }, folderOf(chain.cwd)),
                 h('span', {}, ago(chain.updatedAt)),
+                // The chain lives in a conversation; the row opens it, so a card
+                // is never just a title when several chains are active at once.
+                headSession === undefined
+                  ? null
+                  : h('button', {
+                    type: 'button',
+                    className: 'relay-row-open',
+                    title: `${t('openSession')} ${headSession.sessionId}`,
+                    onClick: (event) => {
+                      event.stopPropagation()
+                      openSession(headSession.sessionId)
+                    },
+                  }, shortId(headSession.sessionId)),
               ),
               h('span', { className: 'relay-row-progress' },
                 h(Bar, { done, total }),
@@ -1514,6 +1558,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
               h('span', { className: 'relay-row-facts' },
                 h('span', {}, t('statHandoffs'), h('b', {}, `${chain.handoffCount ?? 0}/${chain.maxHandoffs ?? 0}`)),
                 h('span', {}, t('sessions'), h('b', {}, String(chain.sessions ?? sessions.length))),
+                // Cluster chains run several sessions at once under one card.
+                live > 1 ? h('span', {}, t('rowParallel'), h('b', {}, String(live))) : null,
                 h('span', {}, t('peak'), h('b', {}, `${pct(peak)}%`)),
                 // The round cap is a budget for the whole chain, so the list shows it too.
                 chain.head?.goal
@@ -3172,7 +3218,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 
         ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
           name: 'plugins.bundle.config',
-          key: '@local/longtask-relay',
+          key: 'dsh-longtask-relay',
         }, PluginConfigCard))
 
         // A `link:` bundle has no registry spec, so the page's own update
