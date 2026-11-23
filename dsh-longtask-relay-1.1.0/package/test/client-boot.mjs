@@ -107,13 +107,15 @@ function boot(options = {}) {
 const strict = boot()
 assert.deepEqual(
   strict.injected.sort(),
-  ['conversation.view', 'conversation.view', 'main', 'plugins.bundle.config', 'plugins.detail.actions', 'sidebar.panellist'],
+  ['conversation.input.dock', 'conversation.view', 'conversation.view', 'main', 'plugins.bundle.config', 'plugins.detail.actions', 'sidebar.panellist'],
 )
-assert.equal(strict.registrations.length, 6, 'expected six slot registrations')
+assert.equal(strict.registrations.length, 7, 'expected seven slot registrations')
 const names = strict.registrations.map(entry => entry.options.name).sort()
-assert.deepEqual(names, ['conversation.view', 'conversation.view', 'main', 'plugins.bundle.config', 'plugins.detail.actions', 'sidebar.panellist'])
+assert.deepEqual(names, ['conversation.input.dock', 'conversation.view', 'conversation.view', 'main', 'plugins.bundle.config', 'plugins.detail.actions', 'sidebar.panellist'])
 assert.equal(strict.registrations.find(entry => entry.options.name === 'main').options.key, 'relay')
 assert.equal(strict.registrations.find(entry => entry.options.name === 'sidebar.panellist').options.id, 'relay')
+assert.equal(strict.registrations.find(entry => entry.options.name === 'conversation.input.dock').options.id, 'relay-launch')
+assert.equal(strict.registrations.find(entry => entry.options.name === 'conversation.input.dock').options.locale, 'relay')
 assert.equal(strict.registrations.find(entry => entry.options.name === 'plugins.bundle.config').options.key, 'dsh-longtask-relay')
 assert.equal(strict.registrations.find(entry => entry.options.name === 'plugins.detail.actions').options.locale, 'relay')
 assert.equal(strict.registrations.find(entry => entry.options.name === 'plugins.detail.actions').options.id, 'relay-update')
@@ -138,7 +140,7 @@ const withRemote = boot({
     },
   },
 })
-assert.equal(withRemote.registrations.length, 6, 'a live remote must not change the registrations')
+assert.equal(withRemote.registrations.length, 7, 'a live remote must not change the registrations')
 assert.deepEqual(watched.map(item => item.event).sort(), ['approval/request', 'user-questions/request'])
 
-console.log('client boot check passed: 6 slots registered (2 session tabs, 1 detail action), locale namespace registered, decision streams watched')
+console.log('client boot check passed: 7 slots registered (2 session tabs, 1 launch dock, 1 detail action), locale namespace registered, decision streams watched')

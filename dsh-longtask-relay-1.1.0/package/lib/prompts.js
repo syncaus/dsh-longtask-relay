@@ -314,7 +314,7 @@ export function renderClusterPlanningPrompt(input) {
     '     first after the launch and the groups waiting for it open automatically once it passes;',
     '   - features left out of every group stay with this session;',
     '   - every group needs a one-sentence reason.',
-    '6. Then stop and wait: a human confirms the launch in the panel. Do not call relay_spawn.',
+    '6. Then stop and wait: a human confirms the launch in the launch bar above the composer, in the panel, or with /relay launch. Do not call relay_spawn.',
     '</relay_cluster_planning>',
   ].join('\n')
 }

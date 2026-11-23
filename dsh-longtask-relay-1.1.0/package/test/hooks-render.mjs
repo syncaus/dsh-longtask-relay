@@ -1,5 +1,5 @@
 /**
- * Render-level guard for the session tabs.
+ * Render-level guard for the session tabs, the launch dock, and the panel.
  *
  * `client-boot.mjs` only proves the bundle registers; it never renders a
  * component. That hid a real crash: `ChildrenTab` called `usePendingDecisions`
@@ -8,10 +8,10 @@
  * "Rendered more hooks than during the previous render", blanking the
  * conversation view.
  *
- * This file runs the registered `conversation.view` components against a
- * minimal React stand-in that enforces the hook-count invariant across
- * renders, drives the async load effect, and then requires each tab to render
- * with its data.
+ * This file runs the registered `conversation.view` and
+ * `conversation.input.dock` components against a minimal React stand-in that
+ * enforces the hook-count invariant across renders, drives the async load
+ * effects, and then requires each surface to render with its data.
  *
  * Run with: node test/hooks-render.mjs
  */
@@ -133,13 +133,13 @@ function createFakeReact() {
  * components plus the RPC stub.
  * @returns {{ registrations: object[], calls: object[] }}
  */
-function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null, onOpenSession = null } = {}) {
+function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null, onOpenSession = null, planning = false, preview = null, launchResults = [] } = {}) {
   const react = createFakeReact()
   const registrations = []
   const calls = []
   let failedOnce = false
 
-  const chainView = {
+  const activeChainView = {
     chain: { chainId: 'chain-1', status: 'active', title: 'demo', objective: 'ship it', featuresTotal: 2, featuresDone: 1, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null },
     head: { goal: null, planMode: headPlanMode, goalHeld: false, goalPausedByRelay: false },
     self: {
@@ -155,6 +155,20 @@ function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null,
     children: [],
     assignedFeatures: [{ id: 'F001', title: 'first', passes: false, evidence: null, verify: 'node test', coverage: 'full', acceptedBy: null }],
   }
+  const planningChain = {
+    chainId: 'chain-plan', status: 'planning', title: 'cluster demo', objective: 'ship it in parallel',
+    featuresTotal: 3, featuresDone: 0, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null,
+    currentSessionId: 'session-plan', mode: 'cluster', launchPending: true, sessions: 1,
+  }
+  const planningChainView = {
+    chain: planningChain,
+    head: { goal: null, planMode: false, goalHeld: false, goalPausedByRelay: false },
+    self: { sessionId: 'session-plan', role: 'initializer', running: true, pressureRatio: 0.1, compactions: 0, planMode: false, goal: null },
+    parent: null,
+    children: [],
+    assignedFeatures: [],
+  }
+  const chainView = planning ? planningChainView : activeChainView
 
   const chainSummary = { chainId: 'chain-1', status: 'active', title: 'demo', objective: 'ship it', featuresTotal: 2, featuresDone: 1, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null, sessions: 1 }
   const panelChains = chains ?? {
@@ -179,6 +193,28 @@ function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null,
     sessions: [{ sessionId: 'session-1', role: 'initializer', running: false, loaded: true, pressureRatio: 0.2, peakRatio: 0.4 }],
     handoff: null,
   }
+  const planningDetail = {
+    chain: planningChain,
+    head: { goal: null, planMode: false, goalHeld: false, goalPausedByRelay: false },
+    maxClusterSessions: 4,
+    features: [
+      { id: 'F001', title: 'first', passes: false, assignedSessionId: null, files: [], dependsOn: [] },
+      { id: 'F002', title: 'second', passes: false, assignedSessionId: null, files: [], dependsOn: [] },
+      { id: 'F003', title: 'third', passes: false, assignedSessionId: null, files: [], dependsOn: [] },
+    ],
+    sessions: [{ sessionId: 'session-plan', role: 'initializer', running: true, loaded: true, pressureRatio: 0.1, peakRatio: 0.1 }],
+    handoff: null,
+    launchPlan: {
+      proposedAt: '2026-11-23T00:00:00.000Z',
+      proposedBy: 'session-plan',
+      note: 'two groups',
+      conflicts: [],
+      groups: [
+        { id: 'G1', title: 'Go API', features: ['F001', 'F002'], isolation: 'shared', reason: 'same router' },
+        { id: 'G2', title: 'Linux', features: ['F003'], isolation: 'shared', reason: 'separate files' },
+      ],
+    },
+  }
 
   const context = {
     connection: {
@@ -193,7 +229,9 @@ function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null,
             return Promise.resolve({ ok: true, value: chainView })
           }
           if (endpoint === 'relay/listChains') return Promise.resolve({ ok: true, value: panelChains })
-          if (endpoint === 'relay/chainDetail') return Promise.resolve({ ok: true, value: panelDetail })
+          if (endpoint === 'relay/chainDetail') return Promise.resolve({ ok: true, value: planning ? planningDetail : panelDetail })
+          if (endpoint === 'relay/previewCluster') return Promise.resolve({ ok: true, value: preview ?? { issues: [], conflicts: [], waiting: [] } })
+          if (endpoint === 'relay/launchCluster') return Promise.resolve({ ok: true, value: { chainId: 'chain-plan', status: 'active', results: launchResults } })
           if (endpoint === 'relay/chainAudit') return Promise.resolve({ ok: true, value: [] })
           return Promise.resolve({ ok: true, value: {} })
         },
@@ -253,6 +291,105 @@ for (const tab of tabs) {
   )
   assert.ok(calls.includes('relay/sessionView'), `the "${label}" tab must request relay/sessionView`)
 }
+
+// The cluster launch dock: only the chain head that is still planning gets it,
+// and confirming it launches the plan on record without opening the panel.
+const planningBoot = boot({ planning: true })
+const launchDock = planningBoot.registrations.find(entry => entry.options.name === 'conversation.input.dock')
+assert.ok(launchDock, 'the launch dock must be registered in conversation.input.dock')
+const dockTree = await planningBoot.react.settle(launchDock.component, { sessionId: 'session-plan' })
+const dockText = collectText(dockTree)
+assert.ok(dockText.includes('launchDockTitle'), 'the planning head must see the launch dock')
+assert.ok(dockText.some(text => text.includes('launchGo')), 'the dock must offer the start action')
+assert.ok(
+  planningBoot.calls.includes('relay/chainDetail') && planningBoot.calls.includes('relay/previewCluster'),
+  'the dock must ask the Host for the plan and its refusals',
+)
+const startButton = nodesOf(dockTree).find(node => node.type === 'button' && String(node.props?.className ?? '').includes('is-cta'))
+assert.ok(startButton, 'the start action must be a primary button')
+startButton.props.onClick()
+const armedTree = await planningBoot.react.settle(launchDock.component, { sessionId: 'session-plan' })
+assert.ok(collectText(armedTree).includes('launchConfirm'), 'the first click must arm a confirmation')
+const confirmButton = nodesOf(armedTree).find(node => node.type === 'button' && String(node.props?.className ?? '').includes('is-cta'))
+assert.ok(confirmButton, 'the armed state must keep a primary confirm button')
+confirmButton.props.onClick()
+await new Promise(resolve => setImmediate(resolve))
+assert.ok(planningBoot.calls.includes('relay/launchCluster'), 'confirming the dock must launch the plan')
+
+// A finished launch reports what happened and stops offering the action; the
+// session view can keep calling the chain planning for a few seconds after the
+// Host has already moved it to active.
+const doneTree = await planningBoot.react.settle(launchDock.component, { sessionId: 'session-plan' })
+const doneText = collectText(doneTree)
+assert.ok(doneText.some(text => text.includes('launchDone')), 'a finished launch must report its outcome')
+assert.ok(
+  !nodesOf(doneTree).some(node => node.type === 'button' && String(node.props?.className ?? '').includes('is-cta')),
+  'a finished launch must not offer the start action again',
+)
+
+// A partial launch resolve is not a full success: the dock names the groups the
+// Host could not open, so the human does not have to find the chain error later.
+const partialBoot = boot({
+  planning: true,
+  launchResults: [
+    { id: 'G1', launched: true, sessionId: 'session-g1' },
+    { id: 'G2', launched: false, reason: 'the session could not be opened' },
+    { id: 'G3', launched: false, waiting: true, waitsFor: ['F001'] },
+  ],
+})
+const partialDock = partialBoot.registrations.find(entry => entry.options.name === 'conversation.input.dock')
+await partialBoot.react.settle(partialDock.component, { sessionId: 'session-plan' })
+const partialTree = await partialBoot.react.settle(partialDock.component, { sessionId: 'session-plan' })
+const partialStart = nodesOf(partialTree).find(node => node.type === 'button' && String(node.props?.className ?? '').includes('is-cta'))
+assert.ok(partialStart, 'the partial launch boot starts from an enabled dock')
+partialStart.props.onClick()
+const partialArmed = await partialBoot.react.settle(partialDock.component, { sessionId: 'session-plan' })
+const partialConfirm = nodesOf(partialArmed).find(node => node.type === 'button' && String(node.props?.className ?? '').includes('is-cta'))
+partialConfirm.props.onClick()
+await new Promise(resolve => setImmediate(resolve))
+const partialDoneTree = await partialBoot.react.settle(partialDock.component, { sessionId: 'session-plan' })
+const partialDoneText = collectText(partialDoneTree)
+assert.ok(partialDoneText.some(text => text.includes('launchDone')), 'a partial launch still reports how many sessions opened')
+assert.ok(partialDoneText.includes('launchFailedGroups'), 'a partial launch must name the groups that did not open')
+assert.ok(partialDoneText.some(text => text.includes('the session could not be opened')), 'a partial launch keeps the Host reason')
+assert.ok(partialDoneText.includes('launchWaitingTitle'), 'a waiting group must be named, not folded into a failure')
+
+// A refusal disables the start action and says why; it never offers a launch that
+// the Host would reject.
+const blockedBoot = boot({ planning: true, preview: { issues: [{ code: 'blocker', action: 'clear it' }], conflicts: [], waiting: [] } })
+const blockedDock = blockedBoot.registrations.find(entry => entry.options.name === 'conversation.input.dock')
+const blockedTree = await blockedBoot.react.settle(blockedDock.component, { sessionId: 'session-plan' })
+assert.ok(collectText(blockedTree).some(text => text.includes('issueBlocker')), 'a refused launch must name the reason')
+const blockedStart = nodesOf(blockedTree).find(node => node.type === 'button' && String(node.props?.className ?? '').includes('is-cta'))
+assert.ok(blockedStart, 'the dock keeps its start button while refused')
+assert.equal(blockedStart.props.disabled, true, 'a refused launch must not be clickable')
+
+// An active chain, and a worker session of a planning chain, get no dock.
+const idleBoot = boot()
+const idleDock = idleBoot.registrations.find(entry => entry.options.name === 'conversation.input.dock')
+const idleTree = await idleBoot.react.settle(idleDock.component, { sessionId: 'session-1' })
+assert.equal(idleTree, null, 'an active chain must not show the launch dock')
+const workerTree = await planningBoot.react.settle(launchDock.component, { sessionId: 'session-worker' })
+assert.equal(workerTree, null, 'only the chain head gets the launch dock')
+
+// The panel keeps the same action at the top of the launch card, not below the groups.
+const planningSummary = {
+  chainId: 'chain-plan', status: 'planning', title: 'cluster demo', objective: 'ship it in parallel',
+  featuresTotal: 3, featuresDone: 0, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null,
+  currentSessionId: 'session-plan', mode: 'cluster', launchPending: true, sessions: 1,
+  sessionsDetail: [{ sessionId: 'session-plan', role: 'initializer', running: true, loaded: true, pressureRatio: 0.1, peakRatio: 0.1 }],
+  head: { goal: null, planMode: false, goalHeld: false, goalPausedByRelay: false },
+}
+const panelPlanning = boot({ planning: true, chains: { chains: [planningSummary] } })
+const planningPanelEntry = panelPlanning.registrations.find(entry => entry.options.name === 'main')
+const planningPanelTree = await panelPlanning.react.settle(planningPanelEntry.component, {})
+const planningPanelText = collectText(planningPanelTree)
+assert.ok(planningPanelText.includes('launchTitle'), 'a planning chain must show its launch card')
+assert.ok(planningPanelText.some(text => text.includes('launchGo')), 'the launch card must show the start action')
+assert.ok(
+  nodesOf(planningPanelTree).some(node => node.type === 'button' && String(node.props?.className ?? '').includes('is-cta')),
+  'the launch card must render a primary start button',
+)
 
 /** Flatten the strings a rendered tree would show. */
 function collectText(node, parts = []) {
@@ -404,4 +541,4 @@ assert.equal(openButtons.length, 3, 'every chain row must offer a way into its c
 for (const button of openButtons) button.props.onClick({ stopPropagation: () => undefined })
 assert.deepEqual(opened, ['session-alpha', 'session-beta', 'session-gamma'], 'a row must open the chain head session it shows')
 
-console.log('session tab render check passed: hook order holds, a read error clears after recovery, and the panel shows the peak ratio')
+console.log('session tab render check passed: hook order holds, a read error clears after recovery, the launch dock starts the plan on record, and the panel shows the peak ratio')
