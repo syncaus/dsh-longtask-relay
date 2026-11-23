@@ -186,7 +186,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 - **`passes` 必须有可用证据**：`evidence` 里要出现命令、退出码或计数。`relay_finish` 会拒绝「通过但证据不足 8 个字符或缺数字」的条目；`relay_checkpoint` 在写入 `passes=true` 时先挡一道（`evidence_too_weak`）。
 - **数字不许手写**：真理源里的计数必须来自 `statusCheck` 的输出引用，否则下一棒会把过时数字当事实。
 - **阻塞分三类**：`external`（等人：账号、机器、只有 owner 能做的决定）、`code`（等自己修）、`decision`（等一个选择）。`external` 会暂停链并写下「谁要做哪件事才解开」，避免继续开新会话空转；链头的 goal 会随链一起暂停，否则目标轮会绕过暂停继续给会话发指令。面板解除阻塞时一并恢复这个 goal。
-- **与桌面端目标功能的关系**：目标（goal）管一个会话内的自动续轮，接力管换会话，两者串行互补。开启 `seedGoalOnHandoff` 后，交接会给新会话按链目标和当前进度建一个 goal，新会话由目标轮驱动继续，而不是跑完交接说明就停住。反过来，链头会话的 goal 进入 `blocked` 时（例如轮次耗尽），链会被记为 external 阻塞并暂停；在目标条里恢复或清除 goal 后，链的这条阻塞会自动解除。对插件按 `seedGoalOnHandoff` 建的 goal，把 `pauseOnExternalBlocker` 关掉时只记录阻塞、继续交接，让新会话重新拿到轮次预算。
+- **与桌面端目标功能的关系**：目标（goal）管一个会话内的自动续轮，接力管换会话，两者串行互补。开启 `seedGoalOnHandoff` 后，交接会给新会话按链目标和当前进度建一个 goal，新会话由目标轮驱动继续，而不是跑完交接说明就停住。反过来，链头会话的 goal 进入 `blocked` 时（例如轮次耗尽），链会被记为 external 阻塞并暂停；在目标条里恢复或清除 goal 后，链的这条阻塞会立即解除（不再等下一次空闲评估），恢复链时也会马上核对 goal 并清理这类过期阻塞。对插件按 `seedGoalOnHandoff` 建的 goal，把 `pauseOnExternalBlocker` 关掉时只记录阻塞、继续交接，让新会话重新拿到轮次预算。
 - **发现新工作只能追加**：`relay_checkpoint` 的 `addFeatures` 需要 `reason`，追加动作会写进 `PROGRESS.md`，让「初始化时没想到」这件事留下痕迹。
 
 ## 与目标模式、计划模式的配合
