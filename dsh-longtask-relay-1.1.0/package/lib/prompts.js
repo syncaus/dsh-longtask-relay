@@ -38,6 +38,12 @@ function featuresSchemaLines(featuresPath) {
   ]
 }
 
+/** Clip one feature field for the compact pending list in the handoff prompt. */
+function clipFeatureText(value, max) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim()
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
 /**
  * Instruction for the session that starts a chain.
  * @param {{ truthDir: string, objective: string }} input - chain start input.
@@ -180,9 +186,38 @@ export function renderHandoffPrompt(input) {
   const features = input.features?.features ?? []
   const pending = features.filter(feature => !feature.passes && (feature.assignedSessionId === null || feature.assignedSessionId === undefined))
   const done = features.filter(feature => feature.passes).length
-  const next = pending
+  const orderedPending = pending
     .slice()
-    .sort((a, b) => Number(a.priority ?? 0) - Number(b.priority ?? 0))[0]
+    .sort((a, b) => Number(a.priority ?? 0) - Number(b.priority ?? 0))
+  const next = orderedPending[0]
+  // Unfinished work a spawned child owns still matters to the new head: it has to
+  // verify those reports and must not duplicate the work. The id and owner are
+  // enough; the child runs its own verify command.
+  const delegatedOpen = features.filter(feature => !feature.passes
+    && typeof feature.assignedSessionId === 'string' && feature.assignedSessionId.length > 0)
+  const delegatedLine = delegatedOpen.length === 0
+    ? null
+    : `Delegated unfinished: ${delegatedOpen.slice(0, 12).map(feature => `${feature.id} (${feature.assignedSessionId})`).join(', ')}${delegatedOpen.length > 12 ? `; ${delegatedOpen.length - 12} more` : ''}`
+  // A compact list of what is left: the successor can start from it instead of
+  // reading a features.json that grows with every evidence block.
+  const pendingLines = orderedPending.slice(0, 12).map((feature) => {
+    const parts = [`- ${feature.id} — ${clipFeatureText(feature.title, 80)}`]
+    if (typeof feature.verify === 'string' && feature.verify.trim().length > 0) {
+      // The feature this session starts with keeps its command whole; the rest
+      // are clipped, and features.json remains the full record.
+      parts.push(`verify: ${clipFeatureText(feature.verify, feature === next ? 400 : 160)}`)
+    }
+    if (Array.isArray(feature.files) && feature.files.length > 0) {
+      parts.push(`files: ${feature.files.slice(0, 2).map(file => clipFeatureText(file, 80)).join(', ')}`)
+    }
+    if (Array.isArray(feature.dependsOn) && feature.dependsOn.length > 0) {
+      parts.push(`deps: ${feature.dependsOn.join(', ')}`)
+    }
+    return parts.join(' · ')
+  })
+  if (orderedPending.length > 12) {
+    pendingLines.push(`- ... ${orderedPending.length - 12} more; see ${paths.features}.`)
+  }
   const verify = next?.verify?.trim() || features[0]?.verify?.trim() || '(run the project test command)'
   const statusCheck = input.features?.statusCheck?.trim() || ''
   const verifyFast = input.features?.verifyFast?.trim() || ''
@@ -203,7 +238,7 @@ export function renderHandoffPrompt(input) {
 
   const steps = [
     `Confirm the working directory is ${input.chain.cwd}.`,
-    `Read ${paths.handoff} (the relay:state block is the contract), then ${paths.progress}, ${paths.decisions}, ${paths.traps}, ${paths.plan} (the chain's plan, if it exists), then ${paths.features}.`,
+    `Read ${paths.handoff}'s relay:state block (the contract), then the last ~80 lines of ${paths.progress}. Use relay_recall for ${paths.decisions}/${paths.traps}/${paths.history}; do not read them in full. Read ${paths.plan} or ${paths.features} only if needed.`,
     ...(statusCheck === ''
       ? []
       : [
@@ -238,6 +273,14 @@ export function renderHandoffPrompt(input) {
     ...(cluster && next === undefined
       ? ['No unassigned feature is left: the remaining work belongs to the workers. Verify their reports and finish when they are done.']
       : []),
+    ...(pendingLines.length === 0
+      ? []
+      : [
+        '',
+        `Pending features (${orderedPending.length}; ${paths.features} is the full record):`,
+        ...pendingLines,
+      ]),
+    ...(cluster || delegatedLine === null ? [] : ['', delegatedLine]),
     ...(blocker === undefined || blocker === null
       ? []
       : [`Known blocker (${blocker.kind}, waits on ${blocker.who}): ${blocker.action || '(no action recorded)'}`]),

@@ -17,6 +17,117 @@ function renderJson(_args, value) {
 /** Open object schema accepting any JSON value. */
 const ANY_OBJECT = { type: 'object', additionalProperties: true }
 
+/** Clip a long string for a compact, model-facing payload. */
+function clipText(value, max) {
+  if (typeof value !== 'string' || value.length <= max) return value
+  return `${value.slice(0, max)}…`
+}
+
+/**
+ * Model-facing status summary.
+ * The panel still reads the full engine status through the Remote namespace;
+ * this projection drops what a supervisor never needs: every retired leg, the
+ * full objective, and the command line behind a background job.
+ * @param {object} chain - one entry of `engine.status()`.
+ * @returns {object} compact chain summary.
+ */
+function compactStatus(chain) {
+  const sessions = Array.isArray(chain.sessionsDetail) ? chain.sessionsDetail : []
+  const active = sessions.filter(session => session.retiredAt === null || session.retiredAt === undefined)
+  const jobs = chain.jobs
+  const conflicts = Array.isArray(chain.conflicts) ? chain.conflicts : []
+  const blocker = chain.blocker
+  const goal = chain.head?.goal
+  return {
+    chainId: chain.chainId,
+    title: clipText(chain.title, 120),
+    status: chain.status,
+    mode: chain.mode,
+    progress: `${chain.featuresDone ?? 0}/${chain.featuresTotal ?? 0}`,
+    currentSessionId: chain.currentSessionId,
+    currentRole: chain.currentRole,
+    sessions: chain.sessions,
+    retiredSessions: sessions.length - active.length,
+    handoffCount: chain.handoffCount,
+    maxHandoffs: chain.maxHandoffs,
+    coveragePartial: chain.coveragePartial ?? 0,
+    launchPending: chain.launchPending === true,
+    handoffPending: chain.handoffPending === true,
+    blocker: blocker === null || blocker === undefined
+      ? null
+      : { kind: blocker.kind, who: blocker.who, action: clipText(blocker.action ?? '', 300), since: blocker.since ?? null },
+    pausedBy: chain.pausedBy ?? null,
+    lastError: chain.lastError === null || chain.lastError === undefined ? null : clipText(chain.lastError, 300),
+    stall: chain.stall ?? null,
+    jobs: jobs === null || jobs === undefined
+      ? null
+      : { running: jobs.running, labels: (jobs.labels ?? []).slice(0, 1).map(value => clipText(value, 120)) },
+    conflicts: conflicts.map(conflict => ({
+      chainId: conflict.chainId,
+      title: clipText(conflict.title ?? '', 80),
+      paths: (conflict.paths ?? []).slice(0, 5).map(value => clipText(value, 120)),
+      features: conflict.features ?? null,
+    })),
+    objective: clipText(chain.objective ?? '', 120),
+    cwd: chain.cwd,
+    updatedAt: chain.updatedAt,
+    head: chain.head === undefined
+      ? null
+      : {
+        planMode: chain.head.planMode === true,
+        held: chain.head.goalHeld === true,
+        pausedByRelay: chain.head.goalPausedByRelay === true,
+        goal: goal === null || goal === undefined
+          ? null
+          : {
+            phase: goal.phase,
+            activation: goal.activation,
+            roundsStarted: goal.roundsStarted ?? 0,
+            maxGoalRounds: goal.maxGoalRounds ?? 0,
+            blockedMessage: goal.blockedMessage === null || goal.blockedMessage === undefined
+              ? null
+              : clipText(goal.blockedMessage, 200),
+          },
+      },
+    sessionsDetail: active.map(session => ({
+      sessionId: session.sessionId,
+      role: session.role,
+      parentSessionId: session.parentSessionId ?? null,
+      running: session.running === true,
+      loaded: session.loaded === true,
+      pressureRatio: session.pressureRatio ?? null,
+      peakRatio: session.peakRatio ?? null,
+      compactions: session.compactions ?? 0,
+    })),
+  }
+}
+
+/**
+ * Clip long strings in one audit detail, keeping the structure and reporting
+ * whether anything was cut.
+ * @param {unknown} value - detail value.
+ * @param {number} [max] - maximum string length.
+ * @returns {{ detail: unknown, truncated: boolean }} clipped detail.
+ */
+function clipDetail(value, max = 300) {
+  let truncated = false
+  const walk = (input) => {
+    if (typeof input === 'string') {
+      if (input.length <= max) return input
+      truncated = true
+      return `${input.slice(0, max)}…`
+    }
+    if (Array.isArray(input)) return input.map(walk)
+    if (input !== null && typeof input === 'object') {
+      const out = {}
+      for (const [key, item] of Object.entries(input)) out[key] = walk(item)
+      return out
+    }
+    return input
+  }
+  return { detail: walk(value), truncated }
+}
+
 /**
  * Turn a thrown failure into a result the model can read.
  * @param {unknown} error - thrown value.
@@ -107,8 +218,8 @@ export function registerTools(ctx, engine) {
 
   ctx.tools.register({
     name: 'relay_status',
-    description: 'Read every relay chain this Host knows about: status, progress, current session, and per-session '
-      + 'pressure and compaction counts.',
+    description: 'Read a compact status of every relay chain: progress, current session, active sessions, blockers, '
+      + 'and workers that still run. Retired legs are summarized; the panel shows the full track.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -124,10 +235,10 @@ export function registerTools(ctx, engine) {
       try {
         const chains = engine.status()
         if (typeof args?.chainId === 'string' && args.chainId.length > 0) {
-          const found = chains.filter(chain => chain.chainId === args.chainId)
+          const found = chains.filter(chain => chain.chainId === args.chainId).map(compactStatus)
           return { ok: true, chains: found }
         }
-        return { ok: true, chains: chains.slice(0, 8), total: chains.length }
+        return { ok: true, chains: chains.slice(0, 8).map(compactStatus), total: chains.length }
       } catch (error) {
         return refusal(error)
       }
@@ -422,14 +533,15 @@ export function registerTools(ctx, engine) {
   ctx.tools.register({
     name: 'relay_audit',
     description: 'Read the append-only audit log of a relay chain: who started it, which features passed or were '
-      + 'reassigned, delegations, blockers, wrap-up decisions, and handoffs, newest last. Use it to explain how the '
-      + 'chain reached its current state.',
+      + 'reassigned, delegations, blockers, wrap-up decisions, and handoffs, newest last. Detail strings are clipped '
+      + 'to keep the result small; pass full=true for the raw records.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
         chainId: { type: 'string', description: 'Chain id; defaults to the chain this session belongs to.' },
-        limit: { type: 'integer', description: 'Newest records to return, from 1 to 200; defaults to 50.' },
+        limit: { type: 'integer', description: 'Newest records to return, from 1 to 200; defaults to 20.' },
+        full: { type: 'boolean', description: 'Return raw detail strings instead of clipping them at 300 characters.' },
       },
     },
     output: { schema: ANY_OBJECT, render: renderJson },
@@ -437,11 +549,26 @@ export function registerTools(ctx, engine) {
     execute(args, exec) {
       const refused = call(exec.agent)
       if (refused !== undefined) return refused
-      const limit = Number.isInteger(args?.limit) && args.limit > 0 ? Math.min(args.limit, 200) : 50
+      const limit = Number.isInteger(args?.limit) && args.limit > 0 ? Math.min(args.limit, 200) : 20
+      const full = args?.full === true
       try {
         const resolved = engine.resolveChain(exec.agent, args?.chainId)
         const records = engine.audit(resolved.chain.chainId, limit)
-        return { ok: true, chainId: resolved.chain.chainId, count: records.length, records }
+        if (full) return { ok: true, chainId: resolved.chain.chainId, count: records.length, records }
+        const clipped = records.map((record) => {
+          const { detail, truncated } = clipDetail(record.detail)
+          return truncated ? { ...record, detail, truncated: true } : record
+        })
+        const truncated = clipped.some(record => record.truncated === true)
+        return {
+          ok: true,
+          chainId: resolved.chain.chainId,
+          count: clipped.length,
+          records: clipped,
+          ...(truncated
+            ? { detailTruncated: true, note: 'Detail strings are clipped to 300 characters; pass full=true for the raw records.' }
+            : {}),
+        }
       } catch (error) {
         return refusal(error)
       }
