@@ -975,6 +975,66 @@ check('relay_checkpoint refuses weak evidence and unexplained additions', () => 
   assert.equal(prose.code, 'evidence_too_weak')
 })
 
+check('relay_status sends a compact summary instead of the panel payload', () => {
+  const registered = new Map()
+  const long = 'x'.repeat(400)
+  const chain = {
+    chainId: 'chain-1', title: 'demo', objective: long, cwd: '/w', status: 'active', mode: 'cluster',
+    featuresTotal: 3, featuresDone: 1, currentSessionId: 's-head', currentRole: 'worker', sessions: 3,
+    handoffCount: 1, maxHandoffs: 32, launchPending: false, blocker: null, pausedBy: null, lastError: long,
+    coveragePartial: 0, stall: null, handoffPending: false, updatedAt: '2026-01-01T00:00:00.000Z',
+    jobs: { running: 1, labels: [long] },
+    conflicts: [{ chainId: 'chain-2', title: 'other', paths: ['src/a'], features: { mine: ['F001'], other: ['F002'] } }],
+    sessionsDetail: [
+      { sessionId: 's-head', role: 'worker', retiredAt: null, running: true, loaded: true, pressureRatio: 0.1, peakRatio: 0.2, compactions: 0, parentSessionId: null },
+      { sessionId: 's-old', role: 'initializer', retiredAt: '2026-01-01', running: false, loaded: true, pressureRatio: 0.5, peakRatio: 0.5, compactions: 0, parentSessionId: null },
+      { sessionId: 's-w1', role: 'worker', retiredAt: null, running: false, loaded: true, pressureRatio: 0.3, peakRatio: 0.3, compactions: 0, parentSessionId: 's-old' },
+    ],
+    head: { goal: null, planMode: false, goalHeld: false, goalPausedByRelay: false },
+  }
+  registerTools({ tools: { register: definition => registered.set(definition.name, definition) } }, { status: () => [chain] })
+  const result = registered.get('relay_status').execute({}, { agent: { session: { header: {} } } })
+  assert.equal(result.ok, true)
+  const compact = result.chains[0]
+  assert.equal(compact.progress, '1/3')
+  assert.equal(compact.mode, 'cluster')
+  assert.ok(compact.objective.length <= 121, 'the objective is clipped')
+  assert.ok(compact.lastError.length <= 301, 'the error is clipped')
+  assert.ok(compact.jobs.labels[0].length <= 121, 'a job label is clipped')
+  assert.equal(compact.retiredSessions, 1)
+  assert.deepEqual(compact.sessionsDetail.map(session => session.sessionId), ['s-head', 's-w1'], 'retired legs are summarized')
+  assert.ok(JSON.stringify(compact).length < 2000, `the compact payload must stay small, got ${JSON.stringify(compact).length}`)
+})
+
+check('relay_audit defaults to a bounded window and clips long details, with a full override', () => {
+  const registered = new Map()
+  const records = Array.from({ length: 30 }, (_, index) => ({
+    at: '2026-01-01T00:00:00.000Z',
+    kind: 'feature.passed',
+    actor: 'session-x',
+    detail: { id: `F${index}`, evidence: 'e'.repeat(1000) },
+  }))
+  let seenLimit = null
+  const engine = {
+    resolveChain: () => ({ chain: { chainId: 'chain-1' } }),
+    audit: (_chainId, limit) => { seenLimit = limit; return records.slice(0, limit) },
+  }
+  registerTools({ tools: { register: definition => registered.set(definition.name, definition) } }, engine)
+  const definition = registered.get('relay_audit')
+  const exec = { agent: { session: { header: {} } } }
+  const clipped = definition.execute({}, exec)
+  assert.equal(seenLimit, 20, 'the default window is 20 records')
+  assert.equal(clipped.records.length, 20)
+  assert.ok(clipped.records[0].detail.evidence.endsWith('…'), 'long detail strings are clipped')
+  assert.ok(clipped.records[0].detail.evidence.length <= 301)
+  assert.equal(clipped.records[0].truncated, true)
+  assert.equal(clipped.detailTruncated, true)
+  const full = definition.execute({ full: true, limit: 2 }, exec)
+  assert.equal(full.records.length, 2)
+  assert.equal(full.records[0].detail.evidence.length, 1000, 'full=true returns the raw detail')
+  assert.equal(full.detailTruncated, undefined)
+})
+
 await checkAsync('requireHumanAcceptedCoverage=false lets partial work finish', async () => {
   const world = fakeWorld({ requireHumanAcceptedCoverage: false })
   world.local.writeFeatures(world.chain.chainId, {
@@ -1670,6 +1730,7 @@ check('the handoff prompt skips delegated features and sorts by priority', () =>
     truthDir: '/w/.relay/chain-x',
   })
   assert.match(prompt, /Next feature: F003/)
+  assert.ok(prompt.includes('Delegated unfinished: F002 (session-w)'), 'the head must see which unfinished work a worker owns')
 })
 
 await checkAsync('clearing an external blocker resumes a chain paused by it', async () => {
@@ -1997,6 +2058,30 @@ check('a cluster handoff names the workers and the verification rule', () => {
   // The single-session relay keeps the old prompt: no worker section.
   const relay = renderHandoffPrompt({ ...base, chain: { ...base.chain, mode: 'relay' } })
   assert.ok(!relay.includes('Cluster rules'))
+})
+
+check('the handoff prompt lists pending features and points at recall instead of full ledgers', () => {
+  const prompt = renderHandoffPrompt({
+    chain: { chainId: 'chain-x', objective: 'o', cwd: '/w' },
+    features: {
+      statusCheck: '',
+      features: [
+        { id: 'F001', title: 'one', passes: false, verify: 'node one.mjs', files: ['src/a'], dependsOn: [] },
+        { id: 'F002', title: 'two', passes: false, verify: 'node two.mjs' },
+        { id: 'F003', title: 'done', passes: true, verify: 'true' },
+      ],
+    },
+    handoff: '<!-- relay:state -->\n- x\n<!-- /relay:state -->',
+    handoffNo: 1,
+    previousSessionId: 'session-old',
+    truthDir: '/w/.relay/chain-x',
+  })
+  assert.match(prompt, /Pending features/)
+  assert.ok(prompt.includes('F001') && prompt.includes('F002') && prompt.includes('node one.mjs'))
+  assert.ok(!/^- F003/m.test(prompt), 'a passing feature is not in the pending list')
+  assert.match(prompt, /relay_recall/)
+  assert.match(prompt, /last ~?\d+ lines/i)
+  assert.match(prompt, /do not read .*in full/i)
 })
 
 check('a nested truthDir still resolves the workspace cwd', () => {

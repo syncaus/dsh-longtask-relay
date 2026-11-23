@@ -51,7 +51,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 
 这三条命令和覆盖率取值都与技术栈无关：Rust 的 `cargo test`、Java 的 `mvn verify`、前端 `tsc --noEmit`、Python 的 `pytest -q` 都能当 `verifyFast`/`verifyFull`；输出被识别为证据的形态包括比例（`41/41`）、退出码（`exit 0`）、结论词（`ok`/`passed`/`BUILD SUCCESS`/`通过`）。
 
-之后每完成一个功能，模型调用 `relay_checkpoint` 记录进度。会话空闲且上下文比例越过阈值时，插件先发一条收尾指令（做完当前单元、写进度、跑验证），下一轮空闲创建新会话并投递交接说明；新会话从真理源重建上下文，而不是复制旧对话。每次交接，插件把上一份交接说明自动追加到 `history.md`，新会话可以用 `relay_recall` 检索更早的交接和台账，不必全量读文件。
+之后每完成一个功能，模型调用 `relay_checkpoint` 记录进度。会话空闲且上下文比例越过阈值时，插件先发一条收尾指令（做完当前单元、写进度、跑验证），下一轮空闲创建新会话并投递交接说明；新会话从真理源重建上下文，而不是复制旧对话。交接说明里带一份未完成功能的紧凑清单（id、标题、verify、files、deps），并要求只读 `HANDOFF.md` 的 `relay:state` 块和 `PROGRESS.md` 尾部；`decisions.md` / `traps.md` / `history.md` 用 `relay_recall` 检索，不整份读，`PLAN.md` / `features.json` 只在需要时读。每次交接，插件把上一份交接说明自动追加到 `history.md`。
 
 **并行与续跑**：`relay_spawn` 把一部分功能交给子会话并行做；子会话上下文吃紧时，插件让它收尾并把未完成的功能交还链（清掉分配、写 PROGRESS），而不是只能压缩。父会话可以用 `relay_control(action="reclaim")` 随时收回。打开 `autoContinue` 后，链头空闲且没有 goal 驱动时会自动续跑下一个未委派的功能，超过 `maxAutoContinues` 记阻塞并暂停链。
 
@@ -86,9 +86,9 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 |---|---|
 | `relay_start` | 开始一条链，当前会话成为 initializer；`mode: "cluster"` 以集群模式开始 |
 | `relay_propose` | 集群模式下提交启动方案（分组、隔离方式、理由），等人确认 |
-| `relay_status` | 读出所有链的状态、进度、每个会话的上下文占用与压缩次数 |
+| `relay_status` | 紧凑读出所有链的状态、进度、当前会话和在跑的 worker；退役腿只给计数，完整轨道看面板 |
 | `relay_checkpoint` | 更新功能状态 / 证据 / 覆盖率，追加发现的新功能，记录阻塞，标记 `ready` |
-| `relay_audit` | 读链的审计日志 |
+| `relay_audit` | 读链的审计日志；默认 20 条、detail 字符串截到 300 字符，`full=true` 取原文 |
 | `relay_recall` | 按关键词检索链内记忆（PLAN / HANDOFF / history / PROGRESS / decisions / traps / features / audit） |
 | `relay_finish` | 结束链；功能没全部通过时会被拒绝并列出剩余项 |
 | `relay_spawn` | 把一部分功能交给新的子会话并行执行（仅链头会话可调用） |
