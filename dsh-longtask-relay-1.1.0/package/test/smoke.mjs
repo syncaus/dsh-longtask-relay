@@ -428,6 +428,45 @@ await checkAsync('a reload repairs a head goal left active on a blocked chain', 
   restarted.dispose()
 })
 
+await checkAsync('resuming a goal clears a goal-owned blocker immediately, without an idle event', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  world.local.update(world.chain.chainId, record => {
+    record.status = 'paused'
+    record.pausedBy = 'blocker'
+    record.blocker = { kind: 'external', who: 'human', action: 'goal blocked: wait for authorization', since: new Date().toISOString() }
+  })
+  const chain = world.engine.reconcileGoalBlocker(world.chain.chainId, world.local)
+  assert.equal(chain.blocker, null)
+  assert.equal(chain.status, 'active')
+  assert.equal(goals.views.get('session-old').phase, 'active')
+  assert.ok(auditOf(world, 'blocker.cleared').some(record => record.actor === 'system' && record.detail.why === 'goal-resumed'))
+})
+
+await checkAsync('a goal that becomes blocked records the blocker at once', async () => {
+  const world = fakeWorld()
+  withGoals(world, {
+    'session-old': goalView({ phase: 'blocked', blockedReason: { code: 'model-reported', message: 'needs authorization' } }),
+  })
+  const chain = world.engine.reconcileGoalBlocker(world.chain.chainId, world.local)
+  assert.equal(chain.status, 'paused')
+  assert.equal(chain.blocker.kind, 'external')
+  assert.match(chain.blocker.action, /^goal blocked: needs authorization/)
+})
+
+await checkAsync('a reload clears a stale goal-owned blocker on an active chain', async () => {
+  const world = fakeWorld()
+  withGoals(world, { 'session-old': goalView() })
+  world.local.update(world.chain.chainId, record => {
+    record.blocker = { kind: 'external', who: 'human', action: 'goal blocked: stale', since: new Date().toISOString() }
+  })
+  const restarted = world.rebuild()
+  restarted.resumeEvaluations()
+  assert.equal(world.local.readChain(world.chain.chainId).blocker, null)
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'active')
+  restarted.dispose()
+})
+
 await checkAsync('a disarmed head goal is not paused by an external blocker', async () => {
   const world = fakeWorld()
   const goals = withGoals(world, { 'session-old': goalView({ activation: 'disarmed' }) })

@@ -60,6 +60,16 @@ export function apply(ctx, config) {
     })
 
     const offEvent = ctx.on('session/event', (session, event) => {
+      if (event.type === 'goal/change') {
+        // Resuming or clearing a blocked goal must clear the chain's mirrored
+        // blocker at once; no idle event follows a goal change.
+        try {
+          engine.reconcileGoalBlockerForSession(session.id)
+        } catch (error) {
+          engine.warn(`could not reconcile the goal blocker of ${session.id}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        return
+      }
       if (event.type !== 'compaction/end') return
       if (event.data?.error !== undefined) return
       engine.noteCompaction(session.id)
