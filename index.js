@@ -39,6 +39,7 @@ export function apply(ctx, config) {
     const offCreated = ctx.on('agent/created', ({ agent }) => {
       try {
         engine.sessionLoaded(agent.id)
+        engine.pauseGoalForDeletedSession(agent)
         const located = engine.locate(agent.session)
         // A session that is already idle emits no further idle event, so a goal
         // left disarmed by a restart would never be looked at without this. A loaded
