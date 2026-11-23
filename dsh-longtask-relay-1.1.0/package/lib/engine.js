@@ -16,7 +16,7 @@ import { sessionTitle } from './labels.js'
 import {
   renderClusterGroupOpenedNotice, renderClusterLaunchedNotice, renderClusterPlanningPrompt,
   renderContinuePrompt, renderDelegationPrompt, renderHandoffPrompt, renderInitializerPrompt,
-  renderReclaimNotice, renderRetireNotice, renderWorkerWrapupPrompt, renderWrapupPrompt,
+  renderReclaimNotice, renderRetireNotice, renderWorkerReportNotice, renderWorkerWrapupPrompt, renderWrapupPrompt,
 } from './prompts.js'
 
 /** Freeze one value and everything below it. */
@@ -998,6 +998,10 @@ export class RelayEngine {
     }
     // A pause, or features that passed or changed hands, change what the workers' goals should be doing.
     this.syncWorkerGoals(chain, store)
+    const passedNow = after.filter(feature => beforePasses.get(feature.id) === false && feature.passes)
+    if (worker && chain.mode === 'cluster' && passedNow.length > 0 && (updated?.status ?? chain.status) === 'active') {
+      this.notifyClusterHead(updated ?? chain, store, agent, after, passedNow)
+    }
     return {
       chainId: chain.chainId,
       status: updated?.status ?? chain.status,
@@ -1010,6 +1014,46 @@ export class RelayEngine {
       // Another chain in this workspace is building the same paths right now:
       // the session cannot pause it, so this is for the model to report upward.
       conflicts: this.crossChainConflicts(updated ?? chain, store.readFeatures(chain.chainId)),
+    }
+  }
+
+  /**
+   * Wake the cluster head when a worker gets features passing.
+   * A worker's evidence is a claim; the head has to re-run the verify commands,
+   * so it gets a short notice instead of discovering the pass on its next poll.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object|undefined} agent - the worker that reported.
+   * @param {{ features?: Array<object> }|undefined} document - the updated features.
+   * @param {Array<object>} passed - features that flipped to passing in this checkpoint.
+   * @returns {void}
+   */
+  notifyClusterHead(chain, store, agent, document, passed) {
+    if (agent === undefined) return
+    const workerId = agent.session?.id ?? agent.id
+    if (typeof workerId !== 'string' || workerId.length === 0) return
+    const headId = chain.currentSessionId
+    if (typeof headId !== 'string' || headId === workerId) return
+    const head = this.ctx.get('agents')?.get(headId)
+    if (head === undefined) return
+    const features = document?.features ?? []
+    const owned = features.filter(feature => feature.assignedSessionId === workerId)
+    const remaining = owned.filter(feature => !feature.passes).map(feature => feature.id)
+    try {
+      head.followup(relayMessage(renderWorkerReportNotice({
+        chainId: chain.chainId,
+        truthDir: join(store.truthDir, chain.chainId),
+        workerSessionId: workerId,
+        passed: passed.map(feature => ({
+          id: feature.id,
+          title: feature.title ?? '',
+          coverage: feature.coverage ?? null,
+        })),
+        remaining,
+        total: owned.length,
+      })))
+    } catch (error) {
+      this.warn(`could not queue the worker report to ${headId}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -2796,7 +2840,14 @@ export class RelayEngine {
       acceptedBy: feature.acceptedBy ?? null,
     })
     const children = chain.sessions
-      .filter(session => session.parentSessionId === sessionId)
+      .filter((session) => {
+        if (session.parentSessionId === sessionId) return true
+        // A cluster head inherits the workers its predecessors launched: they
+        // were spawned by an earlier leg, and the current head still verifies
+        // and reclaims them.
+        return chain.mode === 'cluster' && chain.currentSessionId === sessionId
+          && session.parentSessionId !== null && session.parentSessionId !== undefined
+      })
       .map(session => {
         const owned = features.filter(feature => feature.assignedSessionId === session.sessionId)
         return {
@@ -3817,6 +3868,8 @@ export class RelayEngine {
    * owner already used); the caller records a blocker instead. A user's goal that is blocked, or
    * paused by the user, is not replaced either; a goal the panel paused together with the chain
    * counts as active. A blocked goal is reported as `blocked` so the caller can leave a blocker.
+   * A cluster head keeps driving the workers after a handoff, so `clusterGoals` seeds one even when
+   * `seedGoalOnHandoff` is off.
    * @param {object} chain - chain record.
    * @param {import('./chain-store.js').ChainStore} store - its store.
    * @param {object} oldAgent - the retiring session.
@@ -3832,7 +3885,14 @@ export class RelayEngine {
     const seededPrevious = recorded && (oldEntry.goalSeeded === true
       || (oldEntry.goalSeeded === undefined && this.auditSeeded(store, chain.chainId, previous.id)))
     if (!this.config.inheritGoal || previous === undefined || seededPrevious || previous.phase === 'complete') {
-      const id = this.config.seedGoalOnHandoff ? this.seedGoal(chain, store, newAgent) : undefined
+      let id
+      if (this.config.seedGoalOnHandoff) {
+        id = this.seedGoal(chain, store, newAgent)
+      } else if (chain.mode === 'cluster' && this.config.clusterGoals) {
+        // Without this the new cluster head would stop after its first turn and
+        // nothing would verify the workers' reports.
+        id = this.createChainGoal(chain, store, newAgent)
+      }
       return id === undefined ? {} : { goalId: id, seeded: true }
     }
     // From here the goal is the user's (or one inherited from the user's).

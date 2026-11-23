@@ -188,6 +188,18 @@ export function renderHandoffPrompt(input) {
   const verifyFast = input.features?.verifyFast?.trim() || ''
   const summary = stateBlockLines(input.handoff)
   const blocker = input.chain.blocker
+  const cluster = input.chain.mode === 'cluster'
+  const workers = cluster
+    ? (input.chain.sessions ?? []).filter(session => typeof session.parentSessionId === 'string'
+      && session.sessionId !== input.previousSessionId)
+    : []
+  const workerLines = workers.map((worker) => {
+    const mine = features.filter(feature => feature.assignedSessionId === worker.sessionId)
+    const open = mine.filter(feature => !feature.passes)
+    const passed = mine.length - open.length
+    return `- ${worker.sessionId}: ${passed}/${mine.length} passed${open.length === 0 ? '' : `; unfinished: ${open.map(feature => feature.id).join(', ')}`}`
+  })
+  if (workers.length > 8) workerLines.push(`- ... and ${workers.length - 8} more worker sessions; see relay_status or the panel.`)
 
   const steps = [
     `Confirm the working directory is ${input.chain.cwd}.`,
@@ -201,7 +213,9 @@ export function renderHandoffPrompt(input) {
       ]),
     `Run the verification command once (${verifyFast || verify || 'as recorded in features.json'}).\n`
     + '   If it fails, fix that first and record why in PROGRESS.md.',
-    'Work on the single highest-priority feature whose "passes" is false.',
+    cluster
+      ? 'Work on the single highest-priority feature whose "passes" is false and that has no assignedSessionId; the workers own theirs.'
+      : 'Work on the single highest-priority feature whose "passes" is false.',
   ]
 
   return [
@@ -221,9 +235,27 @@ export function renderHandoffPrompt(input) {
       ? [`Earlier handoffs: ${input.historyEntries} record(s) in ${paths.history}; search it with relay_recall before reading it in full.`]
       : []),
     ...(next === undefined ? [] : [`Next feature: ${next.id} — ${next.title}`]),
+    ...(cluster && next === undefined
+      ? ['No unassigned feature is left: the remaining work belongs to the workers. Verify their reports and finish when they are done.']
+      : []),
     ...(blocker === undefined || blocker === null
       ? []
       : [`Known blocker (${blocker.kind}, waits on ${blocker.who}): ${blocker.action || '(no action recorded)'}`]),
+    ...(cluster
+      ? [
+        '',
+        'Cluster chain: this head planned a parallel launch; the workers below keep running on their own.',
+        ...(workerLines.length === 0
+          ? ['No worker session is recorded yet; check the panel before delegating again.']
+          : ['Worker sessions:', ...workerLines]),
+        '',
+        'Cluster rules:',
+        '- Your own work is the features with no assignedSessionId; never duplicate a feature a worker owns.',
+        '- A worker\'s report is a claim: re-run that feature\'s verify command before trusting it. A passing report',
+        '  wakes you, a progress-only checkpoint does not; check relay_status, features.json, or the panel\'s downstream tab before stopping.',
+        '- A stuck worker can be reclaimed with relay_control (reclaim); its unfinished features come back to you.',
+      ]
+      : []),
     '',
     'Do this first, in order, before any other work:',
     ...steps.map((step, index) => `${index + 1}. ${step}`),
@@ -419,6 +451,37 @@ export function renderClusterGroupOpenedNotice(input) {
     ...input.groups.map(group => `- ${group.sessionId} (group ${group.id}): ${group.features.join(', ')}`),
     'Treat their reports like the other workers\': re-run each verify command before trusting a feature.',
     '</relay_cluster_group_opened>',
+  ].join('\n')
+}
+
+/**
+ * Notice to a cluster head when a worker got features passing.
+ * It only points at the report: the head still re-runs the verify commands.
+ * @param {{
+ *   chainId: string,
+ *   truthDir: string,
+ *   workerSessionId: string,
+ *   passed: Array<{ id: string, title?: string, coverage?: string|null }>,
+ *   remaining: Array<string>,
+ *   total: number,
+ * }} input - worker report.
+ * @returns {string} the notice text.
+ */
+export function renderWorkerReportNotice(input) {
+  const paths = truthPaths({ truthDir: input.truthDir })
+  const passed = input.passed ?? []
+  const remaining = input.remaining ?? []
+  return [
+    '<relay_worker_report>',
+    `Worker ${input.workerSessionId} reports features passing in chain ${input.chainId}:`,
+    ...passed.map(feature => `- ${feature.id}${feature.title ? ` — ${feature.title}` : ''}${feature.coverage ? ` (coverage ${feature.coverage})` : ''}`),
+    remaining.length === 0
+      ? 'That worker has no unfinished features left.'
+      : `Its unfinished features: ${remaining.join(', ')} (${input.total - remaining.length}/${input.total} passed).`,
+    '',
+    'A worker\'s evidence is a claim: re-run each feature\'s verify command before trusting it.',
+    `Check the other workers with relay_status, ${paths.features}, or the panel's downstream tab.`,
+    '</relay_worker_report>',
   ].join('\n')
 }
 

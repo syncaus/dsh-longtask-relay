@@ -119,6 +119,17 @@ relay_propose                AI 提交启动方案：分组、隔离方式、理
 
 派发提示词现在有一句「不要开链、派生会话或交接」。集群启动的子会话改成：不要开链、不要用 `relay_spawn`；可以用 DSH 的子代理工具把自己的功能再拆开做，结果由自己负责验收和回报。不需要新机制。
 
+### 链头交接
+
+集群链启动后，链头本身仍会按上下文压力交接。交接后：
+
+- 链保持 `mode: 'cluster'` 与 `launchPlan`；worker 会话及其 goal 不动，不重新洗牌。
+- `clusterGoals` 开着时，交接给新链头建 goal（`createChainGoal`，轮次 `goalRoundsPerHandoff`），不受 `seedGoalOnHandoff` 影响；否则新链头只做未派发功能，worker 的通过项没人验收。
+- 交接提示词（`renderHandoffPrompt`）输出集群段：worker 会话、各自未完成的功能、监督规则（只做没有 `assignedSessionId` 的功能；worker 报通过要复跑 verify；worker 的回报不会自己叫醒链头，停之前查 `relay_status` 或面板）。
+- `sessionView` 对集群链头列出链内全部 worker（`parentSessionId` 非空），包括前任链头派出的；「下游」页签会说明这一点。
+- worker 的 `relay_checkpoint` 有功能转为通过时，给链头发一条 `<relay_worker_report>`；只写进度、没有功能转通过时不打扰。链头未加载时不发。
+- 面板接力轨道仍按派发关系把 worker 挂在原来那一棒下面，与「下游」页签的范围不同：一个是历史归属，一个是当前链头可验收的全部 worker。
+
 ### 规划段内的既有行为
 
 - **自动交接**：`evaluate` 只处理 `active` / `initializing`，`planning` 的链不会被自动收尾或交接。已知限制：规划对话特别长时没有接力，靠 `SPEC.md` / `PLAN.md` 落盘兜底。

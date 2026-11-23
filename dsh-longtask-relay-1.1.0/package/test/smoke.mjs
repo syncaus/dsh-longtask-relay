@@ -1964,6 +1964,41 @@ check('handoff steps are numbered without gaps', () => {
   assert.deepEqual(statusNumbers, [1, 2, 3, 4, 5])
 })
 
+check('a cluster handoff names the workers and the verification rule', () => {
+  const base = {
+    chain: {
+      chainId: 'chain-c', objective: 'parallel work', cwd: '/w', mode: 'cluster', blocker: null,
+      sessions: [
+        { sessionId: 'session-old', parentSessionId: null },
+        { sessionId: 'session-w1', parentSessionId: 'session-old' },
+        { sessionId: 'session-w2', parentSessionId: 'session-old' },
+      ],
+    },
+    features: {
+      statusCheck: '',
+      features: [
+        { id: 'F001', title: 'one', passes: true, assignedSessionId: 'session-w1', verify: 'true' },
+        { id: 'F002', title: 'two', passes: false, assignedSessionId: 'session-w1', verify: 'node two' },
+        { id: 'F003', title: 'three', passes: false, assignedSessionId: 'session-w2', verify: 'node three' },
+        { id: 'F004', title: 'four', passes: false, verify: 'node four' },
+      ],
+    },
+    handoff: '<!-- relay:state -->\n- x\n<!-- /relay:state -->',
+    handoffNo: 1,
+    previousSessionId: 'session-old',
+    truthDir: join(tmpdir(), 'relay-cluster-prompt'),
+  }
+  const prompt = renderHandoffPrompt(base)
+  assert.match(prompt, /<relay_handoff>/)
+  assert.match(prompt, /Cluster rules/)
+  assert.ok(prompt.includes('- session-w1:') && prompt.includes('- session-w2:'), 'workers must be listed')
+  assert.ok(prompt.includes('F002') && prompt.includes('F003'), 'unfinished worker features must be named')
+  assert.match(prompt, /re-run .*verify/i)
+  // The single-session relay keeps the old prompt: no worker section.
+  const relay = renderHandoffPrompt({ ...base, chain: { ...base.chain, mode: 'relay' } })
+  assert.ok(!relay.includes('Cluster rules'))
+})
+
 check('a nested truthDir still resolves the workspace cwd', () => {
   const home = mkdtempSync(join(tmpdir(), 'relay-nested-home-'))
   const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-nested-ws-'))
@@ -3223,6 +3258,69 @@ await checkAsync('a fingerprint that cannot be written does not fail the launch'
   assert.equal(result.status, 'active')
   assert.equal(world.local.readChain(world.chain.chainId).status, 'active')
   assert.equal(world.calls.filter(call => call.kind === 'create').length, 2)
+})
+
+/** Write a brief that is newer than the one the current head received. */
+function writeFreshBrief(world) {
+  world.local.writeHandoff(world.chain.chainId, '# HANDOFF\n\n<!-- relay:state -->\n- step: pass the chain on\n<!-- /relay:state -->\n')
+}
+
+await checkAsync('a cluster handoff re-seeds the head goal, keeps the workers visible, and forwards reports', async () => {
+  const world = clusterWorld()
+  const goals = withGoals(world)
+  proposeTwoGroups(world)
+  await world.engine.launchCluster({ chainId: world.chain.chainId })
+  assert.ok(goals.ops('create').some(op => op.agentId === 'session-head'), 'the launch seeds the head goal')
+
+  writeFreshBrief(world)
+  const handed = await world.engine.handoff(world.local.readChain(world.chain.chainId), world.head, 'manual', world.local)
+  const newHead = handed.newSessionId
+  assert.ok(typeof newHead === 'string' && newHead !== 'session-head')
+
+  // The cluster head keeps driving after the handoff even though seedGoalOnHandoff is off.
+  assert.equal(goals.ops('create').filter(op => op.agentId === newHead).length, 1)
+  const entry = world.local.readChain(world.chain.chainId).sessions.find(session => session.sessionId === newHead)
+  assert.equal(entry.goalId, `goal-for-${newHead}`)
+  assert.equal(entry.goalSeeded, true)
+
+  // The handoff prompt must tell the new head that it is running a cluster.
+  const prompt = world.calls.filter(call => call.kind === 'prompt').at(-1).text
+  assert.match(prompt, /<relay_handoff>/)
+  assert.match(prompt, /Cluster rules/)
+  assert.ok(prompt.includes('session-w1') && prompt.includes('session-w2'), 'the workers must be named')
+
+  // The new head's downstream view inherits the workers the previous head launched.
+  const view = world.engine.sessionView(newHead)
+  assert.equal(view.chain.mode, 'cluster')
+  assert.deepEqual(view.children.map(child => child.sessionId).sort(), ['session-w1', 'session-w2'])
+
+  // A worker reporting a passing feature wakes the new head; a progress-only note does not.
+  const worker = world.agents.get('session-w1')
+  const owned = world.local.readFeatures(world.chain.chainId).features
+    .find(feature => feature.assignedSessionId === 'session-w1' && !feature.passes)
+  world.calls.length = 0
+  world.engine.checkpoint({ agent: worker, features: [{ id: owned.id, passes: true, evidence: 'ran it', coverage: 'full' }] })
+  const notice = world.calls.find(call => call.kind === 'followup' && call.sessionId === newHead)
+  assert.ok(notice, 'the worker report must wake the new head')
+  assert.match(notice.text, /<relay_worker_report>/)
+  assert.ok(notice.text.includes(owned.id))
+
+  world.calls.length = 0
+  world.engine.checkpoint({ agent: worker, note: 'still working' })
+  assert.equal(world.calls.filter(call => call.kind === 'followup' && call.sessionId === newHead).length, 0)
+})
+
+await checkAsync('a cluster handoff creates no head goal when clusterGoals is off', async () => {
+  const world = clusterWorld({ clusterGoals: false })
+  const goals = withGoals(world)
+  proposeTwoGroups(world)
+  await world.engine.launchCluster({ chainId: world.chain.chainId })
+  assert.equal(goals.ops('create').length, 0)
+  writeFreshBrief(world)
+  const handed = await world.engine.handoff(world.local.readChain(world.chain.chainId), world.head, 'manual', world.local)
+  assert.equal(goals.ops('create').length, 0)
+  const entry = world.local.readChain(world.chain.chainId).sessions.find(session => session.sessionId === handed.newSessionId)
+  assert.equal(entry.goalId, undefined)
 })
 
 check('previewCluster reports conflicts with group positions and waiting groups, and writes nothing', () => {
