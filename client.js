@@ -2780,10 +2780,13 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const parent = view.parent ?? null
           const delegated = parent !== null
           // A delegated session owns what it was assigned; a main-line session
-          // owns whatever was not delegated to anyone.
+          // owns the features no child worker holds, including ones a retired
+          // mainline leg still owns.
           const features = delegated
             ? (Array.isArray(view.assignedFeatures) ? view.assignedFeatures : [])
-            : (Array.isArray(view.openFeatures) ? view.openFeatures : [])
+            : (Array.isArray(view.mainlineFeatures)
+              ? view.mainlineFeatures
+              : (Array.isArray(view.openFeatures) ? view.openFeatures : []))
           const done = features.filter(feature => feature.passes).length
           const state = stateOf(self)
           const currentId = view.chain.currentSessionId

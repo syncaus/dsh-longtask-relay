@@ -549,6 +549,40 @@ await checkAsync('the successor gets no goal by default', async () => {
   assert.ok(!world.calls.some(call => call.kind === 'goal-create'))
 })
 
+await checkAsync('a handoff returns unfinished features the retiring head owns to the main line', async () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  const document = world.local.readFeatures(chainId)
+  document.features[0].assignedSessionId = 'session-old'
+  world.local.writeFeatures(chainId, document)
+  await handOffOnce(world)
+  const feature = world.local.readFeatures(chainId).features[0]
+  assert.equal(feature.assignedSessionId, null, 'the retiring head\'s unfinished feature must go back to the main line')
+  assert.ok(world.local.readAudit(chainId, 50).some(record => record.kind === 'delegation.reclaimed'
+    && record.detail.features.includes('F001')), 'the return must be audited')
+  const view = world.engine.sessionView('session-new')
+  assert.ok(view.openFeatures.some(entry => entry.id === 'F001'), 'the successor must see it as open mainline work')
+  assert.ok(view.mainlineFeatures.some(entry => entry.id === 'F001'), 'the mainline view must list it')
+})
+
+await checkAsync('the mainline view keeps a passed feature a retired mainline leg owns', async () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  const document = world.local.readFeatures(chainId)
+  document.features[0].passes = true
+  document.features[0].evidence = 'ran true'
+  document.features[0].assignedSessionId = 'session-old'
+  world.local.writeFeatures(chainId, document)
+  await handOffOnce(world)
+  const feature = world.local.readFeatures(chainId).features[0]
+  assert.equal(feature.assignedSessionId, 'session-old', 'a passed feature keeps its owner as history')
+  const view = world.engine.sessionView('session-new')
+  const listed = view.mainlineFeatures.find(entry => entry.id === 'F001')
+  assert.ok(listed, 'the successor\'s mainline view must list the retired leg\'s passed feature')
+  assert.equal(listed.assignedSessionId, 'session-old')
+  assert.ok(!view.openFeatures.some(entry => entry.id === 'F001'), 'assignment is not open work')
+})
+
 await checkAsync('a blocked goal pauses the chain and is recorded once', async () => {
   const world = fakeWorld({ seedGoalOnHandoff: true })
   world.setGoal({

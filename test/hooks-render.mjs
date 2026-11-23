@@ -133,7 +133,7 @@ function createFakeReact() {
  * components plus the RPC stub.
  * @returns {{ registrations: object[], calls: object[] }}
  */
-function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null, onOpenSession = null, planning = false, preview = null, launchResults = [], clusterChildren = false } = {}) {
+function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null, onOpenSession = null, planning = false, preview = null, launchResults = [], clusterChildren = false, mainline = false } = {}) {
   const react = createFakeReact()
   const registrations = []
   const calls = []
@@ -160,6 +160,15 @@ function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null,
     // now reports them as this session's children.
     Object.assign(activeChainView.chain, { mode: 'cluster', currentSessionId: 'session-1' })
     activeChainView.children = [{ sessionId: 'session-kid', role: 'worker', parentSessionId: 'session-old', running: false, loaded: true, pressureRatio: 0.1, peakRatio: 0.1 }]
+  }
+  if (mainline) {
+    // A mainline session: no parent, and the Host sends the mainline list
+    // separately from the oldest open-feature field.
+    activeChainView.parent = null
+    activeChainView.mainlineFeatures = [{
+      id: 'F009', title: 'inherited', passes: true, evidence: 'ran true', verify: 'true',
+      coverage: 'full', acceptedBy: null, assignedSessionId: 'session-old',
+    }]
   }
   const planningChain = {
     chainId: 'chain-plan', status: 'planning', title: 'cluster demo', objective: 'ship it in parallel',
@@ -304,6 +313,14 @@ const clusterChildrenBoot = boot({ clusterChildren: true })
 const clusterChildrenTab = clusterChildrenBoot.registrations.find(entry => entry.options.id === 'relay-children')
 const clusterChildrenText = collectText(await clusterChildrenBoot.react.settle(clusterChildrenTab.component, { sessionId: 'session-1' }))
 assert.ok(clusterChildrenText.includes('childrenClusterNote'), 'a cluster head must explain the inherited workers')
+
+// A mainline session lists the Host's mainlineFeatures, which include features a
+// retired mainline leg still owns; the old openFeatures field does not.
+const mainlineBoot = boot({ mainline: true })
+const mainlineTab = mainlineBoot.registrations.find(entry => entry.options.id === 'relay-tasks')
+const mainlineText = collectText(await mainlineBoot.react.settle(mainlineTab.component, { sessionId: 'session-1' }))
+assert.ok(mainlineText.includes('F009'), 'the mainline tab must use view.mainlineFeatures')
+assert.ok(mainlineText.includes('inherited'))
 
 // The cluster launch dock: only the chain head that is still planning gets it,
 // and confirming it launches the plan on record without opening the panel.
