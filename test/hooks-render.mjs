@@ -390,6 +390,11 @@ assert.ok(
   nodesOf(planningPanelTree).some(node => node.type === 'button' && String(node.props?.className ?? '').includes('is-cta')),
   'the launch card must render a primary start button',
 )
+const planningRows = nodesOf(planningPanelTree).filter(node => typeof node.props?.className === 'string' && /^relay-row( |$)/.test(node.props.className))
+assert.equal(planningRows.length, 1, 'the planning chain must have a row')
+const planningRowText = collectText(planningRows[0])
+assert.ok(planningRowText.includes('modeCluster'), 'a planning cluster must be marked as a cluster on its row')
+assert.ok(planningRowText.includes('attnLaunch'), 'a planning cluster waiting for launch must say so on its row')
 
 /** Flatten the strings a rendered tree would show. */
 function collectText(node, parts = []) {
@@ -493,7 +498,7 @@ const twoActive = boot({
     chains: [
       {
         chainId: 'chain-a', status: 'active', title: 'alpha', objective: 'alpha', featuresTotal: 4, featuresDone: 1,
-        handoffCount: 0, maxHandoffs: 32, sessions: 2, currentSessionId: 'session-alpha',
+        handoffCount: 0, maxHandoffs: 32, sessions: 2, currentSessionId: 'session-alpha', mode: 'cluster',
         sessionsDetail: [
           { sessionId: 'session-alpha', role: 'initializer', running: true, loaded: true, pressureRatio: 0.1, peakRatio: 0.2 },
           { sessionId: 'session-kid', role: 'worker', parentSessionId: 'session-alpha', running: true, loaded: true, pressureRatio: 0.1, peakRatio: 0.1 },
@@ -505,7 +510,7 @@ const twoActive = boot({
       },
       {
         chainId: 'chain-b', status: 'active', title: 'beta', objective: 'beta', featuresTotal: 4, featuresDone: 2,
-        handoffCount: 0, maxHandoffs: 32, sessions: 1, currentSessionId: 'session-beta',
+        handoffCount: 0, maxHandoffs: 32, sessions: 1, currentSessionId: 'session-beta', mode: 'relay',
         sessionsDetail: [{ sessionId: 'session-beta', role: 'initializer', running: false, loaded: true, pressureRatio: 0.05, peakRatio: 0.3 }],
         head: { goal: null, planMode: false, goalHeld: false, goalPausedByRelay: false },
         // The other chain in this workspace is building one of the same files.
@@ -540,5 +545,12 @@ const openButtons = nodesOf(twoActiveTree).filter(node => typeof node.props?.cla
 assert.equal(openButtons.length, 3, 'every chain row must offer a way into its conversation')
 for (const button of openButtons) button.props.onClick({ stopPropagation: () => undefined })
 assert.deepEqual(opened, ['session-alpha', 'session-beta', 'session-gamma'], 'a row must open the chain head session it shows')
+
+// The list card itself must say which shape the chain is; opening it is too late.
+const rows = nodesOf(twoActiveTree).filter(node => typeof node.props?.className === 'string' && /^relay-row( |$)/.test(node.props.className))
+assert.equal(rows.length, 3, 'the rail must render one row per chain')
+const rowTexts = rows.map(row => collectText(row))
+assert.ok(rowTexts[0].includes('modeCluster'), 'a cluster chain must be marked on its row')
+assert.ok(rowTexts[1].includes('modeRelay'), 'a single-task chain must be marked on its row')
 
 console.log('session tab render check passed: hook order holds, a read error clears after recovery, the launch dock starts the plan on record, and the panel shows the peak ratio')
