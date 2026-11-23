@@ -196,6 +196,7 @@ window.__ModuleLoader__.load({
       noChildrenTitle: '还没有派发过子会话',
       noChildrenBody: '用 relay_spawn 把一部分功能交给新的子会话并行执行，这里会显示它们的执行情况。',
       noChildrenNotCurrent: '只有链的当前会话可以派发子会话，本会话已不是当前会话。',
+      childrenClusterNote: '这些是集群链上的并行会话，包含前任链头派出的；链头交接后仍由你验收。',
       parentTitle: '上级会话',
       assignedTitle: '我负责的功能',
       mainlineTitle: '主线功能',
@@ -524,6 +525,7 @@ window.__ModuleLoader__.load({
       noChildrenTitle: 'Nothing delegated yet',
       noChildrenBody: 'Use relay_spawn to hand part of the work to a fresh child session; its progress appears here.',
       noChildrenNotCurrent: 'Only the chain\'s current session can delegate, and this session is no longer current.',
+      childrenClusterNote: 'These are the cluster\'s parallel sessions, including the ones a previous head launched; after a head handoff they are still yours to verify.',
       parentTitle: 'Parent session',
       assignedTitle: 'Features you own',
       mainlineTitle: 'Main-line features',
@@ -736,13 +738,13 @@ window.__ModuleLoader__.load({
         title: '目标与计划',
         fields: [
           { key: 'inheritGoal', label: '新会话继承目标', kind: 'boolean', hint: '交接时新会话沿用旧会话的 goal 目标，轮次只给剩余部分，轮次上限成为整条链的预算；关掉后新会话不继承（仍可由「给新会话建目标」新建）' },
-          { key: 'seedGoalOnHandoff', label: '给新会话建目标', kind: 'boolean', hint: '交接后给新会话建一个 goal，让它按目标轮次自动继续；需要目标功能可用' },
+          { key: 'seedGoalOnHandoff', label: '给新会话建目标', kind: 'boolean', hint: '交接后给新会话建一个 goal，让它按目标轮次自动继续；需要目标功能可用。集群链的链头不受此项控制：clusterGoals 开着时始终给新链头建 goal' },
           { key: 'goalRoundsPerHandoff', label: '新目标的轮次上限', kind: 'int', min: 1, hint: '给新会话 goal 分配的续轮上限' },
           { key: 'rearmGoalOnReload', label: '重启后恢复目标续行', kind: 'boolean', hint: 'DSH 重启或插件重载后，恢复本插件建的 goal 的自动续行；关掉后需要人在输入框里手动恢复（用户自己建的 goal 不受影响）' },
           { key: 'pauseGoalOnRetire', label: '退役时暂停旧目标', kind: 'boolean', hint: '交接后暂停旧会话的 goal' },
           { key: 'inheritPlanMode', label: '新会话继承计划模式', kind: 'boolean', hint: '旧会话处于计划模式时，接力会话和子会话也以计划模式启动；关掉后新会话退出计划模式' },
           { key: 'maxClusterSessions', label: '集群最多分几组', kind: 'int', min: 1, max: 12, hint: '集群模式一次启动最多开几个并行会话' },
-          { key: 'clusterGoals', label: '集群启动时建目标', kind: 'boolean', hint: '启动时给主会话和每个子会话各建一个 goal，子会话不会跑一轮就停' },
+          { key: 'clusterGoals', label: '集群启动时建目标', kind: 'boolean', hint: '启动时给主会话和每个子会话各建一个 goal；集群链交接时也给新链头建一个，子会话不会跑一轮就停' },
         ],
       },
       {
@@ -2747,6 +2749,10 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             children.length === 0
               ? h(TabEmpty, { title: t('noChildrenTitle'), body: isCurrent ? t('noChildrenBody') : t('noChildrenNotCurrent') })
               : h(React.Fragment, {},
+                view.chain.mode === 'cluster' && isCurrent
+                  && children.some(child => typeof child.parentSessionId === 'string' && child.parentSessionId !== sessionId)
+                  ? h('div', { className: 'relay-text', style: { marginBottom: '8px' } }, t('childrenClusterNote'))
+                  : null,
                 h('div', { className: 'relay-section-line' },
                   h('b', {}, `${t('childCount')} ${children.length}`),
                   h('span', {}, `${running} ${t('statRunning')}`),

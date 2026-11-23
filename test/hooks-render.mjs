@@ -133,7 +133,7 @@ function createFakeReact() {
  * components plus the RPC stub.
  * @returns {{ registrations: object[], calls: object[] }}
  */
-function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null, onOpenSession = null, planning = false, preview = null, launchResults = [] } = {}) {
+function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null, onOpenSession = null, planning = false, preview = null, launchResults = [], clusterChildren = false } = {}) {
   const react = createFakeReact()
   const registrations = []
   const calls = []
@@ -154,6 +154,12 @@ function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null,
     parent: { sessionId: 'session-parent', running: false },
     children: [],
     assignedFeatures: [{ id: 'F001', title: 'first', passes: false, evidence: null, verify: 'node test', coverage: 'full', acceptedBy: null }],
+  }
+  if (clusterChildren) {
+    // A cluster head whose workers were launched by the previous head: the Host
+    // now reports them as this session's children.
+    Object.assign(activeChainView.chain, { mode: 'cluster', currentSessionId: 'session-1' })
+    activeChainView.children = [{ sessionId: 'session-kid', role: 'worker', parentSessionId: 'session-old', running: false, loaded: true, pressureRatio: 0.1, peakRatio: 0.1 }]
   }
   const planningChain = {
     chainId: 'chain-plan', status: 'planning', title: 'cluster demo', objective: 'ship it in parallel',
@@ -291,6 +297,13 @@ for (const tab of tabs) {
   )
   assert.ok(calls.includes('relay/sessionView'), `the "${label}" tab must request relay/sessionView`)
 }
+
+// A cluster head must explain that the downstream workers include the ones a
+// previous head launched; otherwise the inherited sessions look unexplained.
+const clusterChildrenBoot = boot({ clusterChildren: true })
+const clusterChildrenTab = clusterChildrenBoot.registrations.find(entry => entry.options.id === 'relay-children')
+const clusterChildrenText = collectText(await clusterChildrenBoot.react.settle(clusterChildrenTab.component, { sessionId: 'session-1' }))
+assert.ok(clusterChildrenText.includes('childrenClusterNote'), 'a cluster head must explain the inherited workers')
 
 // The cluster launch dock: only the chain head that is still planning gets it,
 // and confirming it launches the plan on record without opening the panel.

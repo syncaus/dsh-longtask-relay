@@ -78,6 +78,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 - 本期只有共用目录真正并行。方案里标成 worktree 的组不开会话，功能由主会话顺序做。
 - 规划中的链不参与自动交接，也不能暂停；规划时记的阻塞只显示、不改状态，但有未解除的阻塞时不能启动。离开「规划中」只有两条路：启动，或删除这条链。
 - 开启 `clusterGoals`（默认开）时，启动会给主会话和每个子会话各建一个 goal，子会话不会跑一轮就停。子会话的 goal 跟着它的活走：手上没有未完成的功能、或链处于暂停时，它被暂停；链恢复运行且它还有活时恢复（只恢复插件暂停的，你手动暂停的不动）；链结束时标为完成；会话重新加载后恢复一次续行。子会话没加载时不处理，加载后补上。
+- 链头交接后仍然是一条集群链：新链头接手监督。`clusterGoals` 开着时会按 `goalRoundsPerHandoff` 给新链头建一个 goal（不受 `seedGoalOnHandoff` 限制），交接提示词会列出仍在跑的 worker 和它们未完成的功能，并要求复跑 verify；新链头的「下游」页签列出整条链的 worker（包括前任链头派出的）。worker 有功能通过时会收到一条 `<relay_worker_report>` 提醒去验收；只写进度、没有功能转通过的 checkpoint 不会打扰链头。worker 会话本身不会消失，也不重新洗牌。
 
 ## 工具
 
@@ -166,12 +167,12 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 | `inheritPermission` | `true` | 接力会话和子会话沿用上一个会话的权限预设（沙箱模式 + 审批策略，例如完全权限）；关掉后新会话用 DSH 设置里的默认预设。上一个会话是自定义组合（不对应任何预设）时不继承 |
 | `workerApproval` | `never` | 继承预设之后再覆盖审批策略：`inherit` 不覆盖；`ask` 每次询问，无人值守时会一直等；`never` 不询问，需要升级权限的操作直接失败并记为阻塞 |
 | `pauseGoalOnRetire` | `true` | 交接后暂停旧会话的 goal |
-| `seedGoalOnHandoff` | `false` | 交接后给新会话建一个 goal，让目标轮驱动继续跑；需要目标服务可用 |
+| `seedGoalOnHandoff` | `false` | 交接后给新会话建一个 goal，让目标轮驱动继续跑；需要目标服务可用。集群链的链头例外：`clusterGoals` 开着时，交接总会给新链头建 goal |
 | `goalRoundsPerHandoff` | `16` | 给新会话 goal 分配的续轮上限 |
 | `inheritGoal` | `true` | 交接时新会话沿用你自己建的 goal，轮次只给剩余部分（上限减已用轮次），整条链共用一份轮次预算；插件按 `seedGoalOnHandoff` 建的 goal 不继承；关掉后不继承 |
 | `rearmGoalOnReload` | `true` | Host 重启或插件重载后，恢复本插件建的 goal 的自动续行；用户自己建的 goal 不动 |
 | `maxClusterSessions` | `4` | 集群模式一次启动最多分几组 |
-| `clusterGoals` | `true` | 集群启动时给主会话和每个子会话各建一个 goal |
+| `clusterGoals` | `true` | 集群启动时给主会话和每个子会话各建一个 goal；集群链交接时也给新链头建一个 |
 | `inheritPlanMode` | `true` | 旧会话处于计划模式时，接力会话和子会话也以计划模式启动 |
 | `notifyOldSession` | `true` | 交接后给旧会话留一条退役说明 |
 | `pauseOnExternalBlocker` | `true` | 遇到「只有人能解」的阻塞（`kind=external`）时暂停该链 |
@@ -191,7 +192,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 ## 与目标模式、计划模式的配合
 
 - 收尾指令发出后和交接开始时，插件会取消旧会话 goal 的自动续行（只取消续行，goal 本身的阶段不变），避免旧会话在收尾后又被目标轮推着继续干活，或在新会话已经启动时多跑一轮。
-- 交接时新会话继承旧会话的 goal：你自己建的 goal 会被继承，目标不变、轮次只给剩余部分；本会话显示的是它拿到的剩余额度。旧 goal 轮次用完时不继承，链记一条阻塞等你处理。插件按 `seedGoalOnHandoff` 建的 goal 不继承，每次交接照旧按 `goalRoundsPerHandoff` 新建。你的 goal 处于阻塞或被你暂停时，不会被换成新建的 goal；阻塞的 goal 在交接后还会留下一条阻塞，等你处理。`inheritGoal` 关掉后回到 `seedGoalOnHandoff` 的旧行为。
+- 交接时新会话继承旧会话的 goal：你自己建的 goal 会被继承，目标不变、轮次只给剩余部分；本会话显示的是它拿到的剩余额度。旧 goal 轮次用完时不继承，链记一条阻塞等你处理。插件按 `seedGoalOnHandoff` 建的 goal 不继承，每次交接照旧按 `goalRoundsPerHandoff` 新建；集群链例外：`clusterGoals` 开着时，即使 `seedGoalOnHandoff` 是关的，交接也会给新链头建 goal，否则没人验收 worker。你的 goal 处于阻塞或被你暂停时，不会被换成新建的 goal；阻塞的 goal 在交接后还会留下一条阻塞，等你处理。`inheritGoal` 关掉后回到 `seedGoalOnHandoff` 的旧行为（集群链仍按 `clusterGoals` 建链头 goal）。
 - 本插件建的 goal 在 Host 重启或插件重载后会被恢复自动续行；用户自己建的 goal 不动。链用 `relay_finish` 结束时，本插件建的 goal 一并标为完成。
 - 在面板里暂停一条链会同时暂停链头会话的 goal，恢复链时把这个 goal 一并恢复；会话自己调用 `relay_control` 暂停链不动 goal。
 - 旧会话处于计划模式时，接力会话和子会话也以计划模式启动。
