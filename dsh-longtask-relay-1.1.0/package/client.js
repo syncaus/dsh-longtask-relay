@@ -279,6 +279,10 @@ window.__ModuleLoader__.load({
       status_paused: '已暂停',
       status_initializing: '初始化',
       status_planning: '规划中',
+      modeRelay: '单任务',
+      modeCluster: '集群',
+      modeRelayNote: '单任务：同一时刻由一个会话接力推进',
+      modeClusterNote: '集群：先规划，再由你确认并行开多个会话',
       status_done: '已完成',
       status_failed: '失败',
       role_initializer: '初始化',
@@ -603,6 +607,10 @@ window.__ModuleLoader__.load({
       status_paused: 'Paused',
       status_initializing: 'Initializing',
       status_planning: 'Planning',
+      modeRelay: 'Single',
+      modeCluster: 'Cluster',
+      modeRelayNote: 'Single: one session carries the chain at a time',
+      modeClusterNote: 'Cluster: plan first, then open several sessions in parallel',
       status_done: 'Done',
       status_failed: 'Failed',
       role_initializer: 'Initializer',
@@ -818,6 +826,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-chip.is-warn { border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 35%, var(--dsw-alias-border-l2)); color: var(--dsw-alias-state-warn-primary); }
 .relay-chip.is-error { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 35%, var(--dsw-alias-border-l2)); color: var(--dsw-alias-state-error-primary); }
 .relay-chip.is-human { border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 35%, var(--dsw-alias-border-l2)); color: var(--dsw-alias-state-business-primary); }
+.relay-chip.is-mode { border-style: dashed; color: var(--dsw-alias-label-tertiary); font-weight: 500; }
+.relay-chip.is-cluster { border-style: solid; border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, var(--dsw-alias-border-l2)); background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent); color: var(--dsw-alias-state-business-primary); font-weight: 600; }
 .relay-pills { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .relay-goal { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .relay-goal-bar { --relay-hue: var(--dsw-alias-brand-primary); max-width: 220px; }
@@ -1373,6 +1383,18 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
         }
 
         /**
+         * Which shape the chain has: a single-session relay, or the parallel
+         * cluster. Without it the list cards look identical until you open one.
+         */
+        const modeChip = (chain) => {
+          const cluster = chain.mode === 'cluster'
+          return h('span', {
+            className: `relay-chip is-mode${cluster ? ' is-cluster' : ''}`,
+            title: t(cluster ? 'modeClusterNote' : 'modeRelayNote'),
+          }, t(cluster ? 'modeCluster' : 'modeRelay'))
+        }
+
+        /**
          * Pending human decisions, keyed by request.
          * The built-in composer card stays the answering surface; these
          * handlers only observe so the panel can list and link to them.
@@ -1659,6 +1681,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             },
               h('span', { className: 'relay-row-head' },
                 h('span', { className: 'relay-row-title' }, chain.title || chain.chainId),
+                modeChip(chain),
                 h('span', { className: `relay-row-status${live > 0 || jobCount > 0 ? ' is-live' : ''}` },
                   phase !== null
                     ? t(phase)
@@ -1699,9 +1722,10 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                   : null,
               ),
               hasBlocker || hasError || waiting || chain.head?.planMode === true || (chain.stall ?? null) !== null
-                || (Array.isArray(chain.conflicts) && chain.conflicts.length > 0) || jobCount > 0
+                || (Array.isArray(chain.conflicts) && chain.conflicts.length > 0) || jobCount > 0 || chain.launchPending === true
                 ? h('span', { className: 'relay-pills' },
                   waiting ? h('span', { className: 'relay-chip is-warn' }, t('decisionShort')) : null,
+                  chain.launchPending === true ? h('span', { className: 'relay-chip is-warn' }, t('attnLaunch')) : null,
                   chain.head?.planMode === true ? h('span', { className: 'relay-chip is-human' }, t('planModeChip')) : null,
                   stallChip(chain),
                   conflictChip(chain),
@@ -2372,6 +2396,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 h('div', { className: 'relay-detail-main' },
                   h('h3', { className: 'relay-detail-title' }, chain.title || chain.chainId),
                   h('div', { className: 'relay-pills' },
+                    modeChip(chain),
                     h('span', { className: `relay-status is-${chain.status}` },
                       isPaused && typeof chain.pausedBy === 'string' ? label('paused', chain.pausedBy) : label('status', chain.status)),
                     phase === null ? null : h('span', { className: 'relay-status is-warn' }, t(phase)),
@@ -2586,6 +2611,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             h('div', { className: 'relay-banner-main' },
               h('div', { className: 'relay-banner-title' },
                 h('b', {}, chain.title || chain.chainId),
+                modeChip(chain),
                 h('span', { className: `relay-status is-${chain.status}` }, label('status', chain.status)),
                 phase === null ? null : h('span', { className: 'relay-status is-warn' }, t(phase)),
                 stallChip(chain),
