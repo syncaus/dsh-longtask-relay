@@ -622,16 +622,35 @@ const trash = {
 }
 const trashBoot = boot({ deleted: trash })
 const trashPanel = trashBoot.registrations.find(entry => entry.options.name === 'main')
-const trashTree = await trashBoot.react.settle(trashPanel.component, {})
+let trashTree = await trashBoot.react.settle(trashPanel.component, {})
 const trashText = collectText(trashTree)
-assert.ok(trashText.some(text => text.includes('recentlyDeleted')), 'the panel must expose the deleted list')
-assert.ok(trashText.includes('restore'), 'a deleted chain needs a restore action')
-assert.ok(trashText.includes('purge'), 'a deleted chain needs a permanent-delete action')
+assert.ok(trashText.some(text => text.includes('recentlyDeleted')), 'the panel must expose the deleted entry')
+const openTrash = nodesOf(trashTree).find(node => node.type === 'button'
+  && collectText(node).some(text => text.includes('recentlyDeleted')))
+assert.ok(openTrash, 'the recycle-bin entry must be clickable')
+openTrash.props.onClick()
+trashTree = await trashBoot.react.settle(trashPanel.component, {})
+const trashPageText = collectText(trashTree)
+assert.ok(trashPageText.includes('restore'), 'a deleted chain needs a restore action')
+assert.ok(trashPageText.includes('purge'), 'a deleted chain needs a permanent-delete action')
 const restoreButton = nodesOf(trashTree).find(node => node.type === 'button' && collectText(node).includes('restore'))
 assert.ok(restoreButton, 'the restore action must be clickable')
 restoreButton.props.onClick()
 await new Promise(resolve => setImmediate(resolve))
 assert.ok(trashBoot.calls.includes('relay/restoreChain'), 'restoring must call the Host')
+
+// The entry exists even when nothing has been deleted, so the feature is discoverable.
+const emptyTrashBoot = boot()
+const emptyTrashPanel = emptyTrashBoot.registrations.find(entry => entry.options.name === 'main')
+let emptyTrashTree = await emptyTrashBoot.react.settle(emptyTrashPanel.component, {})
+assert.ok(collectText(emptyTrashTree).some(text => text.includes('recentlyDeleted')), 'the recycle-bin entry must exist before the first delete')
+const openEmptyTrash = nodesOf(emptyTrashTree).find(node => node.type === 'button'
+  && collectText(node).some(text => text.includes('recentlyDeleted')))
+openEmptyTrash.props.onClick()
+emptyTrashTree = await emptyTrashBoot.react.settle(emptyTrashPanel.component, {})
+const emptyTrashText = collectText(emptyTrashTree)
+assert.ok(emptyTrashText.includes('emptyTrashTitle'), 'an empty recycle bin must explain itself')
+assert.ok(emptyTrashText.includes('emptyTrashBody'), 'an empty recycle bin must explain what deletion does')
 
 // Deleting a chain first shows what survives, then reports the move and offers undo.
 const deleteBoot = boot({ pausedChain: true })
@@ -654,6 +673,7 @@ assert.ok(deleteBoot.calls.includes('relay/deleteChain'), `confirming must call 
 const deleteNoticeText = collectText(deleteTree)
 assert.ok(deleteNoticeText.includes('deletedNotice'), 'a delete must report what was moved')
 assert.ok(deleteNoticeText.includes('undo'), 'a delete must offer undo')
+assert.ok(deleteNoticeText.includes('viewTrash'), 'a delete must link to the recycle bin')
 const undoButton = nodesOf(deleteTree).find(node => node.type === 'button' && collectText(node).includes('undo'))
 undoButton.props.onClick()
 await new Promise(resolve => setImmediate(resolve))

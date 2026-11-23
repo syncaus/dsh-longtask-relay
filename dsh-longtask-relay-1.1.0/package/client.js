@@ -245,6 +245,8 @@ window.__ModuleLoader__.load({
       planModeChip: '计划模式',
       planModeNote: '当前会话在计划模式：先规划、不执行。计划批准后才会拆出功能清单。',
       emptyPlanNote: '在计划模式下，先让计划获得批准，再启动链；批准的计划会写进 PLAN.md。',
+      dangerZone: '危险操作',
+      dangerZoneNote: '删除会把链移入最近删除；进行中的链和正在运行的会话不能删除。',
       delete: '删除',
       confirmDelete: '移入最近删除',
       deleteBlocked: '先暂停这条链才能删除',
@@ -260,6 +262,9 @@ window.__ModuleLoader__.load({
       purgedNotice: '已永久删除「{title}」',
       undo: '撤销',
       recentlyDeleted: '最近删除',
+      viewTrash: '查看最近删除',
+      emptyTrashTitle: '最近删除是空的',
+      emptyTrashBody: '删除任务链后，它会出现在这里；恢复后保持暂停，永久删除不能从面板恢复。',
       restore: '恢复',
       purge: '永久删除',
       confirmPurge: '确认永久删除',
@@ -597,6 +602,8 @@ window.__ModuleLoader__.load({
       planModeChip: 'Plan mode',
       planModeNote: 'This session is in plan mode: it plans and does not execute. The feature list is created once the plan is approved.',
       emptyPlanNote: 'In plan mode, get the plan approved before starting a chain; the approved plan is written to PLAN.md.',
+      dangerZone: 'Danger zone',
+      dangerZoneNote: 'Deleting moves the chain to deleted; an active chain or a running session cannot be deleted.',
       delete: 'Delete',
       confirmDelete: 'Move to deleted',
       deleteBlocked: 'Pause the chain before deleting it',
@@ -612,6 +619,9 @@ window.__ModuleLoader__.load({
       purgedNotice: 'Permanently deleted "{title}"',
       undo: 'Undo',
       recentlyDeleted: 'Deleted',
+      viewTrash: 'View deleted',
+      emptyTrashTitle: 'Nothing deleted',
+      emptyTrashBody: 'Deleted relay chains appear here; a restore brings the chain back paused, while a permanent delete cannot be undone from the panel.',
       restore: 'Restore',
       purge: 'Delete forever',
       confirmPurge: 'Confirm permanent delete',
@@ -822,6 +832,8 @@ window.__ModuleLoader__.load({
 .relay-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; padding-top: 16px; margin-bottom: 12px; }
 .relay-title { flex: 1; min-width: 0; margin: 0; font-size: 20px; font-weight: 500; line-height: 28px; white-space: nowrap; }
 .relay-head-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.relay-panel-tabs { display: flex; align-items: center; margin: -2px 0 12px; }
+.relay-panel-tabs .relay-seg-btn { padding: 4px 12px; font-size: 12px; }
 .relay-version { color: var(--dsw-alias-label-tertiary); font-size: 12px; white-space: nowrap; }
 .relay-card.is-update { border-color: var(--relay-tone); }
 .relay-update { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -951,14 +963,20 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-delete-list { margin: 0 0 8px; padding-left: 18px; color: var(--dsw-alias-label-secondary); font-size: 11.5px; line-height: 17px; }
 .relay-delete-list li { margin: 2px 0; overflow-wrap: anywhere; }
 .relay-delete-list li.is-warn { color: var(--dsw-alias-state-warn-primary); }
+.relay-danger-zone { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 25%, var(--dsw-alias-border-l2)); }
+.relay-danger-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; margin-bottom: 7px; }
+.relay-danger-head b { color: var(--dsw-alias-state-error-primary); font-size: 12.5px; line-height: 18px; }
+.relay-danger-head .relay-text { flex: 1 1 260px; margin: 0; font-size: 11.5px; line-height: 17px; }
 .relay-notice { border-left: 3px solid var(--dsw-alias-brand-primary); }
 .relay-notice.is-deleted { border-left-color: var(--dsw-alias-state-warn-primary); }
 .relay-notice-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .relay-notice-text { flex: 1 1 240px; min-width: 0; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
 .relay-notice-sessions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 6px; }
 .relay-trash { padding-bottom: 8px; }
-.relay-trash-summary { cursor: pointer; color: var(--dsw-alias-label-secondary); font-size: 12px; font-weight: 600; line-height: 20px; }
-.relay-trash-hint { margin: 2px 0 4px; color: var(--dsw-alias-label-tertiary); font-size: 11.5px; line-height: 16px; }
+.relay-trash-head { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.relay-trash-heading { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.relay-trash-heading b { color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 19px; }
+.relay-trash-hint { color: var(--dsw-alias-label-tertiary); font-size: 11.5px; line-height: 16px; }
 .relay-trash-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; padding: 7px 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 7px; background: var(--dsw-alias-bg-layer-2); }
 .relay-trash-main { flex: 1 1 260px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .relay-trash-title { min-width: 0; max-width: 100%; color: var(--dsw-alias-label-primary); font-size: 12.5px; font-weight: 600; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2561,14 +2579,6 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                       },
                     }, t('raiseHandoffLimit'))
                     : null,
-                  h(DeleteChainControl, {
-                    detail,
-                    busy,
-                    onAct,
-                    armed: deleteArmed,
-                    onArm: () => setDeleteArmed(true),
-                    onCancel: () => setDeleteArmed(false),
-                  }),
                 ),
               ),
               h('p', { className: 'relay-text' }, chain.objective),
@@ -2665,6 +2675,20 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
               : null,
             section === 'docs' ? h(DocsCard, { chainId: chain.chainId, detail, onSection: setSection }) : null,
             section === 'audit' ? h(AuditCard, { chainId: chain.chainId }) : null,
+            h('section', { className: 'relay-card relay-danger-zone' },
+              h('div', { className: 'relay-danger-head' },
+                h('b', {}, t('dangerZone')),
+                h('span', { className: 'relay-text' }, t('dangerZoneNote')),
+              ),
+              h(DeleteChainControl, {
+                detail,
+                busy,
+                onAct,
+                armed: deleteArmed,
+                onArm: () => setDeleteArmed(true),
+                onCancel: () => setDeleteArmed(false),
+              }),
+            ),
           )
         }
 
@@ -3448,7 +3472,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
         }
 
         /** What the last delete/restore did, with the way back while it is open. */
-        function DeleteNotice({ notice, busy, onUndo, onDismiss }) {
+        function DeleteNotice({ notice, busy, onUndo, onViewTrash, onDismiss }) {
           if (notice === null || notice === undefined) return null
           const title = typeof notice.title === 'string' && notice.title.length > 0 ? notice.title : notice.chainId
           let text
@@ -3468,6 +3492,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
               h('span', { className: 'relay-notice-text' }, text),
               notice.kind === 'deleted'
                 ? h('button', { type: 'button', className: 'relay-btn is-small', disabled: busy, onClick: () => onUndo(notice) }, t('undo'))
+                : null,
+              notice.kind === 'deleted'
+                ? h('button', { type: 'button', className: 'relay-btn is-small', onClick: onViewTrash }, t('viewTrash'))
                 : null,
               h('button', { type: 'button', className: 'relay-btn is-small', onClick: onDismiss }, t('dismiss')),
             ),
@@ -3495,32 +3522,41 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           )
         }
 
-        /** Deleted chains, collapsed by default, with restore and permanent delete. */
+        /** The recycle-bin view: always available, even when empty. */
         function RecentlyDeleted({ items, busy, onRestore, onPurge }) {
-          if (!Array.isArray(items) || items.length === 0) return null
-          return h('details', { className: 'relay-card relay-trash' },
-            h('summary', { className: 'relay-trash-summary' }, `${t('recentlyDeleted')} (${items.length})`),
-            h('div', { className: 'relay-trash-hint' }, t('trashLiveHint')),
-            items.map(item => h('div', { key: item.chainId, className: 'relay-trash-row' },
-              h('div', { className: 'relay-trash-main' },
-                h('span', { className: 'relay-trash-title', title: item.chainId }, item.title || item.chainId),
-                h('span', { className: 'relay-tag' }, `${item.featuresDone ?? 0}/${item.featuresTotal ?? 0}`),
-                h('span', { className: 'relay-tag' }, `${(item.sessions ?? []).length} ${t('sessions')}`),
-                typeof item.deletedAt === 'string' && item.deletedAt.length > 0
-                  ? h('span', { className: 'relay-trash-when' }, `${t('deletedAt')} ${stamp(item.deletedAt)}`)
-                  : null,
+          const list = Array.isArray(items) ? items : []
+          return h('section', { className: 'relay-card relay-trash' },
+            h('div', { className: 'relay-trash-head' },
+              h('div', { className: 'relay-trash-heading' },
+                h('b', {}, `${t('recentlyDeleted')} (${list.length})`),
+                h('span', { className: 'relay-trash-hint' }, t('trashLiveHint')),
               ),
-              h('div', { className: 'relay-actions' },
-                h('button', { type: 'button', className: 'relay-btn is-small', disabled: busy, onClick: () => onRestore(item) }, t('restore')),
-                h(ConfirmButton, {
-                  small: true,
-                  disabled: busy,
-                  confirmLabel: t('confirmPurge'),
-                  note: t('purgeNote'),
-                  onConfirm: () => onPurge(item),
-                }, t('purge')),
-              ),
-            )),
+            ),
+            list.length === 0
+              ? h('div', { className: 'relay-empty' },
+                h('div', { className: 'relay-empty-title' }, t('emptyTrashTitle')),
+                h('div', {}, t('emptyTrashBody')),
+              )
+              : list.map(item => h('div', { key: item.chainId, className: 'relay-trash-row' },
+                h('div', { className: 'relay-trash-main' },
+                  h('span', { className: 'relay-trash-title', title: item.chainId }, item.title || item.chainId),
+                  h('span', { className: 'relay-tag' }, `${item.featuresDone ?? 0}/${item.featuresTotal ?? 0}`),
+                  h('span', { className: 'relay-tag' }, `${(item.sessions ?? []).length} ${t('sessions')}`),
+                  typeof item.deletedAt === 'string' && item.deletedAt.length > 0
+                    ? h('span', { className: 'relay-trash-when' }, `${t('deletedAt')} ${stamp(item.deletedAt)}`)
+                    : null,
+                ),
+                h('div', { className: 'relay-actions' },
+                  h('button', { type: 'button', className: 'relay-btn is-small', disabled: busy, onClick: () => onRestore(item) }, t('restore')),
+                  h(ConfirmButton, {
+                    small: true,
+                    disabled: busy,
+                    confirmLabel: t('confirmPurge'),
+                    note: t('purgeNote'),
+                    onConfirm: () => onPurge(item),
+                  }, t('purge')),
+                ),
+              )),
           )
         }
 
@@ -3541,6 +3577,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           // ChainDetail stays hook-free and can be rendered independently.
           const [section, setSection] = useState('features')
           const [deleteArmed, setDeleteArmed] = useState(false)
+          const [panelView, setPanelView] = useState('chains')
           const selectedRef = useRef(focus.chainId ?? panelCache.selectedId)
           const splitRef = useRef(null)
           const decisions = usePendingDecisions()
@@ -3594,6 +3631,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             setSelectedId(chainId)
             setDeleteArmed(false)
             setSection('features')
+            setPanelView('chains')
             void refresh()
           }, [refresh])
 
@@ -3659,7 +3697,10 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 
           const restoreDeleted = useCallback(async (item) => {
             const outcome = await act('relay/restoreChain', { chainId: item.chainId })
-            if (outcome.ok) select(item.chainId)
+            if (outcome.ok) {
+              setPanelView('chains')
+              select(item.chainId)
+            }
           }, [act, select])
 
           const purgeDeleted = useCallback((item) => {
@@ -3782,6 +3823,16 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                     h('button', { type: 'button', className: 'relay-btn', onClick: () => { void refresh() } }, t('refresh')),
                   ),
                 ),
+                h('div', { className: 'relay-panel-tabs' },
+                  h(Seg, {
+                    options: [
+                      { id: 'chains', label: t('chains'), count: chains.length },
+                      { id: 'deleted', label: t('recentlyDeleted'), count: deleted.length },
+                    ],
+                    value: panelView,
+                    onChange: setPanelView,
+                  }),
+                ),
                 update !== null && update.available
                   ? h('section', { className: 'relay-card is-update' },
                     h('div', { className: 'relay-update' },
@@ -3806,9 +3857,17 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                   notice,
                   busy,
                   onUndo: restoreDeleted,
+                  onViewTrash: () => setPanelView('deleted'),
                   onDismiss: () => setNotice(null),
                 }),
-                chains.length === 0 ? null : h(Kpis, { items: kpis }),
+                panelView === 'deleted'
+                  ? h(RecentlyDeleted, {
+                    items: deleted,
+                    busy,
+                    onRestore: restoreDeleted,
+                    onPurge: purgeDeleted,
+                  })
+                  : h(React.Fragment, null,
                 error === null ? null : h('div', { className: 'relay-error' }, `${t('failed')}: ${error}`),
                 actionError === null ? null : h('div', { className: 'relay-error', role: 'alert' },
                   h('span', { style: { flex: 1, minWidth: 0 } }, `${t('actionFailed')}: ${actionError}`),
@@ -3830,6 +3889,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                       : h('button', { type: 'button', className: 'relay-btn', onClick: item.action.run }, item.action.label),
                   ))),
                 ),
+                chains.length === 0 ? null : h(Kpis, { items: kpis }),
                 loading && chains.length === 0 ? h('div', { className: 'relay-text' }, t('loading')) : null,
                 !loading && chains.length === 0
                   ? deleted.length > 0
@@ -3879,12 +3939,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                       setDeleteArmed,
                     }),
                 ),
-                h(RecentlyDeleted, {
-                  items: deleted,
-                  busy,
-                  onRestore: restoreDeleted,
-                  onPurge: purgeDeleted,
-                }),
+                  ),
               ),
             ),
           )
