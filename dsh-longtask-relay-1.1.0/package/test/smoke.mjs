@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ChainIndex, ChainStore, RELAY_CODES, RelayError, skeletonTruth } from '../lib/chain-store.js'
+import { ChainIndex, ChainStore, ChainTrashIndex, RELAY_CODES, RelayError, skeletonTruth } from '../lib/chain-store.js'
 import { resolveConfig } from '../lib/config.js'
 import { RelayEngine, clusterConflicts } from '../lib/engine.js'
 import { ChainFingerprints } from '../lib/fingerprints.js'
@@ -209,6 +209,7 @@ function fakeWorld({ goalService = true, ...overrides } = {}) {
   }
   const engine = new RelayEngine(ctx, config, {
     chainIndex: new ChainIndex(indexHome),
+    trashIndex: new ChainTrashIndex(indexHome),
     fingerprints: new ChainFingerprints(indexHome),
   })
   // Adopt the existing chain so the fake agent is its current session.
@@ -225,6 +226,7 @@ function fakeWorld({ goalService = true, ...overrides } = {}) {
   const rebuild = () => {
     const next = new RelayEngine(ctx, config, {
       chainIndex: new ChainIndex(indexHome),
+      trashIndex: new ChainTrashIndex(indexHome),
       fingerprints: new ChainFingerprints(indexHome),
     })
     next.members.set('session-old', { chainId: chain.chainId, truthDir: local.truthDir })
@@ -293,16 +295,22 @@ await checkAsync('an active chain cannot be deleted', async () => {
   assert.equal(existsSync(world.local.paths(world.chain.chainId).dir), true)
 })
 
-await checkAsync('deleting a paused chain removes its files and both indexes', async () => {
+await checkAsync('deleting a paused chain moves it to the trash and both live indexes forget it', async () => {
   const world = fakeWorld()
   world.engine.setPaused({ chainId: world.chain.chainId, paused: true })
   const result = world.engine.deleteChain(world.chain.chainId)
   assert.equal(result.chainId, world.chain.chainId)
   assert.equal(result.status, 'paused')
+  assert.deepEqual(result.sessions, ['session-old'])
   assert.equal(existsSync(world.local.paths(world.chain.chainId).dir), false)
+  assert.equal(existsSync(world.local.trashPaths(world.chain.chainId).dir), true, 'the truth source must survive in .trash')
   assert.deepEqual(world.local.listChainIds(), [])
   assert.deepEqual(world.engine.chainIndex.entries(), [])
   assert.equal(world.engine.members.has('session-old'), false)
+  assert.equal(world.engine.listDeleted().length, 1)
+  assert.equal(world.engine.listDeleted()[0].sessions[0], 'session-old')
+  assert.equal(world.engine.sessionView('session-old').deleted.chainId, world.chain.chainId, 'the session tab needs a tombstone')
+  assert.equal(readFileSync(join(world.local.truthDir, '.gitignore'), 'utf8'), '.trash/\n')
 })
 
 await checkAsync('deleting an unknown chain is refused', async () => {
@@ -317,6 +325,139 @@ await checkAsync('deleting an unknown chain is refused', async () => {
     () => world.engine.deleteChain('chain-00000000-0000-4000-8000-000000000000'),
     error => error instanceof RelayError && error.code === RELAY_CODES.notFound,
   )
+})
+
+await checkAsync('a chain with a running session cannot be deleted', async () => {
+  const world = fakeWorld()
+  world.engine.setPaused({ chainId: world.chain.chainId, paused: true })
+  world.oldAgent.status = 'running'
+  assert.throws(
+    () => world.engine.deleteChain(world.chain.chainId),
+    error => error instanceof RelayError && error.code === RELAY_CODES.busy,
+  )
+  assert.equal(existsSync(world.local.paths(world.chain.chainId).dir), true)
+  assert.equal(world.engine.listDeleted().length, 0)
+})
+
+await checkAsync('a deleted chain can be restored and stays paused', async () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  world.engine.setPaused({ chainId, paused: true })
+  world.engine.deleteChain(chainId)
+  assert.equal(world.engine.listDeleted().length, 1)
+  const restored = world.engine.restoreChain(chainId)
+  assert.equal(restored.status, 'paused')
+  assert.equal(existsSync(world.local.paths(chainId).dir), true)
+  assert.deepEqual(world.local.listChainIds(), [chainId])
+  assert.equal(world.engine.chainIndex.locate(chainId), world.local.truthDir)
+  assert.equal(world.engine.listDeleted().length, 0)
+  assert.equal(world.engine.fingerprints.get(chainId).features.length, 1, 'restore must rebuild the frozen list')
+  assert.equal(world.engine.sessionView('session-old').chain.chainId, chainId)
+})
+
+await checkAsync('a goal on a deleted-chain session is paused when that session is loaded', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  world.engine.setPaused({ agent: world.oldAgent, chainId: world.chain.chainId, paused: true })
+  world.engine.deleteChain(world.chain.chainId)
+  // Simulate a goal that stayed active because its session was unloaded at
+  // delete time, then was opened again.
+  goals.views.get('session-old').phase = 'active'
+  assert.equal(world.engine.pauseGoalForDeletedSession(world.oldAgent), true)
+  assert.equal(goals.views.get('session-old').phase, 'paused')
+})
+
+await checkAsync('a deleted chain survives a Host reload and can be restored from the new engine', async () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  world.engine.setPaused({ chainId, paused: true })
+  world.engine.deleteChain(chainId)
+  const restarted = world.rebuild()
+  assert.equal(restarted.listDeleted().length, 1, 'the tombstone must be read from the Host index after a reload')
+  const restored = restarted.restoreChain(chainId)
+  assert.equal(restored.status, 'paused')
+  assert.equal(restarted.sessionView('session-old').chain.chainId, chainId)
+  restarted.dispose()
+})
+
+await checkAsync('a restored chain can be purged forever', async () => {
+  const world = fakeWorld()
+  const chainId = world.chain.chainId
+  world.engine.setPaused({ chainId, paused: true })
+  world.engine.deleteChain(chainId)
+  const purged = world.engine.purgeChain(chainId)
+  assert.equal(purged.chainId, chainId)
+  assert.equal(purged.purged, true)
+  assert.equal(existsSync(world.local.trashPaths(chainId).dir), false)
+  assert.equal(world.engine.listDeleted().length, 0)
+  assert.throws(
+    () => world.engine.restoreChain(chainId),
+    error => error instanceof RelayError && error.code === RELAY_CODES.notFound,
+  )
+})
+
+await checkAsync('an external blocker pauses the head goal and clearing it resumes the goal', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  world.engine.checkpoint({
+    agent: world.oldAgent,
+    blocked: true,
+    note: 'need authorization',
+    blocker: { kind: 'external', who: 'human', action: 'authorize the cutover' },
+  })
+  assert.equal(goals.views.get('session-old').phase, 'paused', 'the goal round driver would keep the blocked chain working')
+  assert.deepEqual(world.local.readChain(world.chain.chainId).goalPausedByRelay, { sessionId: 'session-old', goalId: 'goal-old' })
+  assert.ok(auditOf(world, 'goal.paused').some(record => record.detail.why === 'blocker'))
+  world.engine.checkpoint({ agent: world.oldAgent, blocker: null })
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'active')
+  assert.equal(goals.views.get('session-old').phase, 'active')
+  assert.equal(world.local.readChain(world.chain.chainId).goalPausedByRelay, null)
+})
+
+await checkAsync('a reload repairs a head goal left active on a blocked chain', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  world.local.update(world.chain.chainId, record => {
+    record.status = 'paused'
+    record.pausedBy = 'blocker'
+    record.blocker = { kind: 'external', who: 'human', action: 'authorize', since: new Date().toISOString() }
+  })
+  const restarted = world.rebuild()
+  restarted.resumeEvaluations()
+  assert.equal(goals.views.get('session-old').phase, 'paused')
+  restarted.dispose()
+})
+
+await checkAsync('a disarmed head goal is not paused by an external blocker', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView({ activation: 'disarmed' }) })
+  world.engine.checkpoint({ agent: world.oldAgent, blocker: { kind: 'external', action: 'authorize' } })
+  assert.equal(goals.views.get('session-old').phase, 'active', 'a disarmed goal does not need pausing')
+  assert.equal(goals.ops('pause').length, 0)
+})
+
+await checkAsync('a blocked report without a blocker entry still pauses the head goal', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  world.engine.checkpoint({ agent: world.oldAgent, blocked: true, note: 'waiting for a decision' })
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'paused')
+  assert.equal(goals.views.get('session-old').phase, 'paused')
+  assert.ok(auditOf(world, 'goal.paused').some(record => record.detail.why === 'blocked'))
+})
+
+await checkAsync('deleting a paused chain pauses a goal that was left active by a session pause', async () => {
+  const world = fakeWorld()
+  const goals = withGoals(world, { 'session-old': goalView() })
+  world.engine.setPaused({ agent: world.oldAgent, chainId: world.chain.chainId, paused: true })
+  assert.equal(goals.views.get('session-old').phase, 'active', 'a session pause intentionally leaves its goal alone')
+  world.engine.deleteChain(world.chain.chainId)
+  assert.equal(goals.views.get('session-old').phase, 'paused')
+  const trashed = JSON.parse(readFileSync(join(world.local.trashPaths(world.chain.chainId).dir, 'relay.json'), 'utf8'))
+  assert.deepEqual(trashed.goalPausedByRelay, { sessionId: 'session-old', goalId: 'goal-old' })
+  world.engine.restoreChain(world.chain.chainId)
+  assert.deepEqual(world.local.readChain(world.chain.chainId).goalPausedByRelay, { sessionId: 'session-old', goalId: 'goal-old' })
+  world.engine.setPaused({ chainId: world.chain.chainId, paused: false })
+  assert.equal(goals.views.get('session-old').phase, 'active', 'resuming a restored chain must release the goal the delete paused')
 })
 
 await checkAsync('a handoff appends the previous brief to history', async () => {
@@ -1145,6 +1286,7 @@ function spawnWorld() {
   const ctx = { logger: { warn: () => {} }, get: name => services[name] }
   const engine = new RelayEngine(ctx, config, {
     chainIndex: new ChainIndex(indexHome),
+    trashIndex: new ChainTrashIndex(indexHome),
     fingerprints: new ChainFingerprints(indexHome),
   })
   engine.members.set('session-parent', { chainId: chain.chainId, truthDir: local.truthDir })
@@ -1523,7 +1665,7 @@ await checkAsync('the initializer freezes the list on its first checkpoint', asy
   const engine = new RelayEngine(
     { logger: { warn: () => {} }, get: name => services[name] },
     resolveConfig({}),
-    { chainIndex: new ChainIndex(home), fingerprints: new ChainFingerprints(home) },
+    { chainIndex: new ChainIndex(home), trashIndex: new ChainTrashIndex(home), fingerprints: new ChainFingerprints(home) },
   )
   const started = engine.start({ agent, objective: 'freeze me' })
   assert.equal(engine.findChain(started.chainId).chain.status, 'initializing')
@@ -2126,7 +2268,7 @@ check('a nested truthDir still resolves the workspace cwd', () => {
   const engine = new RelayEngine(
     { logger: { warn: () => {} }, get: () => undefined },
     resolveConfig({ truthDir: 'docs/relay' }),
-    { chainIndex: new ChainIndex(home), fingerprints: new ChainFingerprints(home) },
+    { chainIndex: new ChainIndex(home), trashIndex: new ChainTrashIndex(home), fingerprints: new ChainFingerprints(home) },
   )
   const normalized = engine.normalizeLocation({ ...chain, cwd: '/wrong', truthDir: '/wrong' }, store)
   assert.equal(normalized.cwd, workspaceDir)
@@ -3092,7 +3234,7 @@ function clusterWorld({ failCreate = [], ...overrides } = {}) {
     sessions: { flush: async () => true },
   }
   const ctx = { logger: { warn: () => {} }, get: name => services[name] }
-  const engine = new RelayEngine(ctx, config, { chainIndex: new ChainIndex(indexHome), fingerprints: new ChainFingerprints(indexHome) })
+  const engine = new RelayEngine(ctx, config, { chainIndex: new ChainIndex(indexHome), trashIndex: new ChainTrashIndex(indexHome), fingerprints: new ChainFingerprints(indexHome) })
   engine.members.set('session-head', { chainId: chain.chainId, truthDir: local.truthDir })
   engine.remember(local.readChain(chain.chainId), local)
   return { engine, local, chain, head, agents, makeAgent, calls }
@@ -3643,7 +3785,9 @@ check('a planning chain cannot be paused or resumed but can be deleted', () => {
   const deleted = world.engine.deleteChain(chainId)
   assert.equal(deleted.status, 'planning')
   assert.equal(existsSync(world.local.paths(chainId).dir), false)
+  assert.equal(existsSync(world.local.trashPaths(chainId).dir), true)
   assert.deepEqual(world.engine.chainIndex.entries(), [])
+  assert.equal(world.engine.listDeleted()[0].status, 'planning')
 })
 
 check('detail, doc and the session view carry the cluster fields', () => {
@@ -4066,8 +4210,10 @@ await checkAsync('a blocker recorded by the supervisor itself pauses the worker 
   const { engine, local, chain } = world
   engine.recordBlocker(local, chain.chainId, { kind: 'external', who: 'human', action: 'continue limit reached' })
   assert.equal(local.readChain(chain.chainId).status, 'paused')
+  assert.equal(goals.views.get('session-head').phase, 'paused', 'the head goal kept running under a blocker pause')
   assert.equal(goals.views.get('session-w1').phase, 'paused', 'the worker goal kept running under a blocker pause')
   engine.recordBlocker(local, chain.chainId, null)
+  assert.equal(goals.views.get('session-head').phase, 'active')
   assert.equal(goals.views.get('session-w1').phase, 'active')
 })
 
@@ -4263,7 +4409,7 @@ await checkAsync('reclaiming a worker pauses its seeded goal and flags it', asyn
   assert.equal(goals.views.get('session-w1').phase, 'active')
 })
 
-await checkAsync('the chain pausing, by the panel, by a session itself or by an external blocker, pauses the worker goals', async () => {
+await checkAsync('the chain pausing, by the panel, by a session itself or by an external blocker, pauses the head and worker goals it drives', async () => {
   const panel = await launchedWithGoals()
   panel.world.engine.setPaused({ chainId: panel.world.chain.chainId, paused: true })
   assert.deepEqual(panel.goals.ops('pause').map(op => op.agentId).sort(), ['session-head', 'session-w1', 'session-w2'])
@@ -4277,7 +4423,7 @@ await checkAsync('the chain pausing, by the panel, by a session itself or by an 
   const blocked = await launchedWithGoals()
   blocked.world.engine.checkpoint({ agent: blocked.world.head, blocker: { kind: 'external', who: 'human', action: 'supply the API key' } })
   assert.equal(blocked.world.local.readChain(blocked.world.chain.chainId).status, 'paused')
-  assert.deepEqual(blocked.goals.ops('pause').map(op => op.agentId).sort(), ['session-w1', 'session-w2'])
+  assert.deepEqual(blocked.goals.ops('pause').map(op => op.agentId).sort(), ['session-head', 'session-w1', 'session-w2'], 'the head goal kept driving the blocked chain')
 })
 
 await checkAsync('resuming through setPaused or clearBlocker resumes the worker goals that still own work, and only those the plugin paused', async () => {
@@ -4302,9 +4448,10 @@ await checkAsync('resuming through setPaused or clearBlocker resumes the worker 
   const blockedId = blocked.world.chain.chainId
   blocked.world.engine.checkpoint({ agent: blocked.world.head, blocker: { kind: 'external', who: 'human', action: 'supply the API key' } })
   passFeatures(blocked.world, ['F002', 'F004'])
+  assert.equal(blocked.goals.views.get('session-head').phase, 'paused', 'an external blocker must stop the head goal too')
   blocked.world.engine.clearBlocker({ chainId: blockedId })
   assert.equal(blocked.world.local.readChain(blockedId).status, 'active')
-  assert.deepEqual(blocked.goals.ops('resume').map(op => op.agentId), ['session-w2'], 'w1 owns nothing now; the head goal was never paused')
+  assert.deepEqual(blocked.goals.ops('resume').map(op => op.agentId).sort(), ['session-head', 'session-w2'], 'the blocker paused the head goal, so clearing it resumes it; w1 owns nothing now')
 })
 
 await checkAsync('a goal a human resumed by hand drops the pause flag, so a later human pause is never undone', async () => {

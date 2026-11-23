@@ -193,6 +193,11 @@ window.__ModuleLoader__.load({
       tabTasks: '我的任务',
       noChainTitle: '当前会话不属于任何接力链',
       noChainBody: '从会话里调用 relay_start 开始一条链。',
+      deletedChainTitle: '原任务链已删除',
+      deletedChainBody: '「{title}」已于 {when} 移入最近删除。会话和目标保留；在面板里恢复后，链仍处于暂停状态。',
+      openPanel: '打开长任务接力',
+      noLiveChainsTitle: '没有进行中的任务链',
+      noLiveChainsBody: '最近删除里还有 {count} 条；恢复后会以暂停状态回来。',
       noChildrenTitle: '还没有派发过子会话',
       noChildrenBody: '用 relay_spawn 把一部分功能交给新的子会话并行执行，这里会显示它们的执行情况。',
       noChildrenNotCurrent: '只有链的当前会话可以派发子会话，本会话已不是当前会话。',
@@ -241,9 +246,27 @@ window.__ModuleLoader__.load({
       planModeNote: '当前会话在计划模式：先规划、不执行。计划批准后才会拆出功能清单。',
       emptyPlanNote: '在计划模式下，先让计划获得批准，再启动链；批准的计划会写进 PLAN.md。',
       delete: '删除',
-      confirmDelete: '确认删除',
-      deleteNote: '功能清单、进度、交接说明和审计记录会一起删除，不能恢复。',
+      confirmDelete: '移入最近删除',
       deleteBlocked: '先暂停这条链才能删除',
+      deleteRunning: '有会话正在运行，等它这一轮结束再删除',
+      deleteConfirmTitle: '删除这条任务链？',
+      deleteKeepsSessions: '保留 {count} 个会话：{ids}。会话和目标不会被删除；目标会先暂停。',
+      deleteGoalNote: '删除后这些会话不再受接力监管；恢复链后目标仍是暂停的。',
+      deleteGitNote: '已提交的真理源会在工作区显示为删除；恢复后回来。',
+      deleteTrashNote: '移入最近删除后可以恢复；永久删除不能从面板恢复。',
+      deleteDoneNote: '这条链已完成；删除会同时移走它的验收证据。',
+      deletedNotice: '已移入最近删除：「{title}」 · 保留 {count} 个会话',
+      restoredNotice: '已恢复「{title}」；链仍是暂停状态',
+      purgedNotice: '已永久删除「{title}」',
+      undo: '撤销',
+      recentlyDeleted: '最近删除',
+      restore: '恢复',
+      purge: '永久删除',
+      confirmPurge: '确认永久删除',
+      purgeNote: '链目录和审计会一起删除；不能从面板恢复。',
+      deletedChainTag: '原链已删除',
+      deletedAt: '删除于',
+      trashLiveHint: '恢复后保持暂停，不会自动继续',
       track: '接力轨道',
       leg: '第 {n} 棒',
       legs: '棒',
@@ -522,6 +545,11 @@ window.__ModuleLoader__.load({
       tabTasks: 'My tasks',
       noChainTitle: 'This session is not in a relay chain',
       noChainBody: 'Call relay_start from a session to open one.',
+      deletedChainTitle: 'Its relay chain was deleted',
+      deletedChainBody: '"{title}" was moved to deleted on {when}. The session and its goal stay; restoring it in the panel brings the chain back paused.',
+      openPanel: 'Open long-task relay',
+      noLiveChainsTitle: 'No live relay chain',
+      noLiveChainsBody: 'There are {count} deleted chains to restore; a restored chain comes back paused.',
       noChildrenTitle: 'Nothing delegated yet',
       noChildrenBody: 'Use relay_spawn to hand part of the work to a fresh child session; its progress appears here.',
       noChildrenNotCurrent: 'Only the chain\'s current session can delegate, and this session is no longer current.',
@@ -570,9 +598,27 @@ window.__ModuleLoader__.load({
       planModeNote: 'This session is in plan mode: it plans and does not execute. The feature list is created once the plan is approved.',
       emptyPlanNote: 'In plan mode, get the plan approved before starting a chain; the approved plan is written to PLAN.md.',
       delete: 'Delete',
-      confirmDelete: 'Confirm delete',
-      deleteNote: 'Its features, progress, handoff brief, and audit log are removed too; this cannot be undone.',
+      confirmDelete: 'Move to deleted',
       deleteBlocked: 'Pause the chain before deleting it',
+      deleteRunning: 'A session is running; wait for its turn to end before deleting',
+      deleteConfirmTitle: 'Delete this relay chain?',
+      deleteKeepsSessions: 'Keep {count} sessions: {ids}. The sessions and their goals stay; the goals are paused first.',
+      deleteGoalNote: 'After this, those sessions are no longer supervised; a restored chain still has its goals paused.',
+      deleteGitNote: 'A committed truth source shows as a working-tree delete; restoring brings it back.',
+      deleteTrashNote: 'It can be restored from deleted; a permanent delete cannot be undone from the panel.',
+      deleteDoneNote: 'This chain is finished; deleting it also moves its acceptance evidence away.',
+      deletedNotice: 'Moved to deleted: "{title}" · kept {count} sessions',
+      restoredNotice: 'Restored "{title}"; the chain is still paused',
+      purgedNotice: 'Permanently deleted "{title}"',
+      undo: 'Undo',
+      recentlyDeleted: 'Deleted',
+      restore: 'Restore',
+      purge: 'Delete forever',
+      confirmPurge: 'Confirm permanent delete',
+      purgeNote: 'The chain directory and audit go with it; the panel cannot restore them.',
+      deletedChainTag: 'chain deleted',
+      deletedAt: 'Deleted',
+      trashLiveHint: 'Restores paused and does not resume on its own',
       track: 'Relay track',
       leg: 'Leg {n}',
       legs: 'legs',
@@ -899,6 +945,24 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-detail-title { margin: 0 0 6px; font-size: 15px; font-weight: 600; line-height: 22px; overflow-wrap: anywhere; }
 .relay-actions { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 6px; }
 .relay-confirm-note { flex-basis: 100%; color: var(--dsw-alias-state-error-primary); font-size: 11.5px; line-height: 16px; text-align: right; }
+.relay-delete-confirm { flex: 1 1 100%; box-sizing: border-box; margin-top: 2px; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 40%, var(--dsw-alias-border-l2)); border-radius: 8px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 6%, var(--dsw-alias-bg-layer-2)); }
+.relay-delete-title { margin-bottom: 4px; color: var(--dsw-alias-state-error-primary); font-size: 12.5px; font-weight: 600; line-height: 18px; }
+.relay-delete-path { margin-bottom: 6px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
+.relay-delete-list { margin: 0 0 8px; padding-left: 18px; color: var(--dsw-alias-label-secondary); font-size: 11.5px; line-height: 17px; }
+.relay-delete-list li { margin: 2px 0; overflow-wrap: anywhere; }
+.relay-delete-list li.is-warn { color: var(--dsw-alias-state-warn-primary); }
+.relay-notice { border-left: 3px solid var(--dsw-alias-brand-primary); }
+.relay-notice.is-deleted { border-left-color: var(--dsw-alias-state-warn-primary); }
+.relay-notice-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.relay-notice-text { flex: 1 1 240px; min-width: 0; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.relay-notice-sessions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 6px; }
+.relay-trash { padding-bottom: 8px; }
+.relay-trash-summary { cursor: pointer; color: var(--dsw-alias-label-secondary); font-size: 12px; font-weight: 600; line-height: 20px; }
+.relay-trash-hint { margin: 2px 0 4px; color: var(--dsw-alias-label-tertiary); font-size: 11.5px; line-height: 16px; }
+.relay-trash-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; padding: 7px 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 7px; background: var(--dsw-alias-bg-layer-2); }
+.relay-trash-main { flex: 1 1 260px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.relay-trash-title { min-width: 0; max-width: 100%; color: var(--dsw-alias-label-primary); font-size: 12.5px; font-weight: 600; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.relay-trash-when { color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; }
 .relay-blocker { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 6px; margin-top: 8px; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l2); border-left: 2px solid var(--dsw-alias-state-warn-primary); border-radius: 7px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 17px; overflow-wrap: anywhere; }
 .relay-blocker.is-external { border-left-color: var(--dsw-alias-state-error-primary); }
 .relay-blocker-kind { flex: none; color: var(--dsw-alias-state-warn-primary); font-weight: 600; }
@@ -1221,6 +1285,15 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
          */
         const focus = { chainId: null, listeners: new Set() }
 
+        /** Switch to the relay panel without selecting a chain. */
+        const openRelayPanel = () => {
+          try {
+            ctx.layout.selectPanel('relay')
+          } catch {
+            /* the shell cannot switch panels */
+          }
+        }
+
         /** Switch to the relay panel with one chain selected. */
         const showChainInPanel = (chainId) => {
           if (typeof chainId !== 'string' || chainId.length === 0) return
@@ -1234,11 +1307,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
               /* one listener must not block the switch */
             }
           }
-          try {
-            ctx.layout.selectPanel('relay')
-          } catch {
-            /* the shell cannot switch panels */
-          }
+          openRelayPanel()
         }
 
         /**
@@ -1272,6 +1341,12 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           if (typeof id !== 'string') return ''
           const bare = id.replace(/^session-/, '')
           return bare.length > 10 ? bare.slice(0, 8) : bare
+        }
+
+        /** One ISO timestamp in the reader's local format. */
+        const stamp = (iso) => {
+          const at = typeof iso === 'string' ? Date.parse(iso) : Number.NaN
+          return Number.isFinite(at) ? new Date(at).toLocaleString() : (typeof iso === 'string' ? iso : '')
         }
 
         /** Token count in thousands. */
@@ -2353,8 +2428,56 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           )
         }
 
-        function ChainDetail({ detail, onAct, busy, waiting }) {
-          const [section, setSection] = useState('features')
+        /**
+         * Delete is a destructive action, so it opens a consequence list before
+         * it moves anything. The engine refuses a running session; the button
+         * says so before the click as well.
+         */
+        function DeleteChainControl({ detail, busy, onAct, armed, onArm, onCancel }) {
+          const chain = detail.chain ?? {}
+          const sessions = Array.isArray(detail.sessions) ? detail.sessions : []
+          const running = sessions.filter(session => session.running === true).length
+          const blocked = chain.status === 'active' || chain.status === 'initializing'
+            ? t('deleteBlocked')
+            : running > 0 ? t('deleteRunning') : undefined
+          if (blocked !== undefined || !armed) {
+            return h('button', {
+              type: 'button',
+              className: 'relay-btn is-danger',
+              disabled: busy || blocked !== undefined,
+              title: blocked,
+              onClick: onArm,
+            }, t('delete'))
+          }
+          const ids = sessions.map(session => shortId(session.sessionId)).filter(Boolean).join(' · ')
+          return h('div', { className: 'relay-delete-confirm' },
+            h('div', { className: 'relay-delete-title' }, t('deleteConfirmTitle')),
+            typeof detail.truthDir === 'string' && detail.truthDir.length > 0
+              ? h('div', { className: 'relay-delete-path relay-mono', title: detail.truthDir }, detail.truthDir)
+              : null,
+            h('ul', { className: 'relay-delete-list' },
+              h('li', {}, t('deleteKeepsSessions')
+                .replace('{count}', String(sessions.length))
+                .replace('{ids}', ids.length > 0 ? ids : t('none'))),
+              h('li', {}, t('deleteGoalNote')),
+              running > 0 ? h('li', { className: 'is-warn' }, t('deleteRunning')) : null,
+              chain.status === 'done' ? h('li', {}, t('deleteDoneNote')) : null,
+              h('li', {}, t('deleteGitNote')),
+              h('li', {}, t('deleteTrashNote')),
+            ),
+            h('div', { className: 'relay-actions' },
+              h('button', {
+                type: 'button',
+                className: 'relay-btn is-danger',
+                disabled: busy,
+                onClick: () => { onCancel(); void onAct('relay/deleteChain', { chainId: chain.chainId }) },
+              }, t('confirmDelete')),
+              h('button', { type: 'button', className: 'relay-btn', disabled: busy, onClick: onCancel }, t('cancel')),
+            ),
+          )
+        }
+
+        function ChainDetail({ detail, onAct, busy, waiting, section, setSection, deleteArmed, setDeleteArmed }) {
           const chain = detail.chain ?? {}
           const sessions = Array.isArray(detail.sessions) ? detail.sessions : []
           const features = Array.isArray(detail.features) ? detail.features : []
@@ -2370,7 +2493,6 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const isPaused = chain.status === 'paused'
           const isDone = chain.status === 'done'
           const isPlanning = chain.status === 'planning'
-          const deletable = chain.status !== 'active' && chain.status !== 'initializing'
           const blocker = chain.blocker ?? null
           const phase = phaseOf(chain)
           const goalOwned = blocker !== null && typeof blocker.action === 'string' && blocker.action.startsWith('goal blocked:')
@@ -2439,13 +2561,14 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                       },
                     }, t('raiseHandoffLimit'))
                     : null,
-                  h(ConfirmButton, {
-                    disabled: busy || !deletable,
-                    title: deletable ? undefined : t('deleteBlocked'),
-                    confirmLabel: t('confirmDelete'),
-                    note: t('deleteNote'),
-                    onConfirm: () => { void onAct('relay/deleteChain', { chainId: chain.chainId }) },
-                  }, t('delete')),
+                  h(DeleteChainControl, {
+                    detail,
+                    busy,
+                    onAct,
+                    armed: deleteArmed,
+                    onArm: () => setDeleteArmed(true),
+                    onCancel: () => setDeleteArmed(false),
+                  }),
                 ),
               ),
               h('p', { className: 'relay-text' }, chain.objective),
@@ -2594,13 +2717,27 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
         }
 
         /** Empty state inside a session tab. */
-        function TabEmpty({ title, body }) {
+        function TabEmpty({ title, body, action = null }) {
           return h('section', { className: 'relay-card' },
             h('div', { className: 'relay-empty' },
               h('div', { className: 'relay-empty-title' }, title),
               h('div', {}, body),
+              action,
             ),
           )
+        }
+
+        /** The tab state for a session whose chain is only in the trash. */
+        function DeletedChainTab({ deleted }) {
+          const title = typeof deleted.title === 'string' && deleted.title.length > 0 ? deleted.title : deleted.chainId
+          const body = t('deletedChainBody')
+            .replace('{title}', title)
+            .replace('{when}', stamp(deleted.deletedAt))
+          return h(TabShell, {}, h(TabEmpty, {
+            title: t('deletedChainTitle'),
+            body,
+            action: h('button', { type: 'button', className: 'relay-btn', onClick: openRelayPanel }, t('openPanel')),
+          }))
         }
 
         /** The chain a session tab belongs to, with the way back to the panel. */
@@ -2732,6 +2869,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const [actionError, setActionError] = useState(null)
           if (error !== null) return h(TabShell, {}, h(TabEmpty, { title: t('failed'), body: error }))
           if (view === undefined) return h(TabShell, {}, h('div', { className: 'relay-text' }, t('loading')))
+          if (view !== null && view.deleted !== undefined) return h(DeletedChainTab, { deleted: view.deleted })
           if (view === null || view.chain === null) return h(TabShell, {}, h(TabEmpty, { title: t('noChainTitle'), body: t('noChainBody') }))
           const children = Array.isArray(view.children) ? view.children : []
           const running = children.filter(child => stateOf(child) === 'running').length
@@ -2775,6 +2913,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const { view, error } = useSessionView(sessionId)
           if (error !== null) return h(TabShell, {}, h(TabEmpty, { title: t('failed'), body: error }))
           if (view === undefined) return h(TabShell, {}, h('div', { className: 'relay-text' }, t('loading')))
+          if (view !== null && view.deleted !== undefined) return h(DeletedChainTab, { deleted: view.deleted })
           if (view === null || view.chain === null) return h(TabShell, {}, h(TabEmpty, { title: t('noChainTitle'), body: t('noChainBody') }))
           const self = view.self ?? {}
           const parent = view.parent ?? null
@@ -3224,7 +3363,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
          * Last panel payload, so reopening the panel renders before the poll.
          * `chains === null` means nothing has loaded yet.
          */
-        const panelCache = { chains: null, detail: null, selectedId: null }
+        const panelCache = { chains: null, deleted: null, detail: null, selectedId: null }
 
         /**
          * Shared plugin self-update state: checks once per mount, then applies a
@@ -3308,9 +3447,87 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           )
         }
 
+        /** What the last delete/restore did, with the way back while it is open. */
+        function DeleteNotice({ notice, busy, onUndo, onDismiss }) {
+          if (notice === null || notice === undefined) return null
+          const title = typeof notice.title === 'string' && notice.title.length > 0 ? notice.title : notice.chainId
+          let text
+          if (notice.kind === 'deleted') {
+            const sessions = Array.isArray(notice.sessions) ? notice.sessions : []
+            text = t('deletedNotice')
+              .replace('{title}', title)
+              .replace('{count}', String(sessions.length))
+          } else if (notice.kind === 'restored') {
+            text = t('restoredNotice').replace('{title}', title)
+          } else {
+            text = t('purgedNotice').replace('{title}', title)
+          }
+          const sessions = Array.isArray(notice.sessions) ? notice.sessions : []
+          return h('section', { className: `relay-card relay-notice is-${notice.kind}` },
+            h('div', { className: 'relay-notice-row' },
+              h('span', { className: 'relay-notice-text' }, text),
+              notice.kind === 'deleted'
+                ? h('button', { type: 'button', className: 'relay-btn is-small', disabled: busy, onClick: () => onUndo(notice) }, t('undo'))
+                : null,
+              h('button', { type: 'button', className: 'relay-btn is-small', onClick: onDismiss }, t('dismiss')),
+            ),
+            notice.kind === 'deleted' && sessions.length > 0
+              ? h('div', { className: 'relay-notice-sessions' },
+                sessions.slice(0, 6).map(sessionId => h('button', {
+                  key: sessionId,
+                  type: 'button',
+                  className: 'relay-btn is-small',
+                  title: sessionId,
+                  onClick: () => openSession(sessionId),
+                }, shortId(sessionId))),
+                sessions.length > 6 ? h('span', { className: 'relay-tag' }, `+${sessions.length - 6}`) : null)
+              : null,
+          )
+        }
+
+        /** The first-run wizard would be wrong when every live chain was deleted. */
+        function NoLiveChains({ count }) {
+          return h('section', { className: 'relay-card' },
+            h('div', { className: 'relay-empty' },
+              h('div', { className: 'relay-empty-title' }, t('noLiveChainsTitle')),
+              h('div', {}, t('noLiveChainsBody').replace('{count}', String(count))),
+            ),
+          )
+        }
+
+        /** Deleted chains, collapsed by default, with restore and permanent delete. */
+        function RecentlyDeleted({ items, busy, onRestore, onPurge }) {
+          if (!Array.isArray(items) || items.length === 0) return null
+          return h('details', { className: 'relay-card relay-trash' },
+            h('summary', { className: 'relay-trash-summary' }, `${t('recentlyDeleted')} (${items.length})`),
+            h('div', { className: 'relay-trash-hint' }, t('trashLiveHint')),
+            items.map(item => h('div', { key: item.chainId, className: 'relay-trash-row' },
+              h('div', { className: 'relay-trash-main' },
+                h('span', { className: 'relay-trash-title', title: item.chainId }, item.title || item.chainId),
+                h('span', { className: 'relay-tag' }, `${item.featuresDone ?? 0}/${item.featuresTotal ?? 0}`),
+                h('span', { className: 'relay-tag' }, `${(item.sessions ?? []).length} ${t('sessions')}`),
+                typeof item.deletedAt === 'string' && item.deletedAt.length > 0
+                  ? h('span', { className: 'relay-trash-when' }, `${t('deletedAt')} ${stamp(item.deletedAt)}`)
+                  : null,
+              ),
+              h('div', { className: 'relay-actions' },
+                h('button', { type: 'button', className: 'relay-btn is-small', disabled: busy, onClick: () => onRestore(item) }, t('restore')),
+                h(ConfirmButton, {
+                  small: true,
+                  disabled: busy,
+                  confirmLabel: t('confirmPurge'),
+                  note: t('purgeNote'),
+                  onConfirm: () => onPurge(item),
+                }, t('purge')),
+              ),
+            )),
+          )
+        }
+
         /** The panel: every chain on the left, one chain in full on the right. */
         function RelayPage() {
           const [chains, setChains] = useState(() => panelCache.chains ?? [])
+          const [deleted, setDeleted] = useState(() => panelCache.deleted ?? [])
           const [detail, setDetail] = useState(() => panelCache.detail ?? null)
           const [selectedId, setSelectedId] = useState(() => focus.chainId ?? panelCache.selectedId)
           const [error, setError] = useState(null)
@@ -3319,6 +3536,11 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const [filter, setFilter] = useState('all')
           const [needle, setNeedle] = useState('')
           const [actionError, setActionError] = useState(null)
+          const [notice, setNotice] = useState(null)
+          // The detail's tab and its armed delete confirmation live here so
+          // ChainDetail stays hook-free and can be rendered independently.
+          const [section, setSection] = useState('features')
+          const [deleteArmed, setDeleteArmed] = useState(false)
           const selectedRef = useRef(focus.chainId ?? panelCache.selectedId)
           const splitRef = useRef(null)
           const decisions = usePendingDecisions()
@@ -3336,10 +3558,23 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 selectedRef.current = wanted
                 panelCache.selectedId = wanted
                 setSelectedId(wanted)
+                setDeleteArmed(false)
+                setSection('features')
+              }
+              // A Host without the trash endpoint (or an unreadable trash) must
+              // still render the live chains.
+              let nextDeleted = panelCache.deleted ?? []
+              try {
+                const listedTrash = await call('relay/listDeleted')
+                nextDeleted = Array.isArray(listedTrash?.chains) ? listedTrash.chains : []
+              } catch {
+                /* keep the last known deleted list */
               }
               const nextDetail = wanted === null ? null : await call('relay/chainDetail', { chainId: wanted })
               panelCache.chains = next
+              panelCache.deleted = nextDeleted
               setChains(next)
+              setDeleted(nextDeleted)
               // The reader may have picked another chain while this one loaded.
               if (selectedRef.current === wanted) {
                 panelCache.detail = nextDetail
@@ -3357,6 +3592,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             selectedRef.current = chainId
             panelCache.selectedId = chainId
             setSelectedId(chainId)
+            setDeleteArmed(false)
+            setSection('features')
             void refresh()
           }, [refresh])
 
@@ -3394,8 +3631,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const act = useCallback(async (endpoint, args) => {
             setBusy(true)
             let failure = null
+            let value = null
             try {
-              const value = await call(endpoint, args)
+              value = await call(endpoint, args)
               if (value !== null && typeof value === 'object' && value.ok === false) {
                 failure = value.message ?? value.code ?? endpoint
               }
@@ -3406,8 +3644,27 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             // Kept apart from the read error: the next poll clears that one,
             // and a refused action has to stay until the reader has seen it.
             setActionError(failure)
+            if (failure === null && value !== null && typeof value === 'object') {
+              if (endpoint === 'relay/deleteChain') {
+                setNotice({ kind: 'deleted', ...value })
+              } else if (endpoint === 'relay/restoreChain') {
+                setNotice({ kind: 'restored', chainId: value.chainId, title: value.title ?? '' })
+              } else if (endpoint === 'relay/purgeChain') {
+                setNotice({ kind: 'purged', chainId: value.chainId, title: value.title ?? '' })
+              }
+            }
             await refresh()
+            return { ok: failure === null, value, failure }
           }, [refresh])
+
+          const restoreDeleted = useCallback(async (item) => {
+            const outcome = await act('relay/restoreChain', { chainId: item.chainId })
+            if (outcome.ok) select(item.chainId)
+          }, [act, select])
+
+          const purgeDeleted = useCallback((item) => {
+            void act('relay/purgeChain', { chainId: item.chainId })
+          }, [act])
 
           const sessionsOf = chain => (Array.isArray(chain.sessionsDetail) ? chain.sessionsDetail : [])
           const isActive = chain => chain.status === 'active' || chain.status === 'initializing' || chain.status === 'planning'
@@ -3424,17 +3681,31 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           /** The chain a session belongs to, among the listed chains. */
           const chainOfSession = sessionId => chains.find(chain => sessionsOf(chain).some(session => session.sessionId === sessionId))
           const waiting = new Set(decisions.map(decision => decision.sessionId).filter(id => typeof id === 'string'))
+          // Sessions of deleted chains still surface approvals; tag them so the
+          // attention list never looks like an ownerless pending request.
+          const deletedSessions = new Map()
+          for (const item of deleted) {
+            for (const sessionId of Array.isArray(item.sessions) ? item.sessions : []) {
+              if (!deletedSessions.has(sessionId)) deletedSessions.set(sessionId, item)
+            }
+          }
 
           // Everything that is waiting on a human, most actionable first.
           const attention = []
           for (const decision of decisions) {
             const owner = typeof decision.sessionId === 'string' ? chainOfSession(decision.sessionId) : undefined
+            const gone = typeof decision.sessionId === 'string' ? deletedSessions.get(decision.sessionId) : undefined
             attention.push({
               key: decision.key,
               tone: 'warn',
               kind: decision.kind === 'approval' ? t('attnApproval') : t('attnQuestion'),
               text: decision.title || decision.detail || '',
-              meta: [owner?.title, shortId(decision.sessionId), decision.detail].filter(part => typeof part === 'string' && part.length > 0).join(' / '),
+              meta: [
+                gone === undefined ? null : t('deletedChainTag'),
+                owner?.title ?? gone?.title,
+                shortId(decision.sessionId),
+                decision.detail,
+              ].filter(part => typeof part === 'string' && part.length > 0).join(' / '),
               action: typeof decision.sessionId === 'string' ? { label: t('openSession'), run: () => openSession(decision.sessionId) } : null,
             })
           }
@@ -3531,6 +3802,12 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                     ),
                   )
                   : null,
+                h(DeleteNotice, {
+                  notice,
+                  busy,
+                  onUndo: restoreDeleted,
+                  onDismiss: () => setNotice(null),
+                }),
                 chains.length === 0 ? null : h(Kpis, { items: kpis }),
                 error === null ? null : h('div', { className: 'relay-error' }, `${t('failed')}: ${error}`),
                 actionError === null ? null : h('div', { className: 'relay-error', role: 'alert' },
@@ -3555,7 +3832,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 ),
                 loading && chains.length === 0 ? h('div', { className: 'relay-text' }, t('loading')) : null,
                 !loading && chains.length === 0
-                  ? h('section', { className: 'relay-card' }, h(EmptyState))
+                  ? deleted.length > 0
+                    ? h(NoLiveChains, { count: deleted.length })
+                    : h('section', { className: 'relay-card' }, h(EmptyState))
                   : null,
                 chains.length === 0 ? null : h('div', { className: 'relay-split', ref: splitRef },
                   h('section', { className: 'relay-card relay-rail' },
@@ -3588,8 +3867,24 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                       h(CardTitle, {}, selectedId === null ? t('selectChain') : t('loading')),
                       selectedId === null ? h('div', { className: 'relay-text' }, t('selectChainBody')) : null,
                     )
-                    : h(ChainDetail, { key: selectedId, detail, onAct: act, busy, waiting }),
+                    : h(ChainDetail, {
+                      key: selectedId,
+                      detail,
+                      onAct: act,
+                      busy,
+                      waiting,
+                      section,
+                      setSection,
+                      deleteArmed,
+                      setDeleteArmed,
+                    }),
                 ),
+                h(RecentlyDeleted, {
+                  items: deleted,
+                  busy,
+                  onRestore: restoreDeleted,
+                  onPurge: purgeDeleted,
+                }),
               ),
             ),
           )

@@ -36,7 +36,7 @@ const REMOTE_METHOD_DESCRIPTOR = '@deepseek-ai/dsh-typert-protocol/remote-method
 
 /** Methods exposed to the browser. */
 const METHODS = [
-  'listChains', 'chainDetail', 'chainAudit', 'chainDoc', 'sessionView', 'setPaused', 'handoffNow', 'launchCluster', 'previewCluster', 'finishChain', 'deleteChain', 'acceptCoverage', 'acceptCoverageMany', 'raiseHandoffLimit', 'clearBlocker', 'reclaimWorker', 'recall', 'getConfig', 'saveConfig', 'checkUpdate', 'applyUpdate',
+  'listChains', 'listDeleted', 'chainDetail', 'chainAudit', 'chainDoc', 'sessionView', 'setPaused', 'handoffNow', 'launchCluster', 'previewCluster', 'finishChain', 'deleteChain', 'restoreChain', 'purgeChain', 'acceptCoverage', 'acceptCoverageMany', 'raiseHandoffLimit', 'clearBlocker', 'reclaimWorker', 'recall', 'getConfig', 'saveConfig', 'checkUpdate', 'applyUpdate',
 ]
 
 /** Relay Remote over the engine. */
@@ -48,9 +48,14 @@ export class RelayRemote {
     this.engine = engine
   }
 
-  /** Every chain this Host knows about. */
+  /** Every live chain this Host knows about. */
   listChains() {
     return { chains: this.engine.status() }
+  }
+
+  /** Chains moved to their workspace's trash that can still be restored. */
+  listDeleted() {
+    return { chains: this.engine.listDeleted() }
   }
 
   /**
@@ -175,7 +180,7 @@ export class RelayRemote {
   }
 
   /**
-   * Delete a stopped chain and its truth source.
+   * Move a stopped chain to its workspace's trash.
    * @param {string} chainId - chain identity.
    * @returns {object} deletion result.
    */
@@ -184,6 +189,30 @@ export class RelayRemote {
       throw new RelayError('invalid', 'chainId is required')
     }
     return this.engine.deleteChain(chainId)
+  }
+
+  /**
+   * Restore one deleted chain; it comes back stopped.
+   * @param {string} chainId - chain identity.
+   * @returns {object} restored facts.
+   */
+  restoreChain(chainId) {
+    if (typeof chainId !== 'string' || chainId.length === 0) {
+      throw new RelayError('invalid', 'chainId is required')
+    }
+    return this.engine.restoreChain(chainId)
+  }
+
+  /**
+   * Permanently remove one deleted chain.
+   * @param {string} chainId - chain identity.
+   * @returns {object} purge result.
+   */
+  purgeChain(chainId) {
+    if (typeof chainId !== 'string' || chainId.length === 0) {
+      throw new RelayError('invalid', 'chainId is required')
+    }
+    return this.engine.purgeChain(chainId)
   }
 
   /**

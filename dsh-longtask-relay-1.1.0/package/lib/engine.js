@@ -9,7 +9,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import { ChainIndex, ChainStore, RELAY_CODES, RelayError, featureProgress, isChainId, skeletonTruth } from './chain-store.js'
+import { ChainIndex, ChainStore, ChainTrashIndex, RELAY_CODES, RelayError, featureProgress, isChainId, skeletonTruth } from './chain-store.js'
 import { ChainFingerprints } from './fingerprints.js'
 import { evidenceIssue } from './evidence.js'
 import { sessionTitle } from './labels.js'
@@ -285,7 +285,7 @@ export class RelayEngine {
   /**
    * @param {object} ctx - plugin context.
    * @param {object} config - resolved config.
-   * @param {{ chainIndex?: ChainIndex }} [options] - test seams.
+   * @param {{ chainIndex?: ChainIndex, trashIndex?: ChainTrashIndex, fingerprints?: object }} [options] - test seams.
    */
   constructor(ctx, config, options = {}) {
     this.ctx = ctx
@@ -308,6 +308,8 @@ export class RelayEngine {
     this.busyChains = new Set()
     /** Cross-lifetime chain index. */
     this.chainIndex = options.chainIndex ?? ChainIndex.default()
+    /** Cross-lifetime tombstones for chains moved to a workspace's `.trash`. */
+    this.trashIndex = options.trashIndex ?? ChainTrashIndex.default()
     /** Host-level frozen feature lists. */
     this.fingerprints = options.fingerprints ?? ChainFingerprints.default()
     this.unloaded = false
@@ -641,6 +643,11 @@ export class RelayEngine {
         try {
           const chain = store.readChain(chainId)
           if (chain === undefined) continue
+          // Repair the state written before a blocker also paused the head
+          // goal: an active goal on a paused chain would resume its rounds.
+          if (chain.status === 'paused' && (chain.pausedBy === 'blocker' || chain.pausedBy === 'blocked')) {
+            this.pauseHeadGoalForBlock(chain, store, 'blocked')
+          }
           if (chain.status !== 'active' && chain.status !== 'initializing') continue
           if (chain.currentSessionId === null || chain.currentSessionId === undefined) continue
           const agent = this.ctx.get('agents')?.get(chain.currentSessionId)
@@ -693,6 +700,47 @@ export class RelayEngine {
   sessionLoaded(sessionId) {
     const stats = this.stats.get(sessionId)
     if (stats !== undefined) stats.rearmChecked = false
+  }
+
+  /**
+   * Stop a goal that belongs to a deleted chain when its session is opened.
+   * Deleting a chain while its head was unloaded cannot pause that goal: there
+   * is no live agent to hand to the goal service. When the session is opened
+   * again, this is the first chance to stop the round driver. No marker is
+   * written because the chain record is in the trash; a restored chain keeps
+   * this goal paused until a human resumes it.
+   * @param {object} agent - the loaded session.
+   * @returns {boolean} true when this call paused a goal.
+   */
+  pauseGoalForDeletedSession(agent) {
+    if (agent === undefined || typeof agent.id !== 'string') return false
+    // The same session may have started a new chain after the old one was
+    // deleted; a live membership always wins over a tombstone.
+    if (this.locate(agent.session) !== undefined) return false
+    let entry
+    try {
+      entry = this.trashIndex.findSession(agent.id)
+    } catch (error) {
+      this.warn(`cannot read the deleted-chain index for ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+    if (entry === undefined) return false
+    try {
+      if (!this.storeFor(entry.truthDir).trashExists(entry.chainId)) return false
+    } catch {
+      return false
+    }
+    const goals = this.ctx.get('goals')
+    const view = this.goalOf(agent)
+    if (view === undefined || view.phase !== 'active' || view.activation === 'disarmed'
+      || typeof goals?.pause !== 'function') return false
+    try {
+      goals.pause(agent, { id: view.id, revision: view.revision })
+      return true
+    } catch (error) {
+      this.warn(`could not pause the goal of deleted-chain session ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
   }
 
   /** Per-session supervisor state. */
@@ -988,6 +1036,11 @@ export class RelayEngine {
       this.record(store, chain.chainId, { kind: 'feature.added', actor, detail: { id, reason } })
     }
     this.releaseWaitingGroups(updated)
+    if (blocked === true && updated !== undefined && updated.status === 'paused') {
+      // A session that reports itself blocked pauses the chain; its own goal
+      // must stop too, or the goal driver sends it straight back to work.
+      this.pauseHeadGoalForBlock(updated, store, 'blocked')
+    }
     if (ready === true) this.record(store, chain.chainId, { kind: 'session.ready', actor })
     if (blocked === true || blocker !== undefined) {
       this.record(store, chain.chainId, {
@@ -1058,6 +1111,41 @@ export class RelayEngine {
   }
 
   /**
+   * Pause the chain head's goal with the chain.
+   * A goal round driver keeps sending rounds while the goal is active, even if
+   * the chain is paused; pausing the goal is what makes "the chain is blocked"
+   * and "the session stopped working" agree. The marker is the same one the
+   * panel pause uses, so resuming the chain can release only a goal the plugin
+   * paused.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {'blocker'|'blocked'|'deleted'} why - audit reason.
+   * @returns {boolean} true when this call paused the goal.
+   */
+  pauseHeadGoalForBlock(chain, store, why) {
+    const head = this.headGoal(chain)
+    // A disarmed goal does not drive rounds, so pausing it only risks arming it
+    // again when the chain later resumes.
+    if (head === undefined || head.view.phase !== 'active' || head.view.activation === 'disarmed'
+      || typeof head.goals.pause !== 'function') return false
+    try {
+      head.goals.pause(head.agent, { id: head.view.id, revision: head.view.revision })
+      store.update(chain.chainId, record => {
+        record.goalPausedByRelay = { sessionId: head.agent.id, goalId: head.view.id }
+      })
+      this.record(store, chain.chainId, {
+        kind: 'goal.paused',
+        actor: 'system',
+        detail: { sessionId: head.agent.id, goalId: head.view.id, why },
+      })
+      return true
+    } catch (error) {
+      this.warn(`could not pause the goal of ${head.agent.id} for ${why}: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+  }
+
+  /**
    * Store the current blocker on the chain record and pause external ones.
    * A blocker only a human can clear must stop the handoff chain: fresh sessions
    * cannot make progress and would burn the handoff budget.
@@ -1081,8 +1169,12 @@ export class RelayEngine {
           record.lastError = null
         }
       })
+      const released = store.readChain(chainId)
+      // A blocker pause also paused the head goal; releasing the chain releases
+      // that goal before the workers, so the head can continue its round.
+      if (released !== undefined && released.status === 'active') this.releasePausedGoal(released, store, 'system')
       // A blocker pauses and releases the chain from several places; the workers' goals follow here.
-      this.syncWorkerGoals({ chainId }, store)
+      this.syncWorkerGoals(released ?? { chainId }, store)
       return
     }
     const kind = blocker?.kind
@@ -1106,7 +1198,13 @@ export class RelayEngine {
     })
     store.writeProgress(chainId, `${store.readProgress(chainId).replace(/\s*$/, '\n')}- [${description.since}] blocked (${kind}, waits on ${description.who}): ${description.action || '(no action recorded)'}\n`)
     store.appendLedger(chainId, 'decisions', `- [${description.since}] blocked (${kind}, waits on ${description.who}): ${description.action || '(no action recorded)'}`)
-    this.syncWorkerGoals({ chainId }, store)
+    const paused = store.readChain(chainId)
+    // The chain is paused but its goal is not: a goal-round driver would keep
+    // working while the panel says a human is needed. Pause both together.
+    if (paused !== undefined && paused.status === 'paused' && paused.pausedBy === 'blocker') {
+      this.pauseHeadGoalForBlock(paused, store, 'blocker')
+    }
+    this.syncWorkerGoals(paused ?? { chainId }, store)
   }
 
   /**
@@ -1170,11 +1268,14 @@ export class RelayEngine {
   }
 
   /**
-   * Delete a stopped chain and forget it.
-   * An active chain's supervisor is still running, so it must be paused first;
-   * this keeps a delete from racing a wrap-up or handoff.
+   * Move a stopped chain to its workspace's `.trash` and forget it as live.
+   * The pause is the precondition because the supervisor must be quiet; a
+   * running turn is refused too because the delete does not abort it, and a
+   * turn that keeps writing after its truth source moved would look like a
+   * ghost chain. Goals are paused before the move so a goal round cannot pull
+   * the session back into a chain the panel already treats as deleted.
    * @param {string} chainId - chain identity.
-   * @returns {{ chainId: string, status: string, sessions: number }} deletion result.
+   * @returns {{ chainId: string, status: string, sessions: string[], title: string, deletedAt: string, trashDir: string }} deletion result.
    */
   deleteChain(chainId) {
     if (typeof chainId !== 'string' || chainId.length === 0) {
@@ -1184,8 +1285,57 @@ export class RelayEngine {
     if (chain.status === 'active' || chain.status === 'initializing') {
       throw new RelayError(RELAY_CODES.invalid, 'pause the chain before deleting it')
     }
+    const agents = this.ctx.get('agents')
+    const running = chain.sessions
+      .map(session => session.sessionId)
+      .filter(sessionId => agents?.get(sessionId)?.status === 'running')
+    if (running.length > 0) {
+      throw new RelayError(RELAY_CODES.busy, `session ${running[0]} is running; wait for its turn to end before deleting the chain`)
+    }
     const sessionIds = chain.sessions.map(session => session.sessionId)
-    store.remove(chain.chainId)
+    const document = store.readFeatures(chain.chainId)
+    const progress = document === undefined ? { done: 0, total: 0 } : featureProgress(document)
+    const deletedAt = new Date().toISOString()
+    // Deletion is final for the live chain: no goal may drive it afterwards.
+    // A paused chain is the normal case; a chain paused by its own head can
+    // still have an active goal, which is exactly what this closes.
+    this.pauseHeadGoalForBlock(chain, store, 'deleted')
+    this.syncWorkerGoals(chain, store)
+    this.record(store, chain.chainId, {
+      kind: 'chain.deleted',
+      actor: 'human',
+      detail: { sessions: sessionIds.length, featuresDone: progress.done, featuresTotal: progress.total },
+    })
+    let trashDir
+    try {
+      trashDir = store.trash(chain.chainId)
+    } catch (error) {
+      throw error instanceof RelayError ? error : new RelayError(RELAY_CODES.io, `cannot move chain ${chain.chainId} to the trash: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    const entry = {
+      chainId: chain.chainId,
+      truthDir: store.truthDir,
+      cwd: chain.cwd,
+      title: chain.title,
+      objective: typeof chain.objective === 'string' ? chain.objective.slice(0, 300) : '',
+      status: chain.status,
+      deletedAt,
+      sessions: sessionIds,
+      featuresDone: progress.done,
+      featuresTotal: progress.total,
+    }
+    try {
+      this.trashIndex.remember(entry)
+    } catch (error) {
+      // Putting the directory back is the only way to keep the chain visible;
+      // a tombstone the panel cannot read would strand it.
+      try {
+        store.restore(chain.chainId)
+      } catch (restoreError) {
+        this.warn(`chain ${chain.chainId} is in the trash but could not be restored after an index failure: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`)
+      }
+      throw new RelayError(RELAY_CODES.io, `cannot record the deleted chain ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
     try {
       this.chainIndex.forget(chain.chainId)
     } catch (error) {
@@ -1201,7 +1351,145 @@ export class RelayEngine {
       this.stats.delete(sessionId)
     }
     this.clearChainTimers(chain)
-    return { chainId: chain.chainId, status: chain.status, sessions: sessionIds.length }
+    return { chainId: chain.chainId, status: chain.status, sessions: sessionIds, title: chain.title, deletedAt, trashDir }
+  }
+
+  /**
+   * Deleted chains the panel can still restore.
+   * A tombstone whose directory disappeared is skipped; a tombstone whose
+   * chain is live again is stale and skipped too.
+   * @returns {Array<object>} summaries, newest deletion first.
+   */
+  listDeleted() {
+    let entries
+    try {
+      entries = this.trashIndex.entries()
+    } catch (error) {
+      this.warn(`cannot read the deleted-chain index: ${error instanceof Error ? error.message : String(error)}`)
+      return []
+    }
+    const items = []
+    for (const entry of entries) {
+      try {
+        const store = this.storeFor(entry.truthDir)
+        if (!store.trashExists(entry.chainId)) continue
+        if (store.readChain(entry.chainId) !== undefined) continue
+        items.push({
+          chainId: entry.chainId,
+          cwd: entry.cwd ?? '',
+          title: entry.title || entry.objective || entry.chainId,
+          objective: entry.objective ?? '',
+          status: entry.status ?? 'paused',
+          deletedAt: entry.deletedAt ?? '',
+          sessions: entry.sessions ?? [],
+          featuresDone: entry.featuresDone ?? 0,
+          featuresTotal: entry.featuresTotal ?? 0,
+        })
+      } catch (error) {
+        this.warn(`cannot read deleted chain ${entry.chainId}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    items.sort((a, b) => (a.deletedAt < b.deletedAt ? 1 : -1))
+    return items
+  }
+
+  /**
+   * The tombstone for a session whose chain is only in the trash.
+   * A missing or unreadable index means "no chain", never a failed tab.
+   * @param {string} sessionId - session identity.
+   * @returns {object|undefined} a compact deleted-chain summary.
+   */
+  deletedChainForSession(sessionId) {
+    try {
+      const entry = this.trashIndex.findSession(sessionId)
+      if (entry === undefined) return undefined
+      // A tombstone whose directory is gone (a failed purge cleanup) must not
+      // masquerade as a restorable chain in the session tab.
+      if (!this.storeFor(entry.truthDir).trashExists(entry.chainId)) return undefined
+      return {
+        chainId: entry.chainId,
+        title: entry.title || entry.objective || entry.chainId,
+        deletedAt: entry.deletedAt ?? '',
+        status: entry.status ?? 'paused',
+        featuresDone: entry.featuresDone ?? 0,
+        featuresTotal: entry.featuresTotal ?? 0,
+      }
+    } catch (error) {
+      this.warn(`cannot read the deleted-chain index for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      return undefined
+    }
+  }
+
+  /**
+   * Move a deleted chain back and re-register it. It stays stopped: restoring
+   * a chain must never resume automatic work behind the reader's back.
+   * @param {string} chainId - chain identity.
+   * @returns {{ chainId: string, status: string, title: string, sessions: string[] }} restored facts.
+   */
+  restoreChain(chainId) {
+    if (!isChainId(chainId)) {
+      throw new RelayError(RELAY_CODES.invalid, 'chainId must look like chain-<uuid>')
+    }
+    const entry = this.trashIndex.find(chainId)
+    if (entry === undefined) throw new RelayError(RELAY_CODES.notFound, `chain ${chainId} is not in the trash`)
+    const store = this.storeFor(entry.truthDir)
+    if (typeof entry.cwd === 'string' && entry.cwd.length > 0) store.cwd = entry.cwd
+    if (store.readChain(chainId) !== undefined) {
+      throw new RelayError(RELAY_CODES.invalid, `chain ${chainId} is already live`)
+    }
+    store.restore(chainId)
+    const chain = store.readChain(chainId)
+    if (chain === undefined) throw new RelayError(RELAY_CODES.io, `chain ${chainId} was restored but cannot be read`)
+    // A workspace moved while its chain was in the trash leaves an old
+    // absolute truthDir in relay.json; the store that found it wins.
+    const restored = this.normalizeLocation(chain, store)
+    this.remember(restored, store)
+    try {
+      const document = store.readFeatures(chainId)
+      if (document !== undefined) this.fingerprints.set(chainId, document.features)
+    } catch (error) {
+      this.warn(`chain ${chainId} was restored but its feature fingerprint could not be rebuilt: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    for (const session of restored.sessions) {
+      this.members.set(session.sessionId, { chainId, truthDir: store.truthDir })
+      this.misses.delete(session.sessionId)
+    }
+    try {
+      this.trashIndex.forget(chainId)
+    } catch (error) {
+      this.warn(`chain ${chainId} was restored but its tombstone remains: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    this.record(store, chainId, { kind: 'chain.restored', actor: 'human', detail: { status: restored.status } })
+    return {
+      chainId,
+      status: restored.status,
+      title: restored.title,
+      sessions: restored.sessions.map(session => session.sessionId),
+    }
+  }
+
+  /**
+   * Permanently remove one deleted chain.
+   * @param {string} chainId - chain identity.
+   * @returns {{ chainId: string, purged: boolean, title: string }} purge result.
+   */
+  purgeChain(chainId) {
+    if (!isChainId(chainId)) {
+      throw new RelayError(RELAY_CODES.invalid, 'chainId must look like chain-<uuid>')
+    }
+    const entry = this.trashIndex.find(chainId)
+    if (entry === undefined) throw new RelayError(RELAY_CODES.notFound, `chain ${chainId} is not in the trash`)
+    const store = this.storeFor(entry.truthDir)
+    if (store.readChain(chainId) !== undefined) {
+      throw new RelayError(RELAY_CODES.invalid, `chain ${chainId} is live; delete it before purging`)
+    }
+    store.purgeTrash(chainId)
+    try {
+      this.trashIndex.forget(chainId)
+    } catch (error) {
+      this.warn(`chain ${chainId} was purged but its tombstone remains: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return { chainId, purged: true, title: entry.title || entry.objective || chainId }
   }
 
   /**
@@ -2821,7 +3109,10 @@ export class RelayEngine {
         if (membership !== undefined) break
       }
     }
-    if (membership === undefined) return undefined
+    if (membership === undefined) {
+      const deleted = this.deletedChainForSession(sessionId)
+      return deleted === undefined ? undefined : { chain: null, deleted }
+    }
     const { chain, store, self } = membership
     const document = store.readFeatures(chain.chainId)
     const features = document?.features ?? []
@@ -3144,7 +3435,14 @@ export class RelayEngine {
     chain = refreshed
     // Whatever path changed the chain's status, the head going idle reconciles every worker's goal.
     if (chain.mode === 'cluster') this.syncWorkerGoals(chain, store)
-    if (chain.status !== 'active' && chain.status !== 'initializing') return
+    if (chain.status !== 'active' && chain.status !== 'initializing') {
+      // A goal cannot be paused before its session is loaded; do it the first
+      // time that session reports idle, or a blocked chain keeps getting rounds.
+      if (chain.status === 'paused' && (chain.pausedBy === 'blocker' || chain.pausedBy === 'blocked')) {
+        this.pauseHeadGoalForBlock(chain, store, 'blocked')
+      }
+      return
+    }
     this.releasePausedGoal(chain, store, 'system')
     // Before the group release: that starts a background launch, which marks the chain busy and would make the re-arm give up.
     this.rearmGoal(chain, store, agent, entry)

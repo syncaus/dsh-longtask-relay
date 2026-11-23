@@ -133,7 +133,7 @@ function createFakeReact() {
  * components plus the RPC stub.
  * @returns {{ registrations: object[], calls: object[] }}
  */
-function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null, onOpenSession = null, planning = false, preview = null, launchResults = [], clusterChildren = false, mainline = false } = {}) {
+function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null, onOpenSession = null, planning = false, preview = null, launchResults = [], clusterChildren = false, mainline = false, deleted = null, deletedSessionView = null, runningSession = false, pausedChain = false } = {}) {
   const react = createFakeReact()
   const registrations = []
   const calls = []
@@ -185,7 +185,7 @@ function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null,
   }
   const chainView = planning ? planningChainView : activeChainView
 
-  const chainSummary = { chainId: 'chain-1', status: 'active', title: 'demo', objective: 'ship it', featuresTotal: 2, featuresDone: 1, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null, sessions: 1 }
+  const chainSummary = { chainId: 'chain-1', status: runningSession || pausedChain ? 'paused' : 'active', title: 'demo', objective: 'ship it', featuresTotal: 2, featuresDone: 1, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null, sessions: 1 }
   const panelChains = chains ?? {
     chains: [{
       ...chainSummary,
@@ -205,7 +205,8 @@ function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null,
       goalPausedByRelay: false,
     },
     features: [],
-    sessions: [{ sessionId: 'session-1', role: 'initializer', running: false, loaded: true, pressureRatio: 0.2, peakRatio: 0.4 }],
+    truthDir: 'D:/demo/.relay/chain-1',
+    sessions: [{ sessionId: 'session-1', role: 'initializer', running: runningSession, loaded: true, pressureRatio: 0.2, peakRatio: 0.4 }],
     handoff: null,
   }
   const planningDetail = {
@@ -241,9 +242,18 @@ function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null,
               failedOnce = true
               return Promise.reject(new Error('transport down'))
             }
+            if (deletedSessionView !== null) {
+              return Promise.resolve({ ok: true, value: { chain: null, deleted: deletedSessionView } })
+            }
             return Promise.resolve({ ok: true, value: chainView })
           }
           if (endpoint === 'relay/listChains') return Promise.resolve({ ok: true, value: panelChains })
+          if (endpoint === 'relay/listDeleted') return Promise.resolve({ ok: true, value: deleted ?? { chains: [] } })
+          if (endpoint === 'relay/deleteChain') {
+            return Promise.resolve({ ok: true, value: { chainId: 'chain-1', status: 'paused', title: 'demo', sessions: ['session-1'], deletedAt: '2026-11-23T11:11:55.928Z' } })
+          }
+          if (endpoint === 'relay/restoreChain') return Promise.resolve({ ok: true, value: { chainId: 'chain-1', status: 'paused', title: 'demo', sessions: ['session-1'] } })
+          if (endpoint === 'relay/purgeChain') return Promise.resolve({ ok: true, value: { chainId: 'chain-1', purged: true, title: 'demo' } })
           if (endpoint === 'relay/chainDetail') return Promise.resolve({ ok: true, value: planning ? planningDetail : panelDetail })
           if (endpoint === 'relay/previewCluster') return Promise.resolve({ ok: true, value: preview ?? { issues: [], conflicts: [], waiting: [] } })
           if (endpoint === 'relay/launchCluster') return Promise.resolve({ ok: true, value: { chainId: 'chain-plan', status: 'active', results: launchResults } })
@@ -583,4 +593,78 @@ const rowTexts = rows.map(row => collectText(row))
 assert.ok(rowTexts[0].includes('modeCluster'), 'a cluster chain must be marked on its row')
 assert.ok(rowTexts[1].includes('modeRelay'), 'a single-task chain must be marked on its row')
 
-console.log('session tab render check passed: hook order holds, a read error clears after recovery, the launch dock starts the plan on record, and the panel shows the peak ratio')
+// A session whose chain was moved to the trash must say so, not look like a
+// fresh session that should call relay_start again.
+const deletedBoot = boot({
+  deletedSessionView: {
+    chainId: 'chain-gone',
+    title: 'gone task',
+    deletedAt: '2026-11-23T11:11:55.928Z',
+    status: 'paused',
+    featuresDone: 1,
+    featuresTotal: 3,
+  },
+})
+for (const tab of deletedBoot.registrations.filter(entry => entry.options.name === 'conversation.view')) {
+  const deletedText = collectText(await deletedBoot.react.settle(tab.component, { sessionId: 'session-1' }))
+  assert.ok(deletedText.includes('deletedChainTitle'), 'a deleted chain tab must use the tombstone title')
+  assert.ok(deletedText.includes('deletedChainBody'), 'the tombstone must explain the deletion')
+  assert.ok(deletedText.includes('openPanel'), 'the tombstone must offer the way to the panel')
+  assert.ok(!deletedText.includes('noChainBody'), 'a deleted chain must not tell the reader to start a new chain')
+}
+
+// The panel lists deleted chains separately and can restore one.
+const trash = {
+  chains: [{
+    chainId: 'chain-gone', title: 'gone task', objective: 'gone', status: 'paused',
+    deletedAt: '2026-11-23T11:11:55.928Z', sessions: ['session-gone'], featuresDone: 1, featuresTotal: 3,
+  }],
+}
+const trashBoot = boot({ deleted: trash })
+const trashPanel = trashBoot.registrations.find(entry => entry.options.name === 'main')
+const trashTree = await trashBoot.react.settle(trashPanel.component, {})
+const trashText = collectText(trashTree)
+assert.ok(trashText.some(text => text.includes('recentlyDeleted')), 'the panel must expose the deleted list')
+assert.ok(trashText.includes('restore'), 'a deleted chain needs a restore action')
+assert.ok(trashText.includes('purge'), 'a deleted chain needs a permanent-delete action')
+const restoreButton = nodesOf(trashTree).find(node => node.type === 'button' && collectText(node).includes('restore'))
+assert.ok(restoreButton, 'the restore action must be clickable')
+restoreButton.props.onClick()
+await new Promise(resolve => setImmediate(resolve))
+assert.ok(trashBoot.calls.includes('relay/restoreChain'), 'restoring must call the Host')
+
+// Deleting a chain first shows what survives, then reports the move and offers undo.
+const deleteBoot = boot({ pausedChain: true })
+const deletePanel = deleteBoot.registrations.find(entry => entry.options.name === 'main')
+let deleteTree = await deleteBoot.react.settle(deletePanel.component, {})
+const deleteButton = nodesOf(deleteTree).find(node => node.type === 'button' && collectText(node).includes('delete'))
+assert.ok(deleteButton, 'the chain detail must offer delete')
+deleteButton.props.onClick()
+deleteTree = await deleteBoot.react.settle(deletePanel.component, {})
+const armedText = collectText(deleteTree)
+assert.ok(armedText.includes('deleteConfirmTitle'), 'delete must open a confirmation panel')
+assert.ok(armedText.includes('deleteKeepsSessions'), 'the confirmation must say the sessions survive')
+assert.ok(armedText.includes('deleteTrashNote'), 'the confirmation must say it can be restored')
+const confirmDelete = nodesOf(deleteTree).find(node => node.type === 'button' && String(node.props?.className ?? '').includes('is-danger'))
+assert.ok(confirmDelete, 'the confirmation must have a confirm button')
+confirmDelete.props.onClick()
+await new Promise(resolve => setImmediate(resolve))
+deleteTree = await deleteBoot.react.settle(deletePanel.component, {})
+assert.ok(deleteBoot.calls.includes('relay/deleteChain'), `confirming must call the Host: ${deleteBoot.calls.join(',')}`)
+const deleteNoticeText = collectText(deleteTree)
+assert.ok(deleteNoticeText.includes('deletedNotice'), 'a delete must report what was moved')
+assert.ok(deleteNoticeText.includes('undo'), 'a delete must offer undo')
+const undoButton = nodesOf(deleteTree).find(node => node.type === 'button' && collectText(node).includes('undo'))
+undoButton.props.onClick()
+await new Promise(resolve => setImmediate(resolve))
+assert.ok(deleteBoot.calls.includes('relay/restoreChain'), 'undo must restore the chain')
+
+// A running session blocks the delete before the Host has to refuse it.
+const runningBoot = boot({ runningSession: true })
+const runningPanel = runningBoot.registrations.find(entry => entry.options.name === 'main')
+const runningTree = await runningBoot.react.settle(runningPanel.component, {})
+const runningDelete = nodesOf(runningTree).find(node => node.type === 'button' && collectText(node).includes('delete'))
+assert.equal(runningDelete.props.disabled, true, 'a running chain must not be deletable')
+assert.equal(runningDelete.props.title, 'deleteRunning', 'the disabled delete must say why')
+
+console.log('session tab render check passed: hook order holds, a read error clears after recovery, the launch dock starts the plan on record, deleted chains keep their tombstone, and the panel shows the peak ratio')
