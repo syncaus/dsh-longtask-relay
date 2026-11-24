@@ -1,0 +1,110 @@
+{
+  "format": 1,
+  "title": {
+    "en": "syncaus plugins",
+    "zh": "syncaus 插件"
+  },
+  "plugins": [
+    {
+      "name": "@local/kadda-rules",
+      "title": {
+        "en": "Kadda Rules",
+        "zh": "Kadda 工作规则"
+      },
+      "description": {
+        "en": "Work rules plus a staged development workflow: prompt sections, /dev /verify /review commands, and plan/stop gates.",
+        "zh": "工作规则与分阶段开发流程：提示词段落、/dev /verify /review 命令，以及计划与停止门禁。"
+      },
+      "icon": "https://cdn.jsdelivr.net/gh/syncaus/local-kadda-rules@main/icon.svg",
+      "author": "syncaus",
+      "repository": {
+        "url": "https://github.com/syncaus/local-kadda-rules"
+      },
+      "metadata": {
+        "keywords": ["rules", "workflow", "prompt"]
+      },
+      "versions": [
+        {
+          "version": "2.0.0",
+          "publishTimestamp": 1795532653,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/syncaus/local-kadda-rules",
+            "commit": "f2c7942c69657e36d700d561a27fdb860c8a7b3f",
+            "path": ""
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.3"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@local/dsh-mcp-playwright",
+      "title": {
+        "en": "Playwright MCP",
+        "zh": "Playwright 浏览器"
+      },
+      "description": {
+        "en": "Playwright MCP server wired into the DSH profile as a bundle.",
+        "zh": "以组合包形式接入 DSH profile 的 Playwright MCP 服务。"
+      },
+      "author": "syncaus",
+      "repository": {
+        "url": "https://github.com/syncaus/dsh-mcp-playwright"
+      },
+      "metadata": {
+        "keywords": ["mcp", "playwright", "browser"]
+      },
+      "versions": [
+        {
+          "version": "1.0.0",
+          "publishTimestamp": 1795532653,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/syncaus/dsh-mcp-playwright",
+            "commit": "56132acdf123f1520e73280bfa7de87f4fb0568e",
+            "path": ""
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.3"
+          }
+        }
+      ]
+    },
+    {
+      "name": "dsh-longtask-relay",
+      "title": {
+        "en": "Long-task relay",
+        "zh": "长任务接力"
+      },
+      "description": {
+        "en": "Turn a long task into a session chain: the truth source lives in workspace files, and when context nears its limit the plugin wraps up, opens a fresh session, and hands the work over. The new session keeps the permission preset, goal, and plan mode. The truth source is sealed on the host, so edits that bypass the plugin are caught; the plugin runs each feature's verify command itself to decide a pass, an independent session reviews the delivery against the design, and you confirm it done. Cluster mode plans first, then opens several sessions in parallel once you confirm the grouping. The panel lists what needs a human, shows the relay track, features, and truth source, and can pause, hand off, clear a blocker, or finish a chain.",
+        "zh": "把长任务变成一条会话链：真理源落在工作区文件，上下文逼近上限时自动收尾、开新会话并交接，新会话沿用权限预设、目标和计划模式。真理源在宿主侧封存，绕过插件改文件会被拦下；功能是否通过由插件亲自跑验证命令判定，结束前由独立评审会话对照设计核验，最后由你确认完成。集群模式先谈需求定计划，再由你确认分组，开出多个会话并行执行。面板集中列出需要人处理的事，可查看接力轨道、功能清单和真理源，并暂停、交接、解除阻塞或结束链。"
+      },
+      "icon": "https://cdn.jsdelivr.net/gh/syncaus/dsh-longtask-relay@main/icon.svg",
+      "author": "syncaus",
+      "repository": {
+        "url": "https://github.com/syncaus/dsh-longtask-relay"
+      },
+      "metadata": {
+        "keywords": ["relay", "handoff", "context", "long-running", "session"]
+      },
+      "versions": [
+        {
+          "version": "1.6.1",
+          "publishTimestamp": 1795532653,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/syncaus/dsh-longtask-relay",
+            "commit": "4910fc8b2fa1d7b419be9175466b6c5aa0a59532",
+            "path": ""
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.3"
+          }
+        }
+      ]
+    }
+  ]
+}
