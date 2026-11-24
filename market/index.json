@@ -15,11 +15,10 @@
         "en": "Work rules plus a staged development workflow: prompt sections, /dev /verify /review commands, and plan/stop gates.",
         "zh": "工作规则与分阶段开发流程：提示词段落、/dev /verify /review 命令，以及计划与停止门禁。"
       },
-      "icon": "https://cdn.jsdelivr.net/gh/syncaus/dsh-plugins@main/local-kadda-rules-2.0.0/package/icon.svg",
+      "icon": "https://cdn.jsdelivr.net/gh/syncaus/local-kadda-rules@main/icon.svg",
       "author": "syncaus",
       "repository": {
-        "url": "https://github.com/syncaus/dsh-plugins",
-        "directory": "local-kadda-rules-2.0.0/package"
+        "url": "https://github.com/syncaus/local-kadda-rules"
       },
       "metadata": {
         "keywords": ["rules", "workflow", "prompt"]
@@ -27,12 +26,12 @@
       "versions": [
         {
           "version": "2.0.0",
-          "publishTimestamp": 1794973058,
+          "publishTimestamp": 1795532653,
           "source": {
             "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "86980ad2f18d464186730b471d7bea4aa9d05897",
-            "path": "local-kadda-rules-2.0.0/package"
+            "url": "https://github.com/syncaus/local-kadda-rules",
+            "commit": "PENDING_SPLIT_SHA",
+            "path": ""
           },
           "engines": {
             "dsh": ">=0.2.2-rc.3"
@@ -52,8 +51,7 @@
       },
       "author": "syncaus",
       "repository": {
-        "url": "https://github.com/syncaus/dsh-plugins",
-        "directory": "dsh-mcp-playwright-1.0.0/package"
+        "url": "https://github.com/syncaus/dsh-mcp-playwright"
       },
       "metadata": {
         "keywords": ["mcp", "playwright", "browser"]
@@ -61,12 +59,12 @@
       "versions": [
         {
           "version": "1.0.0",
-          "publishTimestamp": 1794973058,
+          "publishTimestamp": 1795532653,
           "source": {
             "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "86980ad2f18d464186730b471d7bea4aa9d05897",
-            "path": "dsh-mcp-playwright-1.0.0/package"
+            "url": "https://github.com/syncaus/dsh-mcp-playwright",
+            "commit": "PENDING_SPLIT_SHA",
+            "path": ""
           },
           "engines": {
             "dsh": ">=0.2.2-rc.3"
@@ -84,167 +82,23 @@
         "en": "Turn a long task into a session chain: the truth source lives in workspace files, and when context nears its limit the plugin wraps up, opens a fresh session, and hands the work over. The new session keeps the permission preset, goal, and plan mode. The truth source is sealed on the host, so edits that bypass the plugin are caught; the plugin runs each feature's verify command itself to decide a pass, an independent session reviews the delivery against the design, and you confirm it done. Cluster mode plans first, then opens several sessions in parallel once you confirm the grouping. The panel lists what needs a human, shows the relay track, features, and truth source, and can pause, hand off, clear a blocker, or finish a chain.",
         "zh": "把长任务变成一条会话链：真理源落在工作区文件，上下文逼近上限时自动收尾、开新会话并交接，新会话沿用权限预设、目标和计划模式。真理源在宿主侧封存，绕过插件改文件会被拦下；功能是否通过由插件亲自跑验证命令判定，结束前由独立评审会话对照设计核验，最后由你确认完成。集群模式先谈需求定计划，再由你确认分组，开出多个会话并行执行。面板集中列出需要人处理的事，可查看接力轨道、功能清单和真理源，并暂停、交接、解除阻塞或结束链。"
       },
-      "icon": "https://cdn.jsdelivr.net/gh/syncaus/dsh-plugins@main/dsh-longtask-relay-1.6.1/package/icon.svg",
+      "icon": "https://cdn.jsdelivr.net/gh/syncaus/dsh-longtask-relay@main/icon.svg",
       "author": "syncaus",
       "repository": {
-        "url": "https://github.com/syncaus/dsh-plugins",
-        "directory": "dsh-longtask-relay-1.6.1/package"
+        "url": "https://github.com/syncaus/dsh-longtask-relay"
       },
       "metadata": {
         "keywords": ["relay", "handoff", "context", "long-running", "session"]
       },
       "versions": [
         {
-          "version": "1.6.0",
-          "publishTimestamp": 1795526869,
+          "version": "1.6.1",
+          "publishTimestamp": 1795532653,
           "source": {
             "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "c2e3d2fab64f5f4ead7fe0ad579608d58a5d1214",
-            "path": "dsh-longtask-relay-1.1.0/package"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.3"
-          }
-        },
-        {
-          "version": "1.5.2",
-          "publishTimestamp": 1795441142,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "036469f8c2f1ffbb1bcf4f90bf87e8977793f624",
-            "path": "dsh-longtask-relay-1.1.0/package"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.3"
-          }
-        },
-        {
-          "version": "1.4.8",
-          "publishTimestamp": 1795428913,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "a7898b53ffc94e1e02350f9694914e777dd737d2",
-            "path": "dsh-longtask-relay-1.1.0/package"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.3"
-          }
-        },
-        {
-          "version": "1.4.6",
-          "publishTimestamp": 1795157475,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "4726acfdd89af6025a50dea3deb20cafbcc75a1a",
-            "path": "dsh-longtask-relay-1.1.0/package"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.3"
-          }
-        },
-        {
-          "version": "1.4.5",
-          "publishTimestamp": 1795149562,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "1877416bf8626cef7d04be40b889b5aef6be5c0f",
-            "path": "dsh-longtask-relay-1.1.0/package"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.3"
-          }
-        },
-        {
-          "version": "1.4.4",
-          "publishTimestamp": 1795148792,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "f9dee15259fe0b970d524a2945a1e8018b16d35d",
-            "path": "dsh-longtask-relay-1.1.0/package"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.3"
-          }
-        },
-        {
-          "version": "1.4.3",
-          "publishTimestamp": 1795141573,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "12eb29bac0b5df3d948bc4cb76d43cdec61148c1",
-            "path": "dsh-longtask-relay-1.1.0/package"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.3"
-          }
-        },
-        {
-          "version": "1.4.2",
-          "publishTimestamp": 1795066042,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "65b82ea8b061e386f9bb49014efbd06ecab1412e",
-            "path": "dsh-longtask-relay-1.1.0/package"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.3"
-          }
-        },
-        {
-          "version": "1.3.2",
-          "publishTimestamp": 1795059726,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "308c8b6294acf4802b518d2708e56784e4f2908f",
-            "path": "dsh-longtask-relay-1.1.0/package"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.3"
-          }
-        },
-        {
-          "version": "1.3.1",
-          "publishTimestamp": 1795058754,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "4e3920e22f0f3f841df138729c7ef0889f544331",
-            "path": "dsh-longtask-relay-1.1.0/package"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.3"
-          }
-        },
-        {
-          "version": "1.3.0",
-          "publishTimestamp": 1795004800,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "fd2251d073ca03968fd39374d8f94be044826c1b",
-            "path": "dsh-longtask-relay-1.1.0/package"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.3"
-          }
-        },
-        {
-          "version": "1.1.0",
-          "publishTimestamp": 1794979220,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/syncaus/dsh-plugins",
-            "commit": "cf39593bc2f4d72fb1f93167cff3b168e5612a85",
-            "path": "dsh-longtask-relay-1.1.0/package"
+            "url": "https://github.com/syncaus/dsh-longtask-relay",
+            "commit": "PENDING_SPLIT_SHA",
+            "path": ""
           },
           "engines": {
             "dsh": ">=0.2.2-rc.3"
