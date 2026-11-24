@@ -13,8 +13,8 @@
  * endings is not tampering.
  */
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { dshHome } from './home.js'
 
 /**
  * Whether two truth directories are the same place. Windows paths compare without case,
@@ -30,13 +30,6 @@ export function sameDir(left, right) {
 
 /** Sealed text of a document that did not exist when the list was frozen; creating it later is a change. */
 export const ABSENT = '\u0000absent'
-
-/** The profile's DSH home directory. */
-function dshHome() {
-  return typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME.length > 0
-    ? process.env.DSH_HOME
-    : join(homedir(), '.dsh')
-}
 
 /** Tail window read from an oversized host audit log. */
 const AUDIT_TAIL_BYTES = 512 * 1024

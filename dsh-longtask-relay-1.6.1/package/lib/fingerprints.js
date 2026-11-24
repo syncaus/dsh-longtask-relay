@@ -7,15 +7,8 @@
  * unannounced addition is caught on the next checkpoint, handoff, or finish.
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-
-/** The profile's DSH home directory. */
-function dshHome() {
-  return typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME.length > 0
-    ? process.env.DSH_HOME
-    : join(homedir(), '.dsh')
-}
+import { dshHome } from './home.js'
 
 /** Feature fingerprints keyed by chain id. */
 export class ChainFingerprints {

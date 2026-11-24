@@ -17,8 +17,8 @@
  */
 import { randomUUID } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { dshHome } from './home.js'
 import { sameDir } from './seals.js'
 
 /** Stable error codes reported by tools. */
@@ -1035,10 +1035,7 @@ export class ChainIndex {
 
   /** Default index under the running installation's home. */
   static default() {
-    const home = typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME.length > 0
-      ? process.env.DSH_HOME
-      : join(homedir(), '.dsh')
-    return new ChainIndex(home)
+    return new ChainIndex(dshHome())
   }
 
   /** Read the stored entries. */
@@ -1115,10 +1112,7 @@ export class ChainTrashIndex {
 
   /** Default index under the running installation's home. */
   static default() {
-    const home = typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME.length > 0
-      ? process.env.DSH_HOME
-      : join(homedir(), '.dsh')
-    return new ChainTrashIndex(home)
+    return new ChainTrashIndex(dshHome())
   }
 
   /** Read the stored entries, tolerating fields this version does not know. */
