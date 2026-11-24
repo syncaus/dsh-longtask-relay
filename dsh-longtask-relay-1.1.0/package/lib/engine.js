@@ -9,9 +9,10 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import { ChainIndex, ChainStore, ChainTrashIndex, RELAY_CODES, RelayError, featureProgress, isChainId, skeletonTruth } from './chain-store.js'
+import { ChainIndex, ChainStore, ChainTrashIndex, RELAY_CODES, RelayError, featureProgress, isChainId, skeletonTruth, validateChain as validateChainRecord } from './chain-store.js'
 import { ChainFingerprints } from './fingerprints.js'
 import { evidenceIssue } from './evidence.js'
+import { SealStore, TruthGuard } from './seals.js'
 import { sessionTitle } from './labels.js'
 import {
   renderClusterGroupOpenedNotice, renderClusterLaunchedNotice, renderClusterPlanningPrompt,
@@ -50,7 +51,7 @@ export function relayMessage(text) {
  * @param {{ progress?: { total: number, done: number }, stall?: { minutes: number }|null, conflicts?: Array<object>, jobs?: { running: number, labels: Array<string> }|null }} [state] - readings the panel shows beside the record.
  * @returns {object} summary.
  */
-function chainSummary(chain, { progress, stall = null, conflicts = [], jobs = null } = {}) {
+function chainSummary(chain, { progress, stall = null, conflicts = [], jobs = null, tamper = null } = {}) {
   const current = chain.sessions.find(session => session.sessionId === chain.currentSessionId)
   return {
     chainId: chain.chainId,
@@ -88,6 +89,10 @@ function chainSummary(chain, { progress, stall = null, conflicts = [], jobs = nu
     // Background jobs the head started and still runs: a session that hands a
     // long command to a job ends its turn and reports `idle` while work goes on.
     jobs,
+    // Sealed truth files changed outside the plugin; the chain stands still until a human decides.
+    tamper,
+    // The independent review of a finished chain, and whether it ran at all.
+    review: chain.review ?? null,
   }
 }
 
@@ -320,17 +325,174 @@ export class RelayEngine {
     this.trashIndex = options.trashIndex ?? ChainTrashIndex.default()
     /** Host-level frozen feature lists. */
     this.fingerprints = options.fingerprints ?? ChainFingerprints.default()
+    /** Host-side copies of every chain's sealed truth files. */
+    this.seals = options.seals ?? SealStore.default()
+    this.guard = new TruthGuard(this.seals, {
+      isFrozen: chainId => this.fingerprints.get(chainId) !== undefined,
+      onTamper: (chainId, files, store) => this.handleTamper(chainId, files, store),
+      onSealed: (chainId, store, detail) => {
+        this.record(store, chainId, { kind: 'truth.sealed', actor: 'system', detail })
+      },
+      makeError: (code, message) => new RelayError(code, message),
+    })
+    /** Head goals paused because their chain was tampered, keyed by chain id. @type {Map<string, { sessionId: string, goalId: string }>} */
+    this.tamperPausedGoals = new Map()
     this.unloaded = false
+  }
+
+  /**
+   * Give a store the seal check; every store this engine reads or writes goes through here.
+   * @param {ChainStore} store - chain store.
+   * @returns {ChainStore} the same store.
+   */
+  attach(store) {
+    store.guard = this.guard
+    return store
   }
 
   /** Store for one truth directory, created on demand. */
   storeFor(truthDir) {
     let store = this.stores.get(truthDir)
     if (store === undefined) {
-      store = new ChainStore(truthDir)
+      store = this.attach(new ChainStore(truthDir))
       this.stores.set(truthDir, store)
     }
     return store
+  }
+
+  /**
+   * React to a sealed truth file found changed on disk.
+   * Nothing is written to the workspace: the changed files stay as evidence, and
+   * the guard refuses every write until a human restores or adopts them. The
+   * head's goal is paused so it stops sending rounds into a frozen chain.
+   * @param {string} chainId - chain identity.
+   * @param {Array<string>} files - files newly found changed.
+   * @param {ChainStore} store - the store that found it.
+   * @returns {void}
+   */
+  handleTamper(chainId, files, store) {
+    this.statusCache = null
+    this.record(store, chainId, { kind: 'truth.tampered', actor: 'system', detail: { files } })
+    this.warn(`the truth source of ${chainId} was changed outside the plugin: ${files.join(', ')}`)
+    let chain
+    try {
+      chain = store.readChain(chainId)
+    } catch {
+      return
+    }
+    if (chain === undefined) return
+    this.clearChainTimers(chain)
+    try {
+      const head = this.headGoal(chain)
+      if (head !== undefined && head.view.phase === 'active' && typeof head.goals.pause === 'function') {
+        head.goals.pause(head.agent, { id: head.view.id, revision: head.view.revision })
+        // Kept in memory: the chain record cannot be written while it is tampered.
+        this.tamperPausedGoals.set(chainId, { sessionId: head.agent.id, goalId: head.view.id })
+        this.record(store, chainId, { kind: 'goal.paused', actor: 'system', detail: { sessionId: head.agent.id, goalId: head.view.id, why: 'tampered' } })
+      }
+    } catch (error) {
+      this.warn(`could not pause the goal of tampered chain ${chainId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * Refuse an action on a chain whose truth source is tampered.
+   * @param {object} chain - chain record.
+   * @returns {void}
+   */
+  assertUntampered(chain) {
+    this.guard.assertWritable(chain.chainId)
+  }
+
+  /**
+   * A human's decision on a tampered truth source.
+   * `restore` puts the sealed copies back; `adopt` accepts the files on disk as
+   * the new sealed state after validating them. Either way the decision and the
+   * reason are audited, and supervision restarts.
+   * @param {{ chainId: string, action: 'restore'|'adopt', reason?: string }} input - decision.
+   * @returns {{ chainId: string, action: string, files: Array<string>, status: string }} result.
+   */
+  resolveTamper({ chainId, action, reason }) {
+    if (action !== 'restore' && action !== 'adopt') {
+      throw new RelayError(RELAY_CODES.invalid, 'action must be restore or adopt')
+    }
+    const { chain, store } = this.findChain(chainId)
+    const tamper = this.guard.tamperOf(chain.chainId)
+    if (tamper === null) throw new RelayError(RELAY_CODES.invalid, `chain ${chain.chainId} has no unresolved tampering`)
+    let files
+    if (action === 'restore') {
+      files = this.guard.restore(chain.chainId, store)
+    } else {
+      if (typeof reason !== 'string' || reason.trim().length === 0) {
+        throw new RelayError(RELAY_CODES.invalid, 'adopting changed files needs a reason')
+      }
+      const paths = store.paths(chain.chainId)
+      const accepted = {}
+      for (const file of tamper.files) {
+        if (file === 'relay.json') {
+          let raw
+          try {
+            raw = JSON.parse(readFileSync(paths.chain, 'utf8'))
+          } catch {
+            throw new RelayError(RELAY_CODES.invalid, 'relay.json on disk is missing or not valid JSON; restore it instead')
+          }
+          const record = validateChainRecord(raw)
+          if (record.chainId !== chain.chainId) throw new RelayError(RELAY_CODES.invalid, 'relay.json on disk names another chain')
+          accepted.relay = record
+        } else if (file === 'features.json') {
+          let document
+          try {
+            document = store.readFeaturesUnguarded(chain.chainId)
+          } catch (error) {
+            throw new RelayError(RELAY_CODES.invalid, `features.json on disk cannot be adopted: ${error instanceof Error ? error.message : String(error)}`)
+          }
+          if (document === undefined) throw new RelayError(RELAY_CODES.invalid, 'features.json is missing on disk; restore it instead')
+          accepted.features = document
+        } else {
+          let text
+          try {
+            text = readFileSync(file === 'PLAN.md' ? paths.plan : paths.spec, 'utf8')
+          } catch {
+            throw new RelayError(RELAY_CODES.invalid, `${file} is missing on disk; restore it instead`)
+          }
+          accepted[file === 'PLAN.md' ? 'plan' : 'spec'] = text
+        }
+      }
+      files = this.guard.adopt(chain.chainId, accepted)
+      // The adopted list is the new frozen contract.
+      if (accepted.features !== undefined) this.updateFingerprint(chain, store)
+    }
+    this.statusCache = null
+    this.record(store, chain.chainId, {
+      kind: action === 'restore' ? 'truth.restored' : 'truth.adopted',
+      actor: 'human',
+      detail: { files, ...(action === 'adopt' ? { reason: reason.trim() } : {}) },
+    })
+    const current = store.readChain(chain.chainId)
+    this.resumeTamperPausedGoal(current, store)
+    this.restartSupervision(chain.chainId, store)
+    return { chainId: chain.chainId, action, files, status: current?.status ?? chain.status }
+  }
+
+  /**
+   * Resume the head goal that tampering paused, once the chain may run again.
+   * @param {object|undefined} chain - chain record after the decision.
+   * @param {ChainStore} store - its store.
+   * @returns {void}
+   */
+  resumeTamperPausedGoal(chain, store) {
+    if (chain === undefined) return
+    const marker = this.tamperPausedGoals.get(chain.chainId)
+    this.tamperPausedGoals.delete(chain.chainId)
+    if (marker === undefined || chain.status !== 'active' || chain.currentSessionId !== marker.sessionId) return
+    try {
+      const head = this.headGoal(chain)
+      if (head === undefined || head.view.id !== marker.goalId || head.view.phase !== 'paused' || typeof head.goals.resume !== 'function') return
+      head.goals.resume(head.agent, { id: head.view.id, revision: head.view.revision })
+      this.record(store, chain.chainId, { kind: 'goal.resumed', actor: 'human', detail: { sessionId: head.agent.id, goalId: head.view.id } })
+    } catch (error) {
+      this.warn(`could not resume the goal of ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   /** The truth directory a workspace uses. */
@@ -451,7 +613,7 @@ export class RelayEngine {
     if (typeof cwd !== 'string' || cwd.length === 0) return undefined
     let store
     try {
-      store = ChainStore.forCwd(cwd, this.config.truthDir)
+      store = this.attach(ChainStore.forCwd(cwd, this.config.truthDir))
     } catch {
       return undefined
     }
@@ -525,16 +687,37 @@ export class RelayEngine {
     if (document === undefined || document.features.length === 0) return false
     const snapshot = document.features.map(feature => ({ id: feature.id, title: feature.title }))
     if (this.fingerprints.get(chain.chainId) !== undefined) return false
+    this.resetUnverifiedPasses(chain, store, document)
     this.fingerprints.set(chain.chainId, snapshot)
     if (chain.status === 'initializing') {
       store.update(chain.chainId, record => { record.status = 'active' })
     }
+    this.guard.arm(chain.chainId, store)
     this.record(store, chain.chainId, {
       kind: 'features.frozen',
       actor: actor ?? 'system',
       detail: { features: snapshot.length },
     })
     return true
+  }
+
+  /**
+   * Before the list is frozen it can be edited by hand, so a `passes: true` written into the file
+   * is only a claim. Every pass without the plugin's own verification record goes back to false.
+   * @param {object} chain - chain record.
+   * @param {import('./chain-store.js').ChainStore} store - its store.
+   * @param {object} document - the list about to be frozen.
+   * @returns {Array<string>} feature ids reset.
+   */
+  resetUnverifiedPasses(chain, store, document) {
+    if (!this.config.pluginVerify) return []
+    const reset = document.features
+      .filter(feature => feature.passes && (feature.verification === null || feature.verification.exitCode !== 0))
+      .map(feature => feature.id)
+    if (reset.length === 0) return []
+    store.patchFeatures(chain.chainId, reset.map(id => ({ id, passes: false })))
+    this.record(store, chain.chainId, { kind: 'feature.unverified-reset', actor: 'system', detail: { ids: reset } })
+    return reset
   }
 
   /**
@@ -883,7 +1066,7 @@ export class RelayEngine {
     if (active !== undefined && active.chain.status !== 'done' && active.chain.status !== 'failed') {
       throw new RelayError(RELAY_CODES.invalid, `this session already belongs to chain ${active.chain.chainId}`)
     }
-    const store = ChainStore.forCwd(workspace, this.config.truthDir)
+    const store = this.attach(ChainStore.forCwd(workspace, this.config.truthDir))
     const chain = store.create({
       objective,
       cwd: workspace,
@@ -1346,7 +1529,9 @@ export class RelayEngine {
       throw new RelayError(RELAY_CODES.invalid, 'chainId is required')
     }
     const { chain, store } = this.findChain(chainId)
-    if (chain.status === 'active' || chain.status === 'initializing') {
+    // A tampered chain cannot be paused (nothing may be written), and it is already stopped.
+    const tampered = this.guard.tamperOf(chain.chainId) !== null
+    if (!tampered && (chain.status === 'active' || chain.status === 'initializing' || chain.status === 'reviewing')) {
       throw new RelayError(RELAY_CODES.invalid, 'pause the chain before deleting it')
     }
     const agents = this.ctx.get('agents')
@@ -1376,6 +1561,8 @@ export class RelayEngine {
     } catch (error) {
       throw error instanceof RelayError ? error : new RelayError(RELAY_CODES.io, `cannot move chain ${chain.chainId} to the trash: ${error instanceof Error ? error.message : String(error)}`)
     }
+    // The seal stays for a restore; its absence from the directory is now expected.
+    this.guard.setTrashed(chain.chainId, true)
     const entry = {
       chainId: chain.chainId,
       truthDir: store.truthDir,
@@ -1395,6 +1582,7 @@ export class RelayEngine {
       // a tombstone the panel cannot read would strand it.
       try {
         store.restore(chain.chainId)
+        this.guard.setTrashed(chain.chainId, false)
       } catch (restoreError) {
         this.warn(`chain ${chain.chainId} is in the trash but could not be restored after an index failure: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`)
       }
@@ -1502,6 +1690,7 @@ export class RelayEngine {
       throw new RelayError(RELAY_CODES.invalid, `chain ${chainId} is already live`)
     }
     store.restore(chainId)
+    this.guard.setTrashed(chainId, false)
     const chain = store.readChain(chainId)
     if (chain === undefined) throw new RelayError(RELAY_CODES.io, `chain ${chainId} was restored but cannot be read`)
     // A workspace moved while its chain was in the trash leaves an old
@@ -1548,6 +1737,11 @@ export class RelayEngine {
       throw new RelayError(RELAY_CODES.invalid, `chain ${chainId} is live; delete it before purging`)
     }
     store.purgeTrash(chainId)
+    try {
+      this.seals.remove(chainId)
+    } catch (error) {
+      this.warn(`chain ${chainId} was purged but its seal remains: ${error instanceof Error ? error.message : String(error)}`)
+    }
     try {
       this.trashIndex.forget(chainId)
     } catch (error) {
@@ -2191,6 +2385,7 @@ export class RelayEngine {
               stall: this.stallOf(chain),
               conflicts: this.crossChainConflicts(chain, document),
               jobs: this.jobsOf(chain),
+              tamper: this.guard.tamperOf(chainId),
             }),
             sessionsDetail: chain.sessions.map(session => this.sessionSnapshot(session)),
             head: this.headState(chain),
@@ -2305,7 +2500,10 @@ export class RelayEngine {
         stall: this.stallOf(chain),
         conflicts: this.crossChainConflicts(chain, document),
         jobs: this.jobsOf(chain),
+        tamper: this.guard.tamperOf(chainId),
       }),
+      // Sealed and on-disk text of each changed file, for the human's decision.
+      tamperDetail: this.guard.tamperDetail(chainId, store),
       features: (document?.features ?? []).map(feature => ({
         id: feature.id,
         title: feature.title,
@@ -2321,6 +2519,8 @@ export class RelayEngine {
         // Cluster planning scope; empty when the planning session wrote none.
         files: feature.files ?? [],
         dependsOn: feature.dependsOn ?? [],
+        // The plugin's own run of the verify command.
+        verification: feature.verification ?? null,
       })),
       mode: chain.mode ?? 'relay',
       launchPlan: chain.launchPlan ?? null,
@@ -2796,6 +2996,7 @@ export class RelayEngine {
       // that cannot be written only warns.
       try {
         this.fingerprints.set(chain.chainId, snapshot)
+        this.guard.arm(chain.chainId, store)
       } catch (error) {
         this.warn(`could not freeze the feature list of ${chain.chainId}: ${error instanceof Error ? error.message : String(error)}`)
       }
@@ -3475,6 +3676,8 @@ export class RelayEngine {
     let { chain } = membership
     const entry = chain.sessions.find(session => session.sessionId === agent.id)
     if (entry === undefined) return
+    // A tampered chain stands still until a human decides; nothing is evaluated on it.
+    if (this.guard.tamperOf(chain.chainId) !== null) return
 
     // A delegated worker only supervises its own phase; the chain head owns handoff.
     if (this.isWorker(entry)) {

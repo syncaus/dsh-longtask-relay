@@ -18,7 +18,7 @@
 import { randomUUID } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 
 /** Stable error codes reported by tools. */
 export const RELAY_CODES = Object.freeze({
@@ -37,6 +37,8 @@ export const RELAY_CODES = Object.freeze({
   drift: 'features_drift',
   /** The session is mid-turn; the action needs it idle. */
   busy: 'session_busy',
+  /** A sealed truth file was changed outside the plugin; a human must restore or adopt it. */
+  tampered: 'truth_tampered',
 })
 
 /** A failure a tool can report without leaking an implementation error. */
@@ -53,7 +55,7 @@ export class RelayError extends Error {
 }
 
 /** Chain phases persisted in `relay.json`. */
-const CHAIN_STATUSES = new Set(['planning', 'initializing', 'active', 'paused', 'done', 'failed'])
+const CHAIN_STATUSES = new Set(['planning', 'initializing', 'active', 'paused', 'reviewing', 'awaiting_acceptance', 'done', 'failed'])
 
 /** Session roles persisted in `relay.json`. */
 const SESSION_ROLES = new Set(['initializer', 'worker', 'reviewer', 'leader'])
@@ -165,6 +167,25 @@ function normalizeCoverage(value) {
 }
 
 /**
+ * Keep one verification record written by the plugin, or null.
+ * @param {unknown} value - candidate record.
+ * @returns {object|null} normalized record.
+ */
+function normalizeVerification(value) {
+  if (value === null || typeof value !== 'object' || typeof value.command !== 'string') return null
+  return {
+    command: value.command,
+    exitCode: Number.isInteger(value.exitCode) ? value.exitCode : null,
+    timedOut: value.timedOut === true,
+    durationMs: Number.isFinite(value.durationMs) ? value.durationMs : 0,
+    outputTail: typeof value.outputTail === 'string' ? value.outputTail : '',
+    head: typeof value.head === 'string' ? value.head : null,
+    at: typeof value.at === 'string' ? value.at : null,
+    by: 'plugin',
+  }
+}
+
+/**
  * Normalize a feature list document, rejecting shapes the tools cannot trust.
  * Entries are preserved in order; unknown fields are dropped.
  * @param {unknown} document - parsed features.json.
@@ -199,6 +220,8 @@ export function normalizeFeatures(document) {
       // Session this feature is delegated to; null means the chain's own session.
       assignedSessionId: typeof entry.assignedSessionId === 'string' ? entry.assignedSessionId : null,
       notes: typeof entry.notes === 'string' ? entry.notes : '',
+      // The plugin's own run of the verify command; a model cannot write it through the tools.
+      verification: normalizeVerification(entry.verification),
       // Cluster planning scope: path prefixes the feature changes, and the feature ids it needs first.
       ...optionalStringList(entry.files, 'files'),
       ...optionalStringList(entry.dependsOn, 'dependsOn'),
@@ -255,7 +278,7 @@ function requireChainId(value) {
 }
 
 /** Reject a chain record this version cannot read. */
-function validateChain(record) {
+export function validateChain(record) {
   if (record === null || typeof record !== 'object') throw new RelayError(RELAY_CODES.invalid, 'relay.json must be an object')
   if (record.version !== 1) throw new RelayError(RELAY_CODES.invalid, `unsupported relay.json version ${String(record.version)}`)
   requireString(record.chainId, 'relay.json chainId')
@@ -276,6 +299,28 @@ export class ChainStore {
    */
   constructor(truthDir) {
     this.truthDir = resolve(truthDir)
+    /**
+     * Host-side seal check (see `seals.js`); the engine attaches it to every store it uses.
+     * @type {import('./seals.js').TruthGuard|undefined}
+     */
+    this.guard = undefined
+  }
+
+  /**
+   * Refuse a workspace write while the chain's sealed truth source is tampered.
+   * @param {string} chainId - chain identity.
+   */
+  assertWritable(chainId) {
+    this.guard?.assertWritable(chainId)
+  }
+
+  /**
+   * Write one file without the seal check; only the tamper resolution uses it.
+   * @param {string} path - destination file.
+   * @param {string} text - complete new content.
+   */
+  writeRaw(path, text) {
+    writeAtomic(path, text)
   }
 
   /**
@@ -492,8 +537,23 @@ export class ChainStore {
    */
   readChain(chainId) {
     if (!isChainId(chainId)) return undefined
-    const record = readJson(this.paths(chainId).chain)
-    return record === undefined ? undefined : validateChain(record)
+    if (this.guard === undefined) {
+      const record = readJson(this.paths(chainId).chain)
+      return record === undefined ? undefined : validateChain(record)
+    }
+    let record
+    let unreadable = false
+    try {
+      const raw = readJson(this.paths(chainId).chain)
+      record = raw === undefined ? undefined : validateChain(raw)
+    } catch (error) {
+      if (!(error instanceof RelayError) || error.code !== RELAY_CODES.invalid) throw error
+      // An unreadable record with no seal behind it is reported as before.
+      const sealed = this.guard.seals.get(chainId)
+      if (sealed === undefined || sealed.relay === null || sealed.truthDir !== this.truthDir) throw error
+      unreadable = true
+    }
+    return this.guard.filterChain(chainId, record, this, { unreadable })
   }
   /**
    * Persist one chain record and register it in the index.
@@ -501,8 +561,10 @@ export class ChainStore {
    */
   writeChain(record) {
     const paths = this.paths(record.chainId)
+    this.assertWritable(record.chainId)
     mkdirSync(paths.dir, { recursive: true })
     writeAtomic(paths.chain, `${JSON.stringify(record, null, 2)}\n`)
+    this.guard?.sealChain(record.chainId, record, this)
     const known = this.listChainIds()
     if (!known.includes(record.chainId)) {
       const index = { version: 1, chains: [...known, record.chainId] }
@@ -565,6 +627,23 @@ export class ChainStore {
    * @returns {object|undefined} normalized document, or undefined when absent.
    */
   readFeatures(chainId) {
+    if (this.guard === undefined || !this.guard.armed(chainId)) return this.readFeaturesUnguarded(chainId)
+    let document
+    try {
+      document = this.readFeaturesUnguarded(chainId)
+    } catch (error) {
+      if (!(error instanceof RelayError) || error.code !== RELAY_CODES.invalid) throw error
+      document = undefined
+    }
+    return this.guard.filterFeatures(chainId, document, this)
+  }
+
+  /**
+   * Read the feature list as it is on disk, without the seal check.
+   * @param {string} chainId - chain identity.
+   * @returns {object|undefined} normalized document, or undefined when absent.
+   */
+  readFeaturesUnguarded(chainId) {
     const document = readJson(this.paths(chainId).features)
     return document === undefined ? undefined : normalizeFeatures(document)
   }
@@ -577,7 +656,9 @@ export class ChainStore {
    */
   writeFeatures(chainId, document) {
     const normalized = normalizeFeatures(document)
+    this.assertWritable(chainId)
     writeAtomic(this.paths(chainId).features, `${JSON.stringify(normalized, null, 2)}\n`)
+    this.guard?.sealFeatures(chainId, normalized)
     return normalized
   }
 
@@ -616,6 +697,14 @@ export class ChainStore {
       }
       if (update.assignedSessionId !== undefined) {
         feature.assignedSessionId = update.assignedSessionId === null ? null : String(update.assignedSessionId)
+      }
+      if (update.verification !== undefined) feature.verification = normalizeVerification(update.verification)
+      if (update.verify !== undefined) {
+        // A verify command may be filled in once; changing an existing one is a human decision.
+        if (feature.verify.trim().length > 0 && feature.verify !== update.verify) {
+          throw new RelayError(RELAY_CODES.invalid, `feature ${update.id} already has a verify command; a human changes it in the panel`)
+        }
+        feature.verify = String(update.verify)
       }
     }
     return featureProgress(this.writeFeatures(chainId, document))
@@ -680,6 +769,7 @@ export class ChainStore {
    * @param {string} text - complete new content.
    */
   writeProgress(chainId, text) {
+    this.assertWritable(chainId)
     writeAtomic(this.paths(chainId).progress, String(text ?? ''))
   }
 
@@ -698,6 +788,7 @@ export class ChainStore {
    * @param {string} text - complete new content.
    */
   writeHandoff(chainId, text) {
+    this.assertWritable(chainId)
     writeAtomic(this.paths(chainId).handoff, String(text ?? ''))
   }
 
@@ -719,6 +810,7 @@ export class ChainStore {
   appendHistory(chainId, text) {
     const body = String(text ?? '').trim()
     if (body.length === 0) return
+    this.assertWritable(chainId)
     const file = this.paths(chainId).history
     let current = ''
     try {
@@ -735,6 +827,8 @@ export class ChainStore {
    * @param {string} text - complete new content.
    */
   writeText(file, text) {
+    const chainId = basename(dirname(resolve(file)))
+    if (isChainId(chainId)) this.assertWritable(chainId)
     writeAtomic(file, String(text ?? ''))
   }
 
@@ -750,6 +844,7 @@ export class ChainStore {
     if (typeof file !== 'string') throw new RelayError(RELAY_CODES.invalid, `unknown ledger ${String(kind)}`)
     const body = text === undefined ? '' : String(text).trim()
     if (body.length === 0) return
+    this.assertWritable(chainId)
     let current = ''
     try {
       current = readFileSync(file, 'utf8')
@@ -774,10 +869,23 @@ export class ChainStore {
       ...(typeof event.actor === 'string' && event.actor.length > 0 ? { actor: event.actor } : {}),
       ...(event.detail === undefined ? {} : { detail: event.detail }),
     }
+    // The host copy is the one a session cannot edit; it is written first so a
+    // workspace failure does not lose the record.
+    let hostError
+    if (this.guard !== undefined) {
+      try {
+        this.guard.seals.appendAudit(chainId, record)
+      } catch (error) {
+        hostError = error
+      }
+    }
     try {
       appendFileSync(this.paths(chainId).audit, `${JSON.stringify(record)}\n`)
     } catch (error) {
       throw new RelayError(RELAY_CODES.io, `cannot append audit for ${chainId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (hostError !== undefined) {
+      throw new RelayError(RELAY_CODES.io, `cannot append the host audit copy for ${chainId}: ${hostError instanceof Error ? hostError.message : String(hostError)}`)
     }
     return record
   }
@@ -792,8 +900,18 @@ export class ChainStore {
    */
   readAudit(chainId, limit = 100) {
     const path = this.paths(chainId).audit
-    if (!existsSync(path)) return []
     const take = Number.isInteger(limit) && limit > 0 ? limit : 100
+    // The host copy wins: the workspace log can be edited or deleted by a session.
+    if (this.guard !== undefined) {
+      let hosted
+      try {
+        hosted = this.guard.seals.readAudit(chainId, take)
+      } catch (error) {
+        throw new RelayError(RELAY_CODES.io, `cannot read the host audit for ${chainId}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      if (hosted !== undefined) return hosted
+    }
+    if (!existsSync(path)) return []
     let text
     try {
       const size = statSync(path).size

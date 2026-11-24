@@ -11,6 +11,7 @@ import { ChainIndex, ChainStore, ChainTrashIndex, RELAY_CODES, RelayError, skele
 import { resolveConfig } from '../lib/config.js'
 import { RelayEngine, clusterConflicts } from '../lib/engine.js'
 import { ChainFingerprints } from '../lib/fingerprints.js'
+import { SealStore } from '../lib/seals.js'
 import { apply as applyPlugin } from '../index.js'
 import { handleRelayCommand } from '../lib/command.js'
 import { sessionTitle } from '../lib/labels.js'
@@ -21,6 +22,9 @@ import {
 import { RelayRemote } from '../lib/remote.js'
 import { registerTools } from '../lib/tools.js'
 import { applyPluginUpdate, checkPluginUpdate } from '../lib/update.js'
+
+// Every default host store (index, seals, host audit) lands in a throwaway home, never the real one.
+process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'relay-smoke-home-'))
 
 const failures = []
 let checks = 0
@@ -207,11 +211,15 @@ function fakeWorld({ goalService = true, ...overrides } = {}) {
     logger: { warn: () => {} },
     get: name => services[name],
   }
+  const seals = new SealStore(indexHome)
   const engine = new RelayEngine(ctx, config, {
     chainIndex: new ChainIndex(indexHome),
     trashIndex: new ChainTrashIndex(indexHome),
     fingerprints: new ChainFingerprints(indexHome),
+    seals,
   })
+  // The test writes stand in for the plugin's own writes, so they refresh the seal.
+  engine.attach(local)
   // Adopt the existing chain so the fake agent is its current session.
   local.update(chain.chainId, record => {
     record.sessions.push({ sessionId: 'session-old', role: 'initializer', index: 0, joinedAt: new Date().toISOString() })
@@ -228,6 +236,7 @@ function fakeWorld({ goalService = true, ...overrides } = {}) {
       chainIndex: new ChainIndex(indexHome),
       trashIndex: new ChainTrashIndex(indexHome),
       fingerprints: new ChainFingerprints(indexHome),
+      seals,
     })
     next.members.set('session-old', { chainId: chain.chainId, truthDir: local.truthDir })
     return next
@@ -1327,7 +1336,9 @@ function spawnWorld() {
     chainIndex: new ChainIndex(indexHome),
     trashIndex: new ChainTrashIndex(indexHome),
     fingerprints: new ChainFingerprints(indexHome),
+    seals: new SealStore(indexHome),
   })
+  engine.attach(local)
   engine.members.set('session-parent', { chainId: chain.chainId, truthDir: local.truthDir })
   engine.remember(local.readChain(chain.chainId), local)
   return { engine, local, chain, parent, child, calls, setGoal: value => { goal = value }, setRatio: value => { ratio = value } }
@@ -2065,11 +2076,11 @@ check('status notices a chain file rewritten within the same file-time tick', ()
 check('a running head that writes nothing reports a stall, and a write clears it', () => {
   // `update()` stamps updatedAt, so a quiet session is aged by leaving the file
   // alone; the report has to follow that age, not the last time the engine looked.
+  // Written through the store: a hand edit of relay.json is tampering now.
   const ageRecord = (world, minutes) => {
-    const chainFile = world.local.paths(world.chain.chainId).chain
-    const record = JSON.parse(readFileSync(chainFile, 'utf8'))
+    const record = world.local.readChain(world.chain.chainId)
     record.updatedAt = new Date(Date.now() - minutes * 60000).toISOString()
-    writeFileSync(chainFile, JSON.stringify(record))
+    world.local.writeChain(record)
   }
   const summaryOf = world => world.engine.status().find(item => item.chainId === world.chain.chainId)
 
@@ -3273,7 +3284,8 @@ function clusterWorld({ failCreate = [], ...overrides } = {}) {
     sessions: { flush: async () => true },
   }
   const ctx = { logger: { warn: () => {} }, get: name => services[name] }
-  const engine = new RelayEngine(ctx, config, { chainIndex: new ChainIndex(indexHome), trashIndex: new ChainTrashIndex(indexHome), fingerprints: new ChainFingerprints(indexHome) })
+  const engine = new RelayEngine(ctx, config, { chainIndex: new ChainIndex(indexHome), trashIndex: new ChainTrashIndex(indexHome), fingerprints: new ChainFingerprints(indexHome), seals: new SealStore(indexHome) })
+  engine.attach(local)
   engine.members.set('session-head', { chainId: chain.chainId, truthDir: local.truthDir })
   engine.remember(local.readChain(chain.chainId), local)
   return { engine, local, chain, head, agents, makeAgent, calls }
@@ -4828,6 +4840,184 @@ check('a reload re-evaluates live chain heads', () => {
   world.engine.resumeEvaluations()
   assert.ok(world.engine.timers.has('session-old'), 'an idle chain head must be re-checked after a reload')
   world.engine.dispose()
+})
+
+// ---- Seals: a sealed truth file changed outside the plugin ----
+
+/** A fake world whose feature list is frozen and sealed. */
+function sealedWorld(overrides = {}) {
+  const world = fakeWorld(overrides)
+  world.local.writeText(world.local.paths(world.chain.chainId).plan, '# PLAN\n\n1. do F001\n')
+  world.engine.checkpoint({ agent: world.oldAgent, note: 'list ready' })
+  assert.ok(world.engine.guard.armed(world.chain.chainId), 'the first accepted checkpoint must arm the seal')
+  const paths = world.local.paths(world.chain.chainId)
+  return { ...world, paths }
+}
+
+/** Rewrite features.json by hand, the way a session with a file tool would. */
+function handEditFeatures(world, edit) {
+  const document = JSON.parse(readFileSync(world.paths.features, 'utf8'))
+  edit(document)
+  writeFileSync(world.paths.features, JSON.stringify(document, null, 2))
+}
+
+check('a hand-edited pass is tampering: reads keep the sealed list and every write is refused', () => {
+  const world = sealedWorld()
+  handEditFeatures(world, (document) => {
+    document.features[0].passes = true
+    document.features[0].evidence = 'npm test exit 0: 12/12 passed'
+  })
+  const read = world.local.readFeatures(world.chain.chainId)
+  assert.equal(read.features[0].passes, false, 'the sealed list must win over the hand edit')
+  const tamper = world.engine.guard.tamperOf(world.chain.chainId)
+  assert.deepEqual(tamper.files, ['features.json'])
+  assert.throws(
+    () => world.engine.checkpoint({ agent: world.oldAgent, note: 'carry on' }),
+    error => error instanceof RelayError && error.code === RELAY_CODES.tampered,
+  )
+  // The edit stays on disk as evidence for the human.
+  assert.equal(JSON.parse(readFileSync(world.paths.features, 'utf8')).features[0].passes, true)
+  const summary = world.engine.status().find(item => item.chainId === world.chain.chainId)
+  assert.deepEqual(summary.tamper.files, ['features.json'])
+  const detail = world.engine.detail(world.chain.chainId)
+  assert.equal(detail.tamperDetail.files[0].file, 'features.json')
+  assert.match(detail.tamperDetail.files[0].disk, /"passes": true/)
+  assert.ok(world.local.readAudit(world.chain.chainId, 50).some(record => record.kind === 'truth.tampered'))
+})
+
+check('a hand-written human acceptance is tampering, not a signature', () => {
+  const world = sealedWorld()
+  handEditFeatures(world, (document) => {
+    document.features[0].acceptedBy = 'human'
+    document.features[0].acceptedAt = new Date().toISOString()
+  })
+  assert.equal(world.local.readFeatures(world.chain.chainId).features[0].acceptedBy, null)
+  assert.notEqual(world.engine.guard.tamperOf(world.chain.chainId), null)
+})
+
+check('a hand-written status done in relay.json is tampering; the sealed status is what counts', () => {
+  const world = sealedWorld()
+  const raw = JSON.parse(readFileSync(world.paths.chain, 'utf8'))
+  raw.status = 'done'
+  raw.maxHandoffs = 999
+  writeFileSync(world.paths.chain, JSON.stringify(raw, null, 2))
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.status, 'active')
+  assert.equal(chain.maxHandoffs, 4)
+  assert.deepEqual(world.engine.guard.tamperOf(world.chain.chainId).files, ['relay.json'])
+  const summary = world.engine.status().find(item => item.chainId === world.chain.chainId)
+  assert.equal(summary.status, 'active', 'the panel must not show a forged done')
+})
+
+check('deleting relay.json or adding a session to it is tampering', () => {
+  const world = sealedWorld()
+  const raw = JSON.parse(readFileSync(world.paths.chain, 'utf8'))
+  raw.sessions.push({ sessionId: 'session-intruder', role: 'worker', index: 9, joinedAt: new Date().toISOString() })
+  writeFileSync(world.paths.chain, JSON.stringify(raw))
+  assert.equal(world.local.readChain(world.chain.chainId).sessions.some(entry => entry.sessionId === 'session-intruder'), false)
+  const second = sealedWorld()
+  rmSync(second.paths.chain)
+  assert.equal(second.local.readChain(second.chain.chainId).chainId, second.chain.chainId, 'a deleted record reads as the sealed one')
+  assert.deepEqual(second.engine.guard.tamperOf(second.chain.chainId).files, ['relay.json'])
+})
+
+check('editing PLAN.md after the freeze is tampering; line endings alone are not', () => {
+  const world = sealedWorld()
+  writeFileSync(world.paths.plan, '# PLAN\r\n\r\n1. do F001\r\n')
+  world.local.readChain(world.chain.chainId)
+  assert.equal(world.engine.guard.tamperOf(world.chain.chainId), null, 'CRLF must not count as a change')
+  writeFileSync(world.paths.plan, '# PLAN\n\n1. do F001 and skip the tests\n')
+  world.local.readChain(world.chain.chainId)
+  assert.deepEqual(world.engine.guard.tamperOf(world.chain.chainId).files, ['PLAN.md'])
+})
+
+check('before the freeze the initializer may still edit the list by hand', () => {
+  const world = fakeWorld()
+  handEditFeatures({ paths: world.local.paths(world.chain.chainId) }, (document) => {
+    document.features.push({ id: 'F002', title: 'second', passes: false })
+  })
+  assert.equal(world.local.readFeatures(world.chain.chainId).features.length, 2)
+  assert.equal(world.engine.guard.tamperOf(world.chain.chainId), null)
+})
+
+check('restore puts the sealed files back and the chain accepts writes again', () => {
+  const world = sealedWorld()
+  handEditFeatures(world, (document) => { document.features[0].passes = true })
+  writeFileSync(world.paths.plan, 'gutted\n')
+  world.local.readChain(world.chain.chainId)
+  world.local.readFeatures(world.chain.chainId)
+  const result = world.engine.resolveTamper({ chainId: world.chain.chainId, action: 'restore' })
+  assert.deepEqual([...result.files].sort(), ['PLAN.md', 'features.json'])
+  assert.equal(JSON.parse(readFileSync(world.paths.features, 'utf8')).features[0].passes, false)
+  assert.match(readFileSync(world.paths.plan, 'utf8'), /do F001/)
+  assert.equal(world.engine.guard.tamperOf(world.chain.chainId), null)
+  world.engine.checkpoint({ agent: world.oldAgent, note: 'back on track' })
+  assert.ok(world.local.readAudit(world.chain.chainId, 50).some(record => record.kind === 'truth.restored' && record.actor === 'human'))
+})
+
+check('adopt needs a reason, then makes the disk the sealed state', () => {
+  const world = sealedWorld()
+  handEditFeatures(world, (document) => { document.features[0].notes = 'clarified by the owner' })
+  world.local.readFeatures(world.chain.chainId)
+  assert.throws(
+    () => world.engine.resolveTamper({ chainId: world.chain.chainId, action: 'adopt', reason: ' ' }),
+    /needs a reason/,
+  )
+  assert.notEqual(world.engine.guard.tamperOf(world.chain.chainId), null, 'a refused adopt must leave the tamper in place')
+  world.engine.resolveTamper({ chainId: world.chain.chainId, action: 'adopt', reason: 'owner edited the note' })
+  assert.equal(world.local.readFeatures(world.chain.chainId).features[0].notes, 'clarified by the owner')
+  assert.equal(world.engine.guard.tamperOf(world.chain.chainId), null)
+  const adopted = world.local.readAudit(world.chain.chainId, 50).find(record => record.kind === 'truth.adopted')
+  assert.equal(adopted.detail.reason, 'owner edited the note')
+})
+
+check('the audit is read from the host copy, so deleting the workspace log loses nothing', () => {
+  const world = sealedWorld()
+  rmSync(world.local.paths(world.chain.chainId).audit)
+  const records = world.local.readAudit(world.chain.chainId, 50)
+  assert.ok(records.some(record => record.kind === 'features.frozen'), 'the host copy must still hold the freeze')
+})
+
+check('a chain with no seal is sealed on its first read, and audited', () => {
+  const home = mkdtempSync(join(tmpdir(), 'relay-tofu-home-'))
+  const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-tofu-ws-'))
+  const plain = ChainStore.forCwd(workspaceDir)
+  const chain = plain.create({ objective: 'legacy', cwd: workspaceDir })
+  plain.writeFeatures(chain.chainId, { version: 1, objective: 'legacy', features: [{ id: 'F001', title: 'a' }] })
+  const fingerprints = new ChainFingerprints(home)
+  fingerprints.set(chain.chainId, [{ id: 'F001', title: 'a' }])
+  const engine = new RelayEngine({ logger: { warn: () => {} }, get: () => undefined }, resolveConfig({}), {
+    chainIndex: new ChainIndex(home), trashIndex: new ChainTrashIndex(home), fingerprints, seals: new SealStore(home),
+  })
+  const store = engine.storeFor(plain.truthDir)
+  assert.equal(store.readChain(chain.chainId).objective, 'legacy')
+  assert.ok(engine.guard.armed(chain.chainId), 'a frozen legacy chain must have its list sealed too')
+  assert.ok(store.readAudit(chain.chainId, 10).some(record => record.kind === 'truth.sealed'))
+  writeFileSync(plain.paths(chain.chainId).features, JSON.stringify({ version: 1, features: [] }))
+  store.readFeatures(chain.chainId)
+  assert.notEqual(engine.guard.tamperOf(chain.chainId), null, 'after the migration a hand edit is caught')
+  engine.dispose()
+})
+
+check('deleting and restoring a chain is not tampering', () => {
+  const world = sealedWorld()
+  world.engine.setPaused({ chainId: world.chain.chainId, paused: true })
+  world.engine.deleteChain(world.chain.chainId)
+  assert.equal(world.engine.guard.tamperOf(world.chain.chainId), null)
+  world.engine.restoreChain(world.chain.chainId)
+  world.local.readChain(world.chain.chainId)
+  world.local.readFeatures(world.chain.chainId)
+  assert.equal(world.engine.guard.tamperOf(world.chain.chainId), null)
+})
+
+await checkAsync('a tampered chain is not supervised', async () => {
+  const world = sealedWorld()
+  handEditFeatures(world, (document) => { document.features[0].passes = true })
+  world.local.readFeatures(world.chain.chainId)
+  world.setRatio(0.95)
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0)
+  assert.equal(world.calls.filter(call => /<relay_wrapup>/.test(call.text ?? '')).length, 0)
 })
 
 rmSync(workspace, { recursive: true, force: true })
