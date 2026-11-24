@@ -7,8 +7,8 @@
 同事按仓库的插件索引安装，索引里的每个版本钉在一个具体的提交上：
 
 1. 在 DSH 里打开「插件」，在「实验性插件」下打开「自定义插件索引」；
-2. 切到「发现」标签页，点「添加索引源」，填入 `https://cdn.jsdelivr.net/gh/syncaus/dsh-plugins@main/market/index.json`（`raw.githubusercontent.com` 的同类地址在部分网络里连不上，DSH 会报「无法读取此索引」；镜像按 `@main` 缓存，发新版后可能延迟几分钟到几小时，要立刻拿到最新索引用 `https://ghproxy.net/https://raw.githubusercontent.com/syncaus/dsh-plugins/main/market/index.json`）；
-3. 选「长任务接力」→「安装」，确认框里核对仓库、提交和目录。
+2. 切到「发现」标签页，点「添加索引源」，填入 `https://cdn.jsdelivr.net/gh/syncaus/dsh-longtask-relay@main/market/index.json`（`raw.githubusercontent.com` 的同类地址在部分网络里连不上，DSH 会报「无法读取此索引」；镜像按 `@main` 缓存，发新版后可能延迟几分钟到几小时，要立刻拿到最新索引用 `https://ghproxy.net/https://raw.githubusercontent.com/syncaus/dsh-longtask-relay/main/market/index.json`）；
+3. 选「长任务接力」→「安装」，确认框里核对仓库和提交（目录是仓库根，显示为空）。
 
 更新方式是重新从索引装一次新登记的版本，不是 `git pull`。以 `link:` 装在本机 git 工作区的开发副本则相反：用面板或设置卡片里的自更新按钮（`git pull` + 重载插件）。
 
@@ -126,7 +126,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
    - 这条链的所有工作区写入都被拒（`truth_tampered`），不监督、不交接，链头 goal 暂停；
    - 人在面板的篡改卡里对照两份内容，选「恢复封存版本」或「采纳磁盘改动」（必填理由，写进审计），链才继续。
    冻结时，清单里所有没有插件验证记录的 `passes: true` 一律打回 `false`，防止初始化会话在冻结前预置「已完成」。审计日志同时写一份到 `~/.dsh/longtask-relay/audit/`，面板和 `relay_audit` 读这份，工作区里的 `audit.jsonl` 被删改不影响记录。
-2. **插件执行验证命令**。见上文：`passes=true` 时插件亲自跑 verify，退出码 0 才通过。插件是在 Host 进程里执行命令的，不在会话沙箱里，所以每条命令第一次执行前要由人在面板的「验证命令」卡里批准（`requireCommandApproval`）；未批准时 checkpoint 返回 `verify_unapproved`，模型继续做别的、稍后重试。功能的 `verify` 为空时可以在同一次 checkpoint 里补一条（补的命令同样要批准）；改已有命令只能由人在面板采纳。批准按「命令 + 它验证的功能」记：后来新增的功能复用一条已批准的命令，也要重新批准。
+2. **插件执行验证命令**。见上文：`passes=true` 时插件亲自跑 verify，退出码 0 才通过。插件是在 Host 进程里执行命令的，不在会话沙箱里，所以每条命令第一次执行前要由人在面板的「验证命令」卡里批准（`requireCommandApproval`）；未批准时 checkpoint 返回 `verify_unapproved`，命令已经写进 `features.json`，模型继续做别的、稍后重试。功能的 `verify` 为空时可以在同一次 checkpoint 里补一条，同样走「先落盘、再由人批准」。**已经存在的命令工具改不了**（返回 `verify_locked`）：要换命令只能手改 `features.json` 里的 `verify`，再在面板的篡改卡里「采纳磁盘改动」并重新批准这条命令。批准按「命令 + 它验证的功能」记：后来新增的功能复用一条已批准的命令，也要重新批准。
 3. **finish 重跑 + 独立评审**。`relay_finish` 的门禁全过后，插件把所有功能的命令（去重）和 `verifyFull` 在当前状态下重跑一遍：某条功能的命令现在失败了，这条功能被重开（审计 `feature.regressed`），finish 被拒。全部通过后链进入「评审中」，插件新开一个**评审会话**（计划模式、只读，不是任何实现过的会话），给它 SPEC / PLAN / decisions 的路径和建链时记录的起点提交，要求它对照设计逐条判定 match / mismatch / missing，并列出设计里没有功能覆盖的需求，用 `relay_review` 提交：
    - 全部 match 且没有未覆盖需求 → 进入「待验收」；
    - 有不一致或缺失 → 对应功能重开（发现写进 notes 和 `REVIEW.md`），未覆盖需求写进 PROGRESS，链回到进行中并唤醒链头会话；
