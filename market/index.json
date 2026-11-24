@@ -63,7 +63,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/syncaus/dsh-mcp-playwright",
-            "commit": "56132acdf123f1520e73280bfa7de87f4fb0568e",
+            "commit": "366c0c2d57c2ed6b90733e28154ced272095e9fd",
             "path": ""
           },
           "engines": {
@@ -79,8 +79,8 @@
         "zh": "长任务接力"
       },
       "description": {
-        "en": "Turn a long task into a session chain: the truth source lives in workspace files, and when context nears its limit the plugin wraps up, opens a fresh session, and hands the work over. The new session keeps the permission preset, goal, and plan mode. The truth source is sealed on the host, so edits that bypass the plugin are caught; the plugin runs each feature's verify command itself to decide a pass, an independent session reviews the delivery against the design, and you confirm it done. Cluster mode plans first, then opens several sessions in parallel once you confirm the grouping. The panel lists what needs a human, shows the relay track, features, and truth source, and can pause, hand off, clear a blocker, or finish a chain.",
-        "zh": "把长任务变成一条会话链：真理源落在工作区文件，上下文逼近上限时自动收尾、开新会话并交接，新会话沿用权限预设、目标和计划模式。真理源在宿主侧封存，绕过插件改文件会被拦下；功能是否通过由插件亲自跑验证命令判定，结束前由独立评审会话对照设计核验，最后由你确认完成。集群模式先谈需求定计划，再由你确认分组，开出多个会话并行执行。面板集中列出需要人处理的事，可查看接力轨道、功能清单和真理源，并暂停、交接、解除阻塞或结束链。"
+        "en": "Turn a long task into a session chain: the truth source lives in workspace files, and when context nears its limit the plugin wraps up, opens a fresh session, and hands the work over. The new session keeps the permission preset, goal, and plan mode. The truth source is sealed on the host, so edits that bypass the plugin are caught; the plugin runs each feature's verify command itself to decide a pass, an independent session reviews the delivery against the design, and you confirm it done. Cluster mode plans first, then opens several sessions in parallel once you confirm the grouping. The panel lists what needs a human, shows the relay track, features, and truth source, and can pause, hand off, clear a blocker, or finish a chain; approving the verify commands, deciding on a changed truth source, and confirming a delivery also happen there.",
+        "zh": "把长任务变成一条会话链：真理源落在工作区文件，上下文逼近上限时自动收尾、开新会话并交接，新会话沿用权限预设、目标和计划模式。真理源在宿主侧封存，绕过插件改文件会被拦下；功能是否通过由插件亲自跑验证命令判定，结束前由独立评审会话对照设计核验，最后由你确认完成。集群模式先谈需求定计划，再由你确认分组，开出多个会话并行执行。面板集中列出需要人处理的事，可查看接力轨道、功能清单和真理源，并暂停、交接、解除阻塞或结束链；批准要跑的验证命令、裁决被改过的真理源、确认终验也在那里完成。"
       },
       "icon": "https://cdn.jsdelivr.net/gh/syncaus/dsh-longtask-relay@main/icon.svg",
       "author": "syncaus",
@@ -97,7 +97,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/syncaus/dsh-longtask-relay",
-            "commit": "4910fc8b2fa1d7b419be9175466b6c5aa0a59532",
+            "commit": "ee45faefbf846f7e90ff0ef04762867ea56a0fa0",
             "path": ""
           },
           "engines": {
