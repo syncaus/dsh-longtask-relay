@@ -5463,6 +5463,149 @@ await checkAsync('approving a command covers the features it was shown for, not 
   assert.equal(ok.ok, true, JSON.stringify(ok))
 })
 
+await checkAsync('a verify added with the passing checkpoint is recorded first, so the panel has something to approve', async () => {
+  const world = gateWorld()
+  world.engine.checkpoint({ agent: world.oldAgent, addFeatures: [{ id: 'F003', title: 'third' }], reason: 'found while testing' })
+  const command = 'node -e "process.exit(0)"'
+  const refused = await world.tool('relay_checkpoint').execute({ features: [{ id: 'F003', passes: true, verify: command }] }, world.head)
+  assert.equal(refused.code, 'verify_unapproved')
+  // The command reaches the feature before approval is checked: a command that only lived in
+  // the call could never be listed for the human, so the checkpoint could never move.
+  assert.equal(world.feature('F003').verify, command)
+  assert.equal(world.feature('F003').passes, false)
+  const detail = world.engine.detail(world.chain.chainId)
+  assert.deepEqual(detail.missingVerify, [])
+  const listed = detail.commands.find(entry => entry.command === command)
+  assert.ok(listed !== undefined, 'the command must be listed for approval')
+  assert.equal(listed.approved, false)
+  assert.ok(world.local.readAudit(world.chain.chainId, 50).some(record => record.kind === 'feature.verify-set'))
+  world.remote.approveCommands(world.chain.chainId, [command])
+  const ok = await world.tool('relay_checkpoint').execute({ features: [{ id: 'F003', passes: true }] }, world.head)
+  assert.equal(ok.ok, true, JSON.stringify(ok))
+})
+
+check('a failed seal write puts the previous truth file back instead of reading as tampering', () => {
+  const world = gateWorld()
+  const paths = world.local.paths(world.chain.chainId)
+  const relayBefore = readFileSync(paths.chain, 'utf8')
+  const featuresBefore = readFileSync(paths.features, 'utf8')
+  const guard = world.engine.guard
+  const sealChain = guard.sealChain
+  const sealFeatures = guard.sealFeatures
+  guard.sealChain = () => { throw new Error('the host seal is read-only') }
+  guard.sealFeatures = () => { throw new Error('the host seal is read-only') }
+  try {
+    assert.throws(
+      () => world.local.update(world.chain.chainId, (record) => { record.lastError = 'never lands' }),
+      error => error instanceof RelayError && error.code === RELAY_CODES.io,
+    )
+    assert.throws(
+      () => world.engine.checkpoint({ agent: world.oldAgent, features: [{ id: 'F001', notes: 'never lands' }] }),
+      error => error instanceof RelayError && error.code === RELAY_CODES.io,
+    )
+  } finally {
+    guard.sealChain = sealChain
+    guard.sealFeatures = sealFeatures
+  }
+  assert.equal(readFileSync(paths.chain, 'utf8'), relayBefore, 'the previous chain bytes must be back')
+  assert.equal(readFileSync(paths.features, 'utf8'), featuresBefore, 'the previous feature bytes must be back')
+  assert.equal(world.engine.guard.tamperOf(world.chain.chainId), null, 'a failed plugin write is not tampering')
+  assert.equal(world.local.readChain(world.chain.chainId).status, 'active')
+})
+
+check('a chain under review refuses reclaims, coverage changes and a blocker that would pause it', () => {
+  const world = sealedWorld()
+  world.local.update(world.chain.chainId, (record) => {
+    record.status = 'reviewing'
+    record.review = { round: 1, sessionId: null }
+    record.sessions.push({ sessionId: 'session-new', role: 'worker', index: 1, joinedAt: new Date().toISOString() })
+  })
+  assert.throws(
+    () => world.engine.reclaimDelegation({ agent: world.oldAgent, sessionId: 'session-new' }),
+    error => error.code === 'chain_under_review',
+  )
+  assert.throws(
+    () => world.engine.acceptCoverage({ chainId: world.chain.chainId, featureId: 'F001', accepted: true }),
+    error => error.code === 'chain_under_review',
+  )
+  // The blocker is recorded, but leaving the review stays the panel's decision.
+  world.engine.recordBlocker(world.local, world.chain.chainId, { kind: 'external', who: 'human', action: 'look at it' })
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.status, 'reviewing')
+  assert.equal(chain.blocker.kind, 'external')
+})
+
+check('finishing is refused while a handoff is opening the next session', () => {
+  const world = gateWorld()
+  world.engine.busyChains.add(world.chain.chainId)
+  try {
+    assert.throws(
+      () => world.engine.finishGate({ agent: world.oldAgent }),
+      error => error instanceof RelayError && error.code === RELAY_CODES.busy,
+    )
+  } finally {
+    world.engine.busyChains.delete(world.chain.chainId)
+  }
+})
+
+await checkAsync('a lost fingerprint is rebuilt from the seal instead of resetting every pass', async () => {
+  const world = gateWorld()
+  await passAll(world)
+  assert.equal(world.feature('F001').passes, true)
+  world.engine.fingerprints.remove(world.chain.chainId)
+  assert.equal(world.engine.fingerprints.get(world.chain.chainId), undefined)
+  world.engine.checkpoint({ agent: world.oldAgent, note: 'carry on' })
+  assert.equal(world.feature('F001').passes, true, 'a cleaned host home must not undo a pass')
+  assert.equal(world.engine.fingerprints.get(world.chain.chainId).features.length, 2)
+  assert.ok(world.local.readAudit(world.chain.chainId, 50).some(record => record.kind === 'features.fingerprint-restored'))
+})
+
+check('the status projection reports a review and a tamper, not just status active', () => {
+  const world = sealedWorld()
+  const registered = new Map()
+  registerTools({ tools: { register: definition => registered.set(definition.name, definition) } }, world.engine)
+  const read = () => registered.get('relay_status').execute({ chainId: world.chain.chainId }, {})
+  const clean = read()
+  assert.equal(clean.chains[0].review, null)
+  assert.equal(clean.chains[0].tamper, null)
+  handEditFeatures(world, (document) => { document.features[0].passes = true })
+  world.local.readFeatures(world.chain.chainId)
+  const tampered = read()
+  assert.deepEqual(tampered.chains[0].tamper.files, ['features.json'])
+})
+
+await checkAsync('an idle head of a chain under review pauses its goal', async () => {
+  const world = sealedWorld()
+  const goals = world.engine.ctx.get('goals')
+  const states = new Map([['session-old', 'active']])
+  goals.get = agent => (states.has(agent.id)
+    ? { id: `goal-${agent.id}`, revision: 1, phase: states.get(agent.id), activation: 'armed' }
+    : undefined)
+  goals.pause = (agent) => { states.set(agent.id, 'paused') }
+  world.local.update(world.chain.chainId, (record) => {
+    record.status = 'reviewing'
+    record.review = { round: 1, sessionId: null }
+  })
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(states.get('session-old'), 'paused', 'a review must not keep driving its head')
+})
+
+await checkAsync('a chain finished while its head was away completes its goal on the next idle evaluation', async () => {
+  const world = sealedWorld()
+  const goals = world.engine.ctx.get('goals')
+  const states = new Map([['session-old', 'active']])
+  goals.get = agent => (states.has(agent.id)
+    ? { id: 'goal-seeded', revision: 1, phase: states.get(agent.id), activation: 'armed' }
+    : undefined)
+  goals.complete = (agent) => { states.set(agent.id, 'complete') }
+  world.local.update(world.chain.chainId, (record) => {
+    record.status = 'done'
+    record.sessions[0].goalId = 'goal-seeded'
+  })
+  await world.engine.evaluate(world.oldAgent)
+  assert.equal(states.get('session-old'), 'complete')
+})
+
 check('a chain from before the host audit keeps its older workspace history', () => {
   const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-legacy-audit-'))
   const plain = ChainStore.forCwd(workspaceDir)

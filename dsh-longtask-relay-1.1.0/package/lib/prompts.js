@@ -131,8 +131,10 @@ export function renderWrapupPrompt(input) {
     'Before the handoff, do exactly this and do not start new work:',
     '1. Finish the feature you are on, or stop at a clean boundary and record what remains.',
     `2. Run the project's statusCheck and verifyFast commands once and paste the tail of both outputs`,
-    `   (the counts and the failure lines, not the whole log) into ${paths.progress}. If a count in the`,
-    '   truth source disagrees with statusCheck, fix the truth source — the command wins, the prose is wrong.',
+    `   (the counts and the failure lines, not the whole log) into ${paths.progress}. If a count there`,
+    '   disagrees with statusCheck, fix that line in PROGRESS.md — the command wins, the prose is wrong.',
+    '   features.json, PLAN.md and SPEC.md are sealed: change them only through relay_checkpoint, or record',
+    '   a proposed change in decisions.md and let a human decide.',
     `3. Rewrite ${paths.progress}: Done / In progress (exactly what remains) / Next (the next feature id) / Errors / Notes.`,
     `4. Append to ${paths.decisions} every decision this session made that the next one must not silently undo`,
     '   (a skipped item, an accepted difference, a trade-off), as "what — why — what would make it wrong".',
@@ -243,9 +245,9 @@ export function renderHandoffPrompt(input) {
     ...(statusCheck === ''
       ? []
       : [
-        `Run the project's statusCheck (${statusCheck}) and compare it with the truth source: the previous\n`
-        + '   session wrote those numbers as claims, so where they disagree the command is right and the file\n'
-        + '   is stale. Fix the file before starting.',
+        `Run the project's statusCheck (${statusCheck}) and compare it with PROGRESS.md: the previous\n`
+        + '   session wrote those numbers as claims, so where they disagree the command is right and the prose\n'
+        + '   is stale. Correct PROGRESS.md and never hand-edit features.json, PLAN.md or SPEC.md (they are sealed).',
       ]),
     `Run the verification command once (${verifyFast || verify || 'as recorded in features.json'}).\n`
     + '   If it fails, fix that first and record why in PROGRESS.md.',
@@ -584,7 +586,8 @@ export function renderClusterGroupOpenedNotice(input) {
 
 /**
  * Notice to a cluster head when a worker got features passing.
- * It only points at the report: the head still re-runs the verify commands.
+ * It only points at the report: the plugin already ran the verify commands, the head
+ * still owns whether the change fits the plan.
  * @param {{
  *   chainId: string,
  *   truthDir: string,

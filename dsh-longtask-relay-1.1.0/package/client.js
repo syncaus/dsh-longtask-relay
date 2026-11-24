@@ -96,7 +96,9 @@ window.__ModuleLoader__.load({
       confirmHandoff: '确认交接',
       handoffDone: '已完成的链不需要交接',
       handoffUnloaded: '当前会话未加载，先打开它再交接',
+      handoffReviewing: '评审中或待验收的链不能交接',
       pauseDone: '已完成的链不能暂停',
+      pauseAwaiting: '待验收的链只能确认完成或驳回',
       cancel: '取消',
       none: '无',
       pressure: '上下文',
@@ -495,7 +497,9 @@ window.__ModuleLoader__.load({
       confirmHandoff: 'Confirm handoff',
       handoffDone: 'A finished chain needs no handoff',
       handoffUnloaded: 'The current session is not loaded; open it first',
+      handoffReviewing: 'A chain under review or waiting for acceptance cannot be handed off',
       pauseDone: 'A finished chain cannot be paused',
+      pauseAwaiting: 'A delivered chain can only be confirmed or rejected',
       cancel: 'Cancel',
       none: 'none',
       pressure: 'Context',
@@ -2721,7 +2725,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const chain = detail.chain ?? {}
           const sessions = Array.isArray(detail.sessions) ? detail.sessions : []
           const running = sessions.filter(session => session.running === true).length
-          const blocked = chain.status === 'active' || chain.status === 'initializing'
+          // A chain under review has to be paused (which cancels the review) before it can be deleted.
+          const blocked = chain.status === 'active' || chain.status === 'initializing' || chain.status === 'reviewing'
             ? t('deleteBlocked')
             : running > 0 ? t('deleteRunning') : undefined
           if (blocked !== undefined || !armed) {
@@ -2794,7 +2799,10 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           if ((chain.coveragePartial ?? 0) > 0) {
             metas.push({ label: t('partialCoverage'), value: `${chain.coveragePartial}`, tone: 'warn' })
           }
-          const handoffBlocked = isDone ? t('handoffDone') : isPlanning ? t('handoffPlanning') : (current === null || !live ? t('handoffUnloaded') : undefined)
+          const underReview = chain.status === 'reviewing' || chain.status === 'awaiting_acceptance'
+          const handoffBlocked = isDone
+            ? t('handoffDone')
+            : isPlanning ? t('handoffPlanning') : underReview ? t('handoffReviewing') : (current === null || !live ? t('handoffUnloaded') : undefined)
           const sections = [
             { id: 'features', label: t('features'), count: `${done}/${total}` },
             { id: 'docs', label: t('docs') },
@@ -2823,8 +2831,10 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                   h('button', {
                     type: 'button',
                     className: 'relay-btn',
-                    disabled: busy || isDone || isPlanning,
-                    title: isDone ? t('pauseDone') : isPlanning ? t('pausePlanning') : undefined,
+                    disabled: busy || isDone || isPlanning || chain.status === 'awaiting_acceptance',
+                    title: isDone
+                      ? t('pauseDone')
+                      : isPlanning ? t('pausePlanning') : chain.status === 'awaiting_acceptance' ? t('pauseAwaiting') : undefined,
                     onClick: () => { void onAct('relay/setPaused', { chainId: chain.chainId, paused: !isPaused }) },
                   }, isPaused ? t('resume') : t('pause')),
                   h(ConfirmButton, {
@@ -4050,6 +4060,16 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 tone: 'error',
                 kind: t('attnTamper'),
                 text: (chain.tamper.files ?? []).join(', '),
+                meta: chain.title ?? '',
+                action: { label: t('viewChain'), run: () => focusChain(chain.chainId) },
+              })
+            }
+            if (chain.pausedBy === 'review-failed') {
+              attention.push({
+                key: `review:${chain.chainId}`,
+                tone: 'error',
+                kind: t('attnReview'),
+                text: chain.lastError ?? '',
                 meta: chain.title ?? '',
                 action: { label: t('viewChain'), run: () => focusChain(chain.chainId) },
               })
