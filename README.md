@@ -49,7 +49,9 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 
 每条功能还带一个 `coverage` 字段，说明**验证到了多少**：`full`（端到端）、`partial`（只覆盖部分分支 / 平台 / 视口 / 子命令）、`smoke`（只证明它能响）。偏低的覆盖率默认不允许自动通过——必须由人在面板里点「接受」（模型工具不能写 `acceptedBy`）。
 
-这三条命令和覆盖率取值都与技术栈无关：Rust 的 `cargo test`、Java 的 `mvn verify`、前端 `tsc --noEmit`、Python 的 `pytest -q` 都能当 `verifyFast`/`verifyFull`；输出被识别为证据的形态包括比例（`41/41`）、退出码（`exit 0`）、结论词（`ok`/`passed`/`BUILD SUCCESS`/`通过`）。
+这三条命令和覆盖率取值都与技术栈无关：Rust 的 `cargo test`、Java 的 `mvn verify`、前端 `tsc --noEmit`、Python 的 `pytest -q` 都能当 `verifyFast`/`verifyFull`。每条功能的 `verify` 可以写一条命令，也可以直接写 `statusCheck` / `verifyFast` / `verifyFull` 引用根上的命令。
+
+**通过由插件判定，不由模型自报**（见下文「门禁」）：模型调用 `relay_checkpoint` 标 `passes=true` 时，插件在链的工作区里亲自执行这条功能的 `verify`，退出码为 0 才算通过，并把退出码、耗时、输出尾部和 git HEAD 记进该功能的 `verification` 字段；模型写的 `evidence` 只当备注。
 
 之后每完成一个功能，模型调用 `relay_checkpoint` 记录进度。会话空闲且上下文比例越过阈值时，插件先发一条收尾指令（做完当前单元、写进度、跑验证），下一轮空闲创建新会话并投递交接说明；新会话从真理源重建上下文，而不是复制旧对话。交接说明里带一份未完成功能的紧凑清单（id、标题、verify、files、deps），并要求只读 `HANDOFF.md` 的 `relay:state` 块和 `PROGRESS.md` 尾部；`decisions.md` / `traps.md` / `history.md` 用 `relay_recall` 检索，不整份读，`PLAN.md` / `features.json` 只在需要时读。交接时，退役链头名下仍未完成的功能会交回主线（审计记 `delegation.reclaimed`），新链头的「我的任务」能看到；已通过但挂在退役主线腿上的功能保留负责人，作为主线历史显示。每次交接，插件把上一份交接说明自动追加到 `history.md`。
 
@@ -87,10 +89,11 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 | `relay_start` | 开始一条链，当前会话成为 initializer；`mode: "cluster"` 以集群模式开始 |
 | `relay_propose` | 集群模式下提交启动方案（分组、隔离方式、理由），等人确认 |
 | `relay_status` | 紧凑读出所有链的状态、进度、当前会话和在跑的 worker；退役腿只给计数，完整轨道看面板 |
-| `relay_checkpoint` | 更新功能状态 / 证据 / 覆盖率，追加发现的新功能，记录阻塞，标记 `ready` |
+| `relay_checkpoint` | 更新功能状态 / 备注 / 覆盖率，追加发现的新功能，记录阻塞，标记 `ready`；`passes=true` 时由插件执行 verify 命令，退出码 0 才通过 |
 | `relay_audit` | 读链的审计日志；默认 20 条、detail 字符串截到 300 字符，`full=true` 取原文 |
 | `relay_recall` | 按关键词检索链内记忆（PLAN / HANDOFF / history / PROGRESS / decisions / traps / features / audit） |
-| `relay_finish` | 结束链；功能没全部通过时会被拒绝并列出剩余项 |
+| `relay_finish` | 申请结束链：功能没全部通过时被拒并列出剩余项；通过后插件重跑全部 verify 命令，再开独立评审会话核对设计，最后等人在面板确认 |
+| `relay_review` | 只有插件开的评审会话能调：逐条给出 match / mismatch / missing、未覆盖的需求和总结 |
 | `relay_spawn` | 把一部分功能交给新的子会话并行执行（仅链头会话可调用） |
 | `relay_control` | 暂停 / 恢复自动接力、立即交接，或收回某个 worker 的未完成功能（`reclaim`）；删除链只保留在面板 |
 
@@ -112,6 +115,26 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 插件以 `link:` 方式装在 git 工作区里，所以“有新版本”直接看 git 上游：打开面板时比较本地 HEAD 与上游分支，落后时右上角显示「更新到 vX」，没有落后则显示当前版本号。
 
 点击更新会执行 `git pull --ff-only`，然后禁用/启用一次本插件，让 Host 加载新代码。工作区有未提交改动时拒绝更新（避免覆盖本地修改）；没有上游分支或不在 git 里时只显示版本号，不提示更新。
+
+## 门禁：防篡改、插件验证、独立评审、人工终验
+
+模型和人都不能再靠改文件或一句「做完了」结束一条链。从功能清单冻结到链完成，要过四道关：
+
+1. **真理源封存**。清单第一次被 `relay_checkpoint` 接受时（集群模式是启动那一刻），插件把 `features.json`、`PLAN.md`、`SPEC.md` 连同一直在维护的 `relay.json` 的规范化全文存一份到 `~/.dsh/longtask-relay/seals/`。之后插件每次读取都和这份封存比对（JSON 按键排序比，文本统一换行后比，git 换行转换不算改动）。发现不一致：
+   - 记一条 `truth.tampered` 审计，面板「需要你处理」里出现这条链；
+   - 引擎按封存版本判断（例如手写的 `status: "done"`、`passes: true`、`acceptedBy: "human"` 都不生效），磁盘上的改动原样保留作证据；
+   - 这条链的所有工作区写入都被拒（`truth_tampered`），不监督、不交接，链头 goal 暂停；
+   - 人在面板的篡改卡里对照两份内容，选「恢复封存版本」或「采纳磁盘改动」（必填理由，写进审计），链才继续。
+   冻结时，清单里所有没有插件验证记录的 `passes: true` 一律打回 `false`，防止初始化会话在冻结前预置「已完成」。审计日志同时写一份到 `~/.dsh/longtask-relay/audit/`，面板和 `relay_audit` 读这份，工作区里的 `audit.jsonl` 被删改不影响记录。
+2. **插件执行验证命令**。见上文：`passes=true` 时插件亲自跑 verify，退出码 0 才通过。插件是在 Host 进程里执行命令的，不在会话沙箱里，所以每条命令第一次执行前要由人在面板的「验证命令」卡里批准（`requireCommandApproval`）；未批准时 checkpoint 返回 `verify_unapproved`，模型继续做别的、稍后重试。功能的 `verify` 为空时可以在同一次 checkpoint 里补一条（补的命令同样要批准）；改已有命令只能由人在面板采纳。
+3. **finish 重跑 + 独立评审**。`relay_finish` 的门禁全过后，插件把所有功能的命令（去重）和 `verifyFull` 在当前状态下重跑一遍：某条功能的命令现在失败了，这条功能被重开（审计 `feature.regressed`），finish 被拒。全部通过后链进入「评审中」，插件新开一个**评审会话**（计划模式、只读，不是任何实现过的会话），给它 SPEC / PLAN / decisions 的路径和建链时记录的起点提交，要求它对照设计逐条判定 match / mismatch / missing，并列出设计里没有功能覆盖的需求，用 `relay_review` 提交：
+   - 全部 match 且没有未覆盖需求 → 进入「待验收」；
+   - 有不一致或缺失 → 对应功能重开（发现写进 notes 和 `REVIEW.md`），未覆盖需求写进 PROGRESS，链回到进行中并唤醒链头会话；
+   - 连续 `maxReviewRounds` 轮没通过 → 不再开新评审，直接交给人决定。
+   评审会话所有写工具都被拒（`reviewer_read_only`）。评审期间 checkpoint、交接、恢复都被拒；在面板暂停等于取消这轮评审。评审会话起不来时链暂停在「评审会话未能启动」，面板可以「重新评审」。Host 不能新建会话时跳过评审直接待验收，面板标「未经独立评审」。
+4. **人工终验**。「待验收」的链只能由人在面板点「确认完成」变成已完成（这时才完成链头 goal），或「驳回」（必填理由，发给链头会话，评审轮数清零）回到进行中。
+
+这几道关都可以在配置里关掉（`pluginVerify`、`requireCommandApproval`、`independentReview`、`requireHumanFinish`），改配置本身会写进宿主侧审计。
 
 ## 部分验证的人工接受
 
@@ -176,14 +199,20 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 | `inheritPlanMode` | `true` | 旧会话处于计划模式时，接力会话和子会话也以计划模式启动 |
 | `notifyOldSession` | `true` | 交接后给旧会话留一条退役说明 |
 | `pauseOnExternalBlocker` | `true` | 遇到「只有人能解」的阻塞（`kind=external`）时暂停该链 |
-| `requireStrongEvidence` | `true` | 通过的功能是否必须带「像命令结果」的证据；输出是自由文本的项目可关掉 |
+| `requireStrongEvidence` | `true` | 只在 `pluginVerify` 关闭时生效：通过的功能是否必须带「像命令结果」的证据 |
 | `requireHumanAcceptedCoverage` | `true` | 低覆盖率是否必须由人确认；把部分覆盖当常态的项目可关掉 |
+| `pluginVerify` | `true` | 标通过时由插件执行 verify 命令、finish 时重跑全部命令；关掉后回到「看证据文本」的旧规则 |
+| `requireCommandApproval` | `true` | 每条 verify 命令首次执行前要人在面板批准（插件在会话沙箱外执行命令） |
+| `verifyTimeoutSeconds` | `900` | 单条 verify 命令的超时，超时杀掉进程树并按失败处理 |
+| `independentReview` | `true` | finish 后开一个只读评审会话，对照 SPEC / PLAN 核验交付 |
+| `maxReviewRounds` | `3` | 评审连续不通过几轮后不再开新评审，交给人决定 |
+| `requireHumanFinish` | `true` | 评审通过后等人在面板确认完成；关掉后评审通过即完成 |
 
 **重要**：两个比例分工不同 —— `wrapupRatio`（默认 0.50）开始收尾，`handoffRatio`（默认 0.70）在收尾之后仍然到点就强制交接；前者必须小于后者，配置校验会拒绝反过来的组合。`compaction-basic` 默认在上下文窗口的 0.8 处压缩，如果它先压缩，压力会被降到很低，本插件就不会触发。请保证 `handoffRatio < compaction.thresholdRatio`（默认 0.70 < 0.80），或者把压缩阈值调到 0.9、把 `handoffRatio` 调到 0.78。
 
 ## 证据与阻塞的规矩
 
-- **`passes` 必须有可用证据**：`evidence` 里要出现命令、退出码或计数。`relay_finish` 会拒绝「通过但证据不足 8 个字符或缺数字」的条目；`relay_checkpoint` 在写入 `passes=true` 时先挡一道（`evidence_too_weak`）。
+- **`passes` 由插件验证**：默认（`pluginVerify` 开）由插件执行 verify 命令判定，见「门禁」。关掉 `pluginVerify` 时退回旧规则：`evidence` 里要出现命令、退出码或计数，`relay_checkpoint` 写入 `passes=true` 时先挡一道（`evidence_too_weak`），`relay_finish` 再复核一遍。
 - **数字不许手写**：真理源里的计数必须来自 `statusCheck` 的输出引用，否则下一棒会把过时数字当事实。
 - **阻塞分三类**：`external`（等人：账号、机器、只有 owner 能做的决定）、`code`（等自己修）、`decision`（等一个选择）。`external` 会暂停链并写下「谁要做哪件事才解开」，避免继续开新会话空转；链头的 goal 会随链一起暂停，否则目标轮会绕过暂停继续给会话发指令。面板解除阻塞时一并恢复这个 goal。
 - **与桌面端目标功能的关系**：目标（goal）管一个会话内的自动续轮，接力管换会话，两者串行互补。开启 `seedGoalOnHandoff` 后，交接会给新会话按链目标和当前进度建一个 goal，新会话由目标轮驱动继续，而不是跑完交接说明就停住。反过来，链头会话的 goal 进入 `blocked` 时（例如轮次耗尽），链会被记为 external 阻塞并暂停；在目标条里恢复或清除 goal 后，链的这条阻塞会立即解除（不再等下一次空闲评估），恢复链时也会马上核对 goal 并清理这类过期阻塞。对插件按 `seedGoalOnHandoff` 建的 goal，把 `pauseOnExternalBlocker` 关掉时只记录阻塞、继续交接，让新会话重新拿到轮次预算。
@@ -193,7 +222,7 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 
 - 收尾指令发出后和交接开始时，插件会取消旧会话 goal 的自动续行（只取消续行，goal 本身的阶段不变），避免旧会话在收尾后又被目标轮推着继续干活，或在新会话已经启动时多跑一轮。
 - 交接时新会话继承旧会话的 goal：你自己建的 goal 会被继承，目标不变、轮次只给剩余部分；本会话显示的是它拿到的剩余额度。旧 goal 轮次用完时不继承，链记一条阻塞等你处理。插件按 `seedGoalOnHandoff` 建的 goal 不继承，每次交接照旧按 `goalRoundsPerHandoff` 新建；集群链例外：`clusterGoals` 开着时，即使 `seedGoalOnHandoff` 是关的，交接也会给新链头建 goal，否则没人验收 worker。你的 goal 处于阻塞或被你暂停时，不会被换成新建的 goal；阻塞的 goal 在交接后还会留下一条阻塞，等你处理。`inheritGoal` 关掉后回到 `seedGoalOnHandoff` 的旧行为（集群链仍按 `clusterGoals` 建链头 goal）。
-- 本插件建的 goal 在 Host 重启或插件重载后会被恢复自动续行；用户自己建的 goal 不动。链用 `relay_finish` 结束时，本插件建的 goal 一并标为完成。
+- 本插件建的 goal 在 Host 重启或插件重载后会被恢复自动续行；用户自己建的 goal 不动。链进入评审或待验收时，链头 goal 先暂停；人在面板确认完成时，本插件建的 goal 一并标为完成；评审不通过或被驳回时 goal 恢复。
 - 在面板里暂停一条链会同时暂停链头会话的 goal，恢复链时把这个 goal 一并恢复；会话自己调用 `relay_control` 暂停链不动 goal。
 - 旧会话处于计划模式时，接力会话和子会话也以计划模式启动。
 - 计划模式下 `relay_start` 会被拒绝：先把计划做完并批准，再开链。批准后的计划写进 `PLAN.md`，`features.json` 据此拆分。
@@ -203,7 +232,10 @@ relay_start(objective: "把订单导出从 CSV 改成流式 XLSX，覆盖 3 个�
 
 - 顶层会话之间没有父子关系，链结构完全由插件记录；手动归档会话会让链出现悬空引用。
 - 新会话会重新支付一遍 system prompt 与工具 schema 的成本。
-- 「功能是否真的通过」由 `features.json` 的 `passes` 与 `evidence` 约束，插件不能代替验证；插件只校验证据的形状，不校验它是否真实。
+- 封存只防工作区里的改动。会话拿到完全访问权限时，它也能改 `~/.dsh` 下的封存和审计；防这种情况只能靠沙箱权限。
+- 插件验证只证明 verify 命令退出码为 0，命令本身测得够不够由人在批准命令时把关；评审会话的结论仍是模型判断，最后由人工终验兜底。
+- 评审会话是否真的只读取决于 Host 的计划模式实现；Host 不提供计划模式服务时只靠提示词约束。
+- 在工作区里 `git checkout` 到旧提交、或手工改了封存文件，都会被当成篡改：这是有意的，由人选择恢复还是采纳。
 - 未加载的会话没有实时上下文数值，面板显示「未加载」。
 - 一个 Host 进程内的运行态不跨进程共享：峰值压力、判定冷却、交接中的忙标记。压缩次数、收尾时间、`ready` 和链结构都持久化在链文件里，重启或重载后恢复，不会重复收尾。
 - 委派给 subagent 的调用会被工具拒绝。
