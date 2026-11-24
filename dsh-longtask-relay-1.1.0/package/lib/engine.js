@@ -332,6 +332,8 @@ export class RelayEngine {
     this.statusCache = null
     /** Chains currently handing off. @type {Set<string>} */
     this.busyChains = new Set()
+    /** Chains inside a finish: their head must not hand off while the commands run. @type {Set<string>} */
+    this.finishingChains = new Set()
     /** Cross-lifetime chain index. */
     this.chainIndex = options.chainIndex ?? ChainIndex.default()
     /** Cross-lifetime tombstones for chains moved to a workspace's `.trash`. */
@@ -1469,7 +1471,7 @@ export class RelayEngine {
    * paused.
    * @param {object} chain - chain record.
    * @param {import('./chain-store.js').ChainStore} store - its store.
-   * @param {'blocker'|'blocked'|'deleted'} why - audit reason.
+   * @param {'blocker'|'blocked'|'deleted'|'review'|'acceptance'} why - audit reason.
    * @returns {boolean} true when this call paused the goal.
    */
   pauseHeadGoalForBlock(chain, store, why) {
@@ -1966,8 +1968,9 @@ export class RelayEngine {
     this.assertChainHeadWriter(chain, agent)
     this.assertUntampered(chain)
     // A handoff or a cluster launch is mid-flight: it rewrites the chain record when it settles,
-    // which would overwrite the review this finish starts. Refuse instead of racing it.
-    if (this.busyChains.has(chain.chainId)) {
+    // which would overwrite the review this finish starts. Refuse instead of racing it. A finish
+    // this engine is already running (its own second gate) is not a race.
+    if (this.busyChains.has(chain.chainId) && !this.finishingChains.has(chain.chainId)) {
       throw new RelayError(RELAY_CODES.busy, `chain ${chain.chainId} is opening a session; retry when it settles`)
     }
     // Planning ends only by launch or delete; finishing would skip the human's launch confirmation.
@@ -2073,24 +2076,36 @@ export class RelayEngine {
   async finishVerified({ agent, chainId, evidence }) {
     const gate = this.finishGate({ agent, chainId })
     if (gate.refusal !== undefined) return gate.refusal
-    let finalRun
-    if (this.config.pluginVerify) {
-      const { commands } = this.commandsOf(gate.chain.chainId, gate.document)
-      const runs = await this.runSerialized(gate.chain.chainId, () => this.runCommands(gate.chain, commands.map(entry => entry.command)))
-      const full = String(gate.document.verifyFull ?? '').trim()
-      finalRun = { runs, full: full.length > 0 ? runs.get(full) ?? null : null }
-      this.record(gate.store, gate.chain.chainId, {
-        kind: 'verify.final',
-        actor: agent?.session?.id ?? 'host',
-        detail: { runs: [...runs.values()].map(runSummary) },
-      })
+    // Two finishers (a human in the panel and the head's own relay_finish) must not both run the
+    // commands and race for the state.
+    if (this.finishingChains.has(gate.chain.chainId)) {
+      throw new RelayError(RELAY_CODES.busy, `chain ${gate.chain.chainId} is already finishing`)
     }
-    const result = this.finish({ agent, chainId: gate.chain.chainId, evidence, finalRun })
-    if (result.ok === true && result.status === 'reviewing') {
-      const review = await this.startReview(gate.chain.chainId)
-      return { ...result, review, status: this.findChain(gate.chain.chainId).chain.status }
+    // Hold the chain from here on: a handoff that starts while the commands run would rewrite
+    // the record this finish is about to move into review.
+    this.finishingChains.add(gate.chain.chainId)
+    try {
+      let finalRun
+      if (this.config.pluginVerify) {
+        const { commands } = this.commandsOf(gate.chain.chainId, gate.document)
+        const runs = await this.runSerialized(gate.chain.chainId, () => this.runCommands(gate.chain, commands.map(entry => entry.command)))
+        const full = String(gate.document.verifyFull ?? '').trim()
+        finalRun = { runs, full: full.length > 0 ? runs.get(full) ?? null : null }
+        this.record(gate.store, gate.chain.chainId, {
+          kind: 'verify.final',
+          actor: agent?.session?.id ?? 'host',
+          detail: { runs: [...runs.values()].map(runSummary) },
+        })
+      }
+      const result = this.finish({ agent, chainId: gate.chain.chainId, evidence, finalRun })
+      if (result.ok === true && result.status === 'reviewing') {
+        const review = await this.startReview(gate.chain.chainId)
+        return { ...result, review, status: this.findChain(gate.chain.chainId).chain.status }
+      }
+      return result
+    } finally {
+      this.finishingChains.delete(gate.chain.chainId)
     }
-    return result
   }
 
   /**
@@ -2252,18 +2267,21 @@ export class RelayEngine {
    * Approval is per command, and the panel can only list a command that is on disk:
    * a command that lives only in this call's overrides could never be approved, so the
    * checkpoint would keep failing with `verify_unapproved` and nothing to approve.
-   * @param {{ agent?: object, store: object, chain: object, document: object|undefined, ids: Array<string>, overrides?: Map<string, string> }} input - pending commands.
+   * Only the features the caller may change are written here; everything else stays a refusal.
+   * @param {{ agent?: object, store: object, chain: object, document: object|undefined, ids: Array<string>, overrides?: Map<string, string>, workerSessionId?: string }} input - pending commands.
    * @returns {object|undefined} the document after the write.
    */
-  saveVerifyDrafts({ agent, store, chain, document, ids, overrides }) {
+  saveVerifyDrafts({ agent, store, chain, document, ids, overrides, workerSessionId }) {
     if (document === undefined || overrides === undefined || overrides.size === 0) return document
     const wanted = new Set(ids)
     const drafts = []
     for (const [id, text] of overrides) {
       if (!wanted.has(id)) continue
       const feature = document.features.find(entry => entry.id === id)
+      // A delegated worker may only touch its own features; the caller refuses the rest anyway.
+      if (feature === undefined || (workerSessionId !== undefined && feature.assignedSessionId !== workerSessionId)) continue
       // Changing a command that already exists stays a human decision (patchFeatures enforces it).
-      if (feature === undefined || feature.verify.trim().length > 0) continue
+      if (feature.verify.trim().length > 0) continue
       const command = String(text ?? '').trim()
       if (command.length === 0) continue
       drafts.push({ id, verify: command })
@@ -2281,7 +2299,8 @@ export class RelayEngine {
 
   /**
    * Run the verify commands of the features a checkpoint wants to mark passing.
-   * Nothing is written to features.json here: the checkpoint attaches the records.
+   * A verify the caller is adding is written to features.json first (see `saveVerifyDrafts`);
+   * the pass itself is not written here: the checkpoint attaches the run records.
    * @param {{ agent?: object, chainId?: string, ids: Array<string>, overrides?: Map<string, string> }} input - features to verify.
    * @returns {Promise<{ ok: true, verified: Map<string, object> } | { ok: false, code: string, message: string, items: Array<object> }>} outcome.
    */
@@ -2301,6 +2320,7 @@ export class RelayEngine {
       document: store.readFeatures(chain.chainId),
       ids,
       overrides,
+      workerSessionId: worker ? self.sessionId : undefined,
     })
     if (document === undefined) throw new RelayError(RELAY_CODES.notFound, `chain ${chain.chainId} has no features.json`)
     const approval = new Map(this.commandsOf(chain.chainId, document, overrides).commands.map(entry => [entry.command, entry.approved]))
@@ -2318,6 +2338,12 @@ export class RelayEngine {
         continue
       }
       const override = overrides?.get(id)
+      // An existing command is changed by a human, never by a checkpoint: without this refusal the
+      // new command would be checked for approval but could never reach the file to be approved.
+      if (override !== undefined && feature.verify.trim().length > 0 && feature.verify.trim() !== String(override).trim()) {
+        refusals.push({ id, code: 'verify_locked', message: `feature ${id} already has a verify command and a human changes it in the panel; retry without a new command` })
+        continue
+      }
       const command = resolveVerify(override === undefined ? feature : { verify: override }, document)
       if (command.length === 0) {
         refusals.push({ id, code: 'verify_missing', message: `feature ${id} has no verify command; set features[].verify in the same relay_checkpoint` })
@@ -2771,6 +2797,10 @@ export class RelayEngine {
   setPaused({ agent, chainId, paused }) {
     const { chain, store } = this.resolveChain(agent, chainId)
     this.assertWriter(chain, agent)
+    // A pause during the final run would be overwritten by the finish that already owns the chain.
+    if (this.finishingChains.has(chain.chainId)) {
+      throw new RelayError(RELAY_CODES.busy, `chain ${chain.chainId} is finishing; retry when it settles`)
+    }
     if (chain.status === 'done' || chain.status === 'failed') {
       throw new RelayError(RELAY_CODES.invalid, `chain ${chain.chainId} is ${chain.status}; it cannot be paused or resumed`)
     }
@@ -2897,6 +2927,10 @@ export class RelayEngine {
     }
     if (chain.status === 'reviewing' || chain.status === 'awaiting_acceptance') {
       throw new RelayError(RELAY_CODES.invalid, `chain ${chain.chainId} is ${chain.status}; there is no work to hand off`)
+    }
+    // A finish is running its commands; the successor would land in a delivered chain.
+    if (this.finishingChains.has(chain.chainId)) {
+      throw new RelayError(RELAY_CODES.busy, `chain ${chain.chainId} is finishing; wait until it settles`)
     }
     const current = chain.currentSessionId === null ? undefined : this.ctx.get('agents')?.get(chain.currentSessionId)
     if (current === undefined) {
@@ -3250,6 +3284,9 @@ export class RelayEngine {
             commandsPending: this.config.pluginVerify && this.config.requireCommandApproval && document !== undefined
               ? this.commandsOf(chainId, document).commands.filter(entry => !entry.approved).length
               : 0,
+            // A finish owns the chain until its commands settle; the panel disables the actions
+            // the engine would refuse anyway.
+            finishing: this.finishingChains.has(chainId),
             sessionsDetail: chain.sessions.map(session => this.sessionSnapshot(session)),
             head: this.headState(chain),
           })
@@ -4560,6 +4597,9 @@ export class RelayEngine {
     }
     if (chain.currentSessionId !== agent.id) return
 
+    // A finish is running the verify commands; it owns the chain until it settles.
+    if (this.finishingChains.has(chain.chainId)) return
+
     // A half-finished handoff is reconciled before any policy decision.
     this.reconcilePendingHandoff(chain, store)
     const reconciled = store.readChain(chain.chainId)
@@ -4996,6 +5036,11 @@ export class RelayEngine {
   async handoff(chain, oldAgent, reason, storeOverride, options = {}) {
     if (this.busyChains.has(chain.chainId)) {
       throw new RelayError(RELAY_CODES.limit, `chain ${chain.chainId} is already handing off`)
+    }
+    // The finishing path holds the chain until its commands settle; a handoff would overwrite
+    // the review it is about to start.
+    if (this.finishingChains.has(chain.chainId)) {
+      throw new RelayError(RELAY_CODES.busy, `chain ${chain.chainId} is finishing; retry when it settles`)
     }
     const controller = this.ctx.get('sessionController')
     if (controller === undefined) {
@@ -5629,6 +5674,7 @@ export class RelayEngine {
     this.statusCache = null
     this.busyAgents.clear()
     this.busyChains.clear()
+    this.finishingChains.clear()
     this.stats.clear()
     this.members.clear()
     this.stores.clear()

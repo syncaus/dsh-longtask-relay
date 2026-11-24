@@ -97,8 +97,10 @@ window.__ModuleLoader__.load({
       handoffDone: '已完成的链不需要交接',
       handoffUnloaded: '当前会话未加载，先打开它再交接',
       handoffReviewing: '评审中或待验收的链不能交接',
+      handoffFinishing: '这条链正在结束：验证命令跑完才能交接',
       pauseDone: '已完成的链不能暂停',
       pauseAwaiting: '待验收的链只能确认完成或驳回',
+      pauseFinishing: '这条链正在结束：验证命令跑完才能暂停',
       cancel: '取消',
       none: '无',
       pressure: '上下文',
@@ -498,8 +500,10 @@ window.__ModuleLoader__.load({
       handoffDone: 'A finished chain needs no handoff',
       handoffUnloaded: 'The current session is not loaded; open it first',
       handoffReviewing: 'A chain under review or waiting for acceptance cannot be handed off',
+      handoffFinishing: 'This chain is finishing: wait for the verify commands to settle',
       pauseDone: 'A finished chain cannot be paused',
       pauseAwaiting: 'A delivered chain can only be confirmed or rejected',
+      pauseFinishing: 'This chain is finishing: wait for the verify commands to settle',
       cancel: 'Cancel',
       none: 'none',
       pressure: 'Context',
@@ -2802,7 +2806,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const underReview = chain.status === 'reviewing' || chain.status === 'awaiting_acceptance'
           const handoffBlocked = isDone
             ? t('handoffDone')
-            : isPlanning ? t('handoffPlanning') : underReview ? t('handoffReviewing') : (current === null || !live ? t('handoffUnloaded') : undefined)
+            : isPlanning
+              ? t('handoffPlanning')
+              : underReview ? t('handoffReviewing') : chain.finishing === true ? t('handoffFinishing') : (current === null || !live ? t('handoffUnloaded') : undefined)
           const sections = [
             { id: 'features', label: t('features'), count: `${done}/${total}` },
             { id: 'docs', label: t('docs') },
@@ -2831,10 +2837,14 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                   h('button', {
                     type: 'button',
                     className: 'relay-btn',
-                    disabled: busy || isDone || isPlanning || chain.status === 'awaiting_acceptance',
+                    disabled: busy || isDone || isPlanning || chain.status === 'awaiting_acceptance' || chain.finishing === true,
                     title: isDone
                       ? t('pauseDone')
-                      : isPlanning ? t('pausePlanning') : chain.status === 'awaiting_acceptance' ? t('pauseAwaiting') : undefined,
+                      : isPlanning
+                        ? t('pausePlanning')
+                        : chain.status === 'awaiting_acceptance'
+                          ? t('pauseAwaiting')
+                          : chain.finishing === true ? t('pauseFinishing') : undefined,
                     onClick: () => { void onAct('relay/setPaused', { chainId: chain.chainId, paused: !isPaused }) },
                   }, isPaused ? t('resume') : t('pause')),
                   h(ConfirmButton, {
