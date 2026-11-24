@@ -99,7 +99,7 @@ node test/hooks-render.mjs  # 界面组件能渲染，hook 顺序稳定
    ```sh
    git push --force-with-lease git@github.com:syncaus/<发布仓库>.git publish/relay:main
    ```
-   索引里的 `source.path`：三个插件都写空串 `""`，表示发布仓库根就是插件包。
+   索引里的 `source.path` **省略不写**，表示插件包就在发布仓库根。写成空串 `""` 会被索引校验拒绝（`path` 必须是非空的相对目录），整个索引都读不出来。
 
 索引格式见 DSH 仓库的 `docs/user/guide/plugin-market.zh.md`。
 
