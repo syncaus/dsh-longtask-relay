@@ -1,4 +1,4 @@
-# 长任务接力：门禁与交付核验（1.6.0）
+# 长任务接力：门禁与交付核验（1.6.0，1.6.1 修边界）
 
 状态：已实现（分支 `feat/relay-gates`），未在真实 DSH 里实跑，见第 6 节
 需求方原话：「任务创建后的门禁和约束，就是人工和模型都可以随便改也可以欺骗说完成了，然后代码交付后也需要做核验是否和设计一致，目前是模型说什么是什么。你看下还有哪些类似的问题，完善下。」
@@ -162,6 +162,17 @@
 
 ## 8. 残留（已登记，未修）
 
-- `market/index.json` 没有登记 1.6.0：登记需要发布提交的完整哈希，属于发版动作，等需求方确认。
+- `market/index.json` 没有登记 1.6.0 / 1.6.1：登记需要发布提交的完整哈希，属于发版动作，等需求方确认。
 
 已修（原残留）：篡改时暂停链上所有已加载会话的 goal（含集群 worker），暂停记录存进宿主侧封存，重载后裁决仍会恢复；回收站里的链在原位置被重建时不当作活链读出。
+
+### 1.6.1 修的边界（复审 1.6.0 实现时发现）
+
+- `engine.verifyFeatures` 的 `saveVerifyDrafts`：补 verify 与标 passes 同一次调用时先把新命令写进 features.json，否则面板列不出待批命令、checkpoint 永远 `verify_unapproved`；改一条已有命令改为明确拒绝（`verify_locked`），不再谎称「已记录」。
+- `chain-store.writeSealed`：写工作区后刷新封存失败时回滚到写入前内容并抛 `truth_io_failed`，避免插件自己的合法写入被下一次读判成篡改；`writeChain` 的建目录失败也包成 RelayError。
+- `engine.reclaimDelegation` / `acceptCoverage` / `acceptCoverageMany` / `recordBlocker`：`reviewing` / `awaiting_acceptance` 期间拒绝改列表、改覆盖签字、把链暂停。
+- `engine.finishVerified` 的 `finishingChains`：finish 跑命令期间拒绝交接（`handoffNow` / `handoff`）、暂停（`setPaused`）、第二个 finish，`evaluate` 也不再动这条链；面板从 status 的 `finishing` 标志禁用按钮。
+- `engine.freezeFeatures`：宿主指纹丢失时从封存重建（`restoreFingerprintFromSeal`），不再把所有已通过功能打回。
+- `engine.evaluate` / `completeChainGoal`：`reviewing` / `awaiting_acceptance` 补暂停链头 goal，`done` 补完成 goal（head 会话晚加载的路径）。
+- 提示词：wrap-up / handoff 不再引导模型手改已封存的真理源；worker 报告通知的 JSDoc 与实现对齐。
+- `relay_status` 紧凑投影补 `tamper`、`review`、`commandsPending`、`finishing`；面板在 `reviewing` / `awaiting_acceptance` / 正在结束时禁用会失败的按钮；`paused(review-failed)` 进「需要你处理」。
