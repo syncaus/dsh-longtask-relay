@@ -43,7 +43,7 @@
 - 新文件 `lib/verify.js`：在链的 cwd 里用 shell 执行命令，带超时（`verifyTimeoutSeconds`，默认 900），超时杀进程树；保留输出尾部 2000 字符、退出码、耗时、git HEAD。
 - `verify` 写 `statusCheck` / `verifyFast` / `verifyFull` 时解析成文档根上的命令。
 - `relay_checkpoint` 标 `passes:true` 时插件先跑该 feature 的命令，退出码 0 才翻转，验证记录写进 feature 的 `verification` 字段（受封存保护）；模型写的 evidence 只当备注。
-- 模型不能提交 `verification` 字段；`verify` 只能在原本为空时补一次，改已有命令要人在面板采纳。
+- 模型不能提交 `verification` 字段；`verify` 只能在原本为空时补一次（先落盘、再由人批准）；改已有命令工具会拒绝（`verify_locked`），只能手改 `features.json` 后在面板篡改卡里采纳。
 - **命令审批**：插件跑命令时不在会话沙箱里，模型写的命令等于沙箱外执行。所以每条命令首次执行前必须由人在面板批准（`requireCommandApproval`，默认开）；未批准时 checkpoint 返回 `verify_unapproved` 并在面板列出待批命令。批准按「命令 + 用途」记：人看到的是「这条命令验证 F001、F002」，之后新增的 F003 复用同一条命令要重新批准，免得「F003 的验证其实只是 lint」被藏住。
 - finish 时把所有 feature 的命令（去重）和 `verifyFull` 在当前 HEAD 重跑；某 feature 的命令失败 → 该 feature 重开（审计 `feature.regressed`）并拒绝 finish。
 - worker 的 pass 走同一路径，不再依赖链头自觉重跑。
@@ -162,7 +162,7 @@
 
 ## 8. 残留（已登记，未修）
 
-- `market/index.json` 没有登记 1.6.0 / 1.6.1：登记需要发布提交的完整哈希，属于发版动作，等需求方确认。
+- `market/index.json` 已登记 1.6.1（提交 `4910fc8`，发布仓库 `syncaus/dsh-longtask-relay`）。拆仓时历史版本条目被移除：那些旧提交不在发布仓库的历史里，装了也取不到。
 
 已修（原残留）：篡改时暂停链上所有已加载会话的 goal（含集群 worker），暂停记录存进宿主侧封存，重载后裁决仍会恢复；回收站里的链在原位置被重建时不当作活链读出。
 

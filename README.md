@@ -1,4 +1,4 @@
-# dsh-plugins
+# syncaus 的 DSH 插件
 
 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）用的三个插件，以及一份可以直接加进 DSH 的插件索引。
 
@@ -36,9 +36,9 @@
 克隆本仓库后，把对应插件的 `package` 目录用 `file:` 加进 DSH 的 profile（路径用绝对路径）：
 
 ```sh
-dsh plugin --profile <profile 名> add file:D:/path/to/dsh-plugins/dsh-longtask-relay-1.6.1/package
-dsh plugin --profile <profile 名> add file:D:/path/to/dsh-plugins/local-kadda-rules-2.0.0/package
-dsh plugin --profile <profile 名> add file:D:/path/to/dsh-plugins/dsh-mcp-playwright-1.0.0/package
+dsh plugin --profile <profile 名> add file:D:/path/to/dsh-longtask-relay/dsh-longtask-relay-1.6.1/package
+dsh plugin --profile <profile 名> add file:D:/path/to/dsh-longtask-relay/local-kadda-rules-2.0.0/package
+dsh plugin --profile <profile 名> add file:D:/path/to/dsh-longtask-relay/dsh-mcp-playwright-1.0.0/package
 ```
 
 装进 profile 的是一份实体副本：改了源码之后要重新安装才生效。
