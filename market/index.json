@@ -30,7 +30,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/syncaus/local-kadda-rules",
-            "commit": "PENDING_SPLIT_SHA",
+            "commit": "f2c7942c69657e36d700d561a27fdb860c8a7b3f",
             "path": ""
           },
           "engines": {
@@ -63,7 +63,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/syncaus/dsh-mcp-playwright",
-            "commit": "PENDING_SPLIT_SHA",
+            "commit": "56132acdf123f1520e73280bfa7de87f4fb0568e",
             "path": ""
           },
           "engines": {
@@ -97,7 +97,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/syncaus/dsh-longtask-relay",
-            "commit": "PENDING_SPLIT_SHA",
+            "commit": "4910fc8b2fa1d7b419be9175466b6c5aa0a59532",
             "path": ""
           },
           "engines": {
