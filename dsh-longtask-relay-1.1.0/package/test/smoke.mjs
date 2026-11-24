@@ -5480,6 +5480,44 @@ check('a chain from before the host audit keeps its older workspace history', ()
   engine.dispose()
 })
 
+check('tampering pauses every live goal of the chain, and a decision after a reload resumes them', () => {
+  const world = sealedWorld()
+  const goals = world.engine.ctx.get('goals')
+  const states = new Map([['session-old', 'active'], ['session-new', 'active']])
+  goals.get = agent => (states.has(agent.id) ? { id: `goal-${agent.id}`, revision: 1, phase: states.get(agent.id), activation: 'armed' } : undefined)
+  goals.pause = (agent) => { states.set(agent.id, 'paused') }
+  goals.resume = (agent) => { states.set(agent.id, 'active') }
+  // A live worker beside the head.
+  world.local.update(world.chain.chainId, (record) => {
+    record.sessions.push({ sessionId: 'session-new', role: 'worker', index: 1, joinedAt: new Date().toISOString(), parentSessionId: 'session-old' })
+  })
+  handEditFeatures(world, (document) => { document.features[0].passes = true })
+  world.local.readFeatures(world.chain.chainId)
+  assert.equal(states.get('session-old'), 'paused', 'the head goal must stop')
+  assert.equal(states.get('session-new'), 'paused', 'a worker goal must stop too')
+  const home = world.engine.seals.dir.replace(/[\\/]longtask-relay[\\/]seals$/, '')
+  const reloaded = new RelayEngine(world.engine.ctx, world.engine.config, {
+    chainIndex: new ChainIndex(home), trashIndex: new ChainTrashIndex(home), fingerprints: new ChainFingerprints(home), seals: new SealStore(home),
+  })
+  reloaded.storeFor(world.local.truthDir)
+  reloaded.resolveTamper({ chainId: world.chain.chainId, action: 'restore' })
+  assert.equal(states.get('session-old'), 'active', 'the head goal resumes after the decision, even across a reload')
+  assert.equal(states.get('session-new'), 'active')
+  reloaded.dispose()
+})
+
+check('a chain rebuilt in the place of a deleted one is not read as live', () => {
+  const world = sealedWorld()
+  world.engine.setPaused({ chainId: world.chain.chainId, paused: true })
+  world.engine.deleteChain(world.chain.chainId)
+  mkdirSync(world.paths.dir, { recursive: true })
+  const forged = { ...JSON.parse(readFileSync(join(world.local.trashPaths(world.chain.chainId).dir, 'relay.json'), 'utf8')), status: 'awaiting_acceptance' }
+  writeFileSync(world.paths.chain, JSON.stringify(forged))
+  world.local.addToIndex(world.chain.chainId)
+  assert.equal(world.local.readChain(world.chain.chainId), undefined)
+  assert.equal(world.engine.status().some(item => item.chainId === world.chain.chainId), false)
+})
+
 rmSync(workspace, { recursive: true, force: true })
 
 console.log(`\n${checks - failures.length}/${checks} checks passed`)
