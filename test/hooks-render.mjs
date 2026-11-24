@@ -725,6 +725,10 @@ for (const key of ['tamperTitle', 'tamperSealed', 'tamperDisk', 'tamperRestore',
   assert.ok(gateText.some(text => text.includes(key)), `the gate panel must show ${key}`)
 }
 assert.ok(gateText.some(text => text.includes('verifiedByPlugin')), 'a feature verified by the plugin must say so')
+// The command row is a chip plus the command, not the three-column feature grid: borrowing that
+// grid squashed the chip into its 16px cell and wrapped the command one word per line.
+const commandRow = nodesOf(gateTree).find(node => node.type === 'li' && collectText(node).includes('npm test'))
+assert.equal(commandRow.props.className, 'relay-command', 'a verify command row must not use the feature grid')
 assert.ok(!gateText.includes('finishChain'), 'a delivered chain must not offer finishing again')
 /**
  * Fire a two-step confirm button's confirmation by its label. This stand-in keeps no
