@@ -62,7 +62,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/syncaus/dsh-mcp-playwright",
-            "commit": "17fbc1f006a479438e9c3d6a1dc135e10c3726ce"
+            "commit": "4e35de7a129ad44f5fa21462abf66037a12eab13"
           },
           "engines": {
             "dsh": ">=0.2.2-rc.3"
@@ -95,7 +95,7 @@
           "source": {
             "type": "git",
             "url": "https://github.com/syncaus/dsh-longtask-relay",
-            "commit": "a67b9440a59ba9aae1776272364311393d9ccb72"
+            "commit": "99f4fab71bd5a6dbe53f0cbf31422a6b0e7957db"
           },
           "engines": {
             "dsh": ">=0.2.2-rc.3"
