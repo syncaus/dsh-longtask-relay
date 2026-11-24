@@ -133,7 +133,7 @@ function createFakeReact() {
  * components plus the RPC stub.
  * @returns {{ registrations: object[], calls: object[] }}
  */
-function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null, onOpenSession = null, planning = false, preview = null, launchResults = [], clusterChildren = false, mainline = false, deleted = null, deletedSessionView = null, runningSession = false, pausedChain = false } = {}) {
+function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null, onOpenSession = null, planning = false, preview = null, launchResults = [], clusterChildren = false, mainline = false, deleted = null, deletedSessionView = null, runningSession = false, pausedChain = false, gates = null } = {}) {
   const react = createFakeReact()
   const registrations = []
   const calls = []
@@ -208,6 +208,12 @@ function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null,
     truthDir: 'D:/demo/.relay/chain-1',
     sessions: [{ sessionId: 'session-1', role: 'initializer', running: runningSession, loaded: true, pressureRatio: 0.2, peakRatio: 0.4 }],
     handoff: null,
+  }
+  if (gates !== null) {
+    // The gate cards read the chain summary and the detail; both carry the same state.
+    panelDetail.chain = { ...chainSummary, ...gates.chain }
+    Object.assign(panelDetail, gates.detail)
+    panelChains.chains[0] = { ...panelChains.chains[0], blocker: null, lastError: null, ...gates.chain, ...(gates.list ?? {}) }
   }
   const planningDetail = {
     chain: planningChain,
@@ -687,4 +693,60 @@ const runningDelete = nodesOf(runningTree).find(node => node.type === 'button' &
 assert.equal(runningDelete.props.disabled, true, 'a running chain must not be deletable')
 assert.equal(runningDelete.props.title, 'deleteRunning', 'the disabled delete must say why')
 
-console.log('session tab render check passed: hook order holds, a read error clears after recovery, the launch dock starts the plan on record, deleted chains keep their tombstone, and the panel shows the peak ratio')
+// The gates: a tampered truth source, commands to approve, and a delivery waiting for the human.
+const gateBoot = boot({
+  gates: {
+    chain: {
+      status: 'awaiting_acceptance',
+      featuresDone: 2,
+      tamper: { detectedAt: '2026-11-24T00:00:00.000Z', files: ['features.json'] },
+      review: { round: 1, outcome: 'passed', summary: 'built as designed', counts: { match: 2, mismatch: 0, missing: 0, uncovered: 0 }, sessionId: 'session-review' },
+    },
+    list: { commandsPending: 1 },
+    detail: {
+      tamperDetail: { detectedAt: '2026-11-24T00:00:00.000Z', files: [{ file: 'features.json', sealed: '{"passes": false}', disk: '{"passes": true}' }] },
+      commands: [
+        { command: 'npm test', features: ['F001'], full: false, approved: true },
+        { command: 'node e2e.mjs', features: ['F002'], full: true, approved: false },
+      ],
+      missingVerify: [],
+      features: [{ id: 'F001', title: 'first', passes: true, evidence: null, verify: 'npm test', coverage: 'full', acceptedBy: null, verification: { command: 'npm test', exitCode: 0, at: '2026-11-24T00:00:00.000Z', head: 'abcdef1234' } }],
+      sessions: [
+        { sessionId: 'session-1', role: 'initializer', running: false, loaded: true, pressureRatio: 0.2, peakRatio: 0.4 },
+        { sessionId: 'session-review', role: 'reviewer', running: false, loaded: true, pressureRatio: 0.1, peakRatio: 0.1, retiredAt: '2026-11-24T00:00:00.000Z' },
+      ],
+    },
+  },
+})
+const gatePanel = gateBoot.registrations.find(entry => entry.options.name === 'main')
+let gateTree = await gateBoot.react.settle(gatePanel.component, {})
+const gateText = collectText(gateTree)
+for (const key of ['tamperTitle', 'tamperSealed', 'tamperDisk', 'tamperRestore', 'tamperAdopt', 'commandsTitle', 'commandPending', 'commandApproved', 'acceptTitle', 'reviewPassed', 'acceptChain', 'rejectChain', 'attnTamper', 'attnAccept', 'attnCommands', 'status_awaiting_acceptance']) {
+  assert.ok(gateText.some(text => text.includes(key)), `the gate panel must show ${key}`)
+}
+assert.ok(gateText.some(text => text.includes('verifiedByPlugin')), 'a feature verified by the plugin must say so')
+assert.ok(!gateText.includes('finishChain'), 'a delivered chain must not offer finishing again')
+/**
+ * Fire a two-step confirm button's confirmation by its label. This stand-in keeps no
+ * state for nested components, so the arming click is not replayed; what is checked
+ * is that the button is a confirm button and that confirming reaches the Host.
+ */
+const confirmAction = async (labelKey, endpoint) => {
+  const button = nodesOf(gateTree).find(node => typeof node.type === 'function' && node.type.name === 'ConfirmButton'
+    && collectText(node.props.children).some(text => text.includes(labelKey)))
+  assert.ok(button, `${labelKey} must be a confirm button`)
+  assert.notEqual(button.props.disabled, true, `${labelKey} must be enabled`)
+  button.props.onConfirm()
+  await new Promise(resolve => setImmediate(resolve))
+  gateTree = await gateBoot.react.settle(gatePanel.component, {})
+  assert.ok(gateBoot.calls.includes(endpoint), `${labelKey} must call ${endpoint}: ${gateBoot.calls.join(',')}`)
+}
+await confirmAction('tamperRestore', 'relay/resolveTamper')
+await confirmAction('commandsApprove', 'relay/approveCommands')
+await confirmAction('acceptChain', 'relay/acceptChain')
+const adoptButton = nodesOf(gateTree).find(node => node.type === 'button' && collectText(node).includes('tamperAdopt'))
+assert.equal(adoptButton.props.disabled, true, 'adopting needs a reason first')
+const rejectButton = nodesOf(gateTree).find(node => node.type === 'button' && collectText(node).includes('rejectChain'))
+assert.equal(rejectButton.props.disabled, true, 'rejecting needs a reason first')
+
+console.log('session tab render check passed: hook order holds, a read error clears after recovery, the launch dock starts the plan on record, deleted chains keep their tombstone, the panel shows the peak ratio, and the gate cards render and act')
