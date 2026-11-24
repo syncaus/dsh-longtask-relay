@@ -1,6 +1,6 @@
 # 长任务接力：门禁与交付核验（1.6.0）
 
-状态：实施中
+状态：已实现（分支 `feat/relay-gates`），未在真实 DSH 里实跑，见第 6 节
 需求方原话：「任务创建后的门禁和约束，就是人工和模型都可以随便改也可以欺骗说完成了，然后代码交付后也需要做核验是否和设计一致，目前是模型说什么是什么。你看下还有哪些类似的问题，完善下。」
 已拍板（2026-11-24）：篡改 → 拒绝 + 人工裁决；设计核验 → 独立评审会话；完成 → 必须人工确认。之后的设计选择按推荐做，记在文末裁定台账。
 
@@ -44,7 +44,7 @@
 - `verify` 写 `statusCheck` / `verifyFast` / `verifyFull` 时解析成文档根上的命令。
 - `relay_checkpoint` 标 `passes:true` 时插件先跑该 feature 的命令，退出码 0 才翻转，验证记录写进 feature 的 `verification` 字段（受封存保护）；模型写的 evidence 只当备注。
 - 模型不能提交 `verification` 字段；`verify` 只能在原本为空时补一次，改已有命令要人在面板采纳。
-- **命令审批**：插件跑命令时不在会话沙箱里，模型写的命令等于沙箱外执行。所以每条命令首次执行前必须由人在面板批准（`requireCommandApproval`，默认开）；未批准时 checkpoint 返回 `verify_unapproved` 并在面板列出待批命令。
+- **命令审批**：插件跑命令时不在会话沙箱里，模型写的命令等于沙箱外执行。所以每条命令首次执行前必须由人在面板批准（`requireCommandApproval`，默认开）；未批准时 checkpoint 返回 `verify_unapproved` 并在面板列出待批命令。批准按「命令 + 用途」记：人看到的是「这条命令验证 F001、F002」，之后新增的 F003 复用同一条命令要重新批准，免得「F003 的验证其实只是 lint」被藏住。
 - finish 时把所有 feature 的命令（去重）和 `verifyFull` 在当前 HEAD 重跑；某 feature 的命令失败 → 该 feature 重开（审计 `feature.regressed`）并拒绝 finish。
 - worker 的 pass 走同一路径，不再依赖链头自觉重跑。
 
@@ -56,7 +56,7 @@
 - 结果：
   - 全部 match 且无未覆盖需求 → `awaiting_acceptance`；
   - 否则 → 对应 feature 重开（发现写进 notes），未覆盖需求写进 PROGRESS，链回 `active`，通知链头；
-  - 评审轮数超过 `maxReviewRounds`（默认 3）→ external 阻塞，等人决定。
+  - 提交并判为不通过的评审累计达到 `maxReviewRounds`（默认 3）→ 不再开新评审，直接进 `awaiting_acceptance`，面板写明「连续 N 轮未通过」，由人决定。被取消、没启动成功的评审不计数。
 - 评审会话提交后退役；所有写工具对 reviewer 拒绝（`reviewer_read_only`）。
 - Host 不能建会话时，跳过评审直接进 `awaiting_acceptance`，面板标「未经独立评审」。
 
@@ -73,12 +73,14 @@
 | active / paused | awaiting_acceptance | finish | 同上，评审关闭或不可用 |
 | reviewing | awaiting_acceptance | relay_review | 全部 match |
 | reviewing | active | relay_review | 有 mismatch/missing/未覆盖 |
-| reviewing | paused（blocker） | relay_review | 超过评审轮数 |
-| reviewing | reviewing | 面板「重新评审」 | 评审会话卡住 |
+| reviewing | paused（manual） | 面板暂停（只有人） | 取消这轮评审，评审会话退役，不计轮数 |
+| reviewing | paused（review-failed） | startReview | 评审会话建不起来或投递失败 |
+| reviewing / paused（review-failed） | reviewing | 面板「重新评审」 | 评审会话卡住或没起来 |
+| active / paused | awaiting_acceptance | finish | 不通过的评审已达 `maxReviewRounds` |
 | awaiting_acceptance | done | 面板「确认完成」 | — |
 | awaiting_acceptance | active | 面板「驳回」 | 理由非空 |
 
-`reviewing` / `awaiting_acceptance` 下：checkpoint、交接、派发、暂停/恢复都拒绝。
+`reviewing` / `awaiting_acceptance` 下：checkpoint、交接、派发都拒绝；`reviewing` 只有人能暂停（等于取消评审），`awaiting_acceptance` 不能暂停或恢复，只能确认或驳回。
 
 ## 3. 闭环链
 
@@ -105,7 +107,9 @@
 
 ## 4. 已知限制
 
-- 会话是完全访问权限时，它也能改 `~/.dsh` 下的封存文件；封存只防工作区内的改动，防完全访问只能靠沙箱。
+- **插件验证运行本身是沙箱外执行**（待需求方拍板，见第 7 节）：人批准的是命令字符串（如 `npm test`），不是它实际跑的代码。模型可以在沙箱里改测试文件或 `package.json` 的脚本，让被批准的命令在 Host 进程里去改 `~/.dsh` 下的封存、宿主审计或 profile 配置。所以封存挡得住「直接改真理源文件」，挡不住「借验证命令执行任意代码」。
+- 会话是完全访问权限时，它也能直接改 `~/.dsh` 下的封存文件；防完全访问只能靠沙箱。
+- 在工作区里 `git checkout` / `stash` / `reset` 到旧提交，或仓库级格式化（`prettier --write .`）改到 `.relay/*/PLAN.md`，都会被当成篡改，需要人裁决。这是有意的取舍，见裁定台账。
 - 评审会话的结论仍是模型判断，独立上下文只是减少自我放水；最终由人工终验兜底。
 - 计划模式是否真的禁止评审会话写文件取决于 DSH 的计划模式实现；没有计划模式服务时只靠提示词。
 - 不可用命令验证的 feature（纯视觉、人工评审）需要把 `pluginVerify` 关掉或写一条能跑的检查脚本。
@@ -125,7 +129,40 @@
 - Host 不能建会话时跳过评审进入待验收并明确标注 — 不让链永远无法结束 — 这类 Host 上设计核验只剩人工。
 - 宿主侧审计为准、工作区 audit.jsonl 继续写 — 工作区那份给 git 和人看，宿主侧那份防删改 — 两份内容可能不同，以宿主侧为准。
 - 不改 `coverage` 缺省为 full 的规则 — 有封存和插件验证后，coverage 只影响要不要人签字，不再是能否完成的唯一依据 — 初始化会话漏写 coverage 时会少一次人工签字。
+- 冻结时打回所有不是本次 checkpoint 亲自跑出的 `verification`，并清掉所有 `acceptedBy` — 冻结前文件可以随便写，里面的验证记录和签字都可能是伪造的 — 冻结前在面板点过的「接受」要重新点一次。
+- 只有人能取消评审，取消和没启动成功的评审不计入轮数 — 否则链头可以靠「取消 → 重新 finish」把轮数耗完、绕过评审 — 评审会话真卡住时人得手动处理。
+- 封存的 truthDir 比对在 Windows 上不区分大小写；原位置还在时，其他目录里的同 id 副本一律不认 — 堵住「换个写法 / 复制一份目录」绕过比对 — 同一工作区用两种写法的路径打开时只认封存时那一个。
+- 冻结时 PLAN.md / SPEC.md 不存在也封存为「不存在」 — 单任务链默认没有 SPEC，事后补写一份等于改设计 — 初始化会话冻结后再想补 SPEC 要人采纳。
+- 评审提示词把 decisions.md 当作实现方的记录而不是设计，记在里面的偏差照样判 mismatch — decisions.md 不封存，实现方可以事后补理由 — 有些有意的偏差会多一轮人工判断。
+- 验证命令以退出事件为准，输出管道最多再等 1 秒，并设 `超时 + 10 秒` 的兜底 — 测试拉起的后台进程会一直占着输出管道，原来会把通过判成超时，甚至让这条链的验证队列永远卡住 — 退出后 1 秒内没写完的输出尾部会丢。
 
 ## 6. 实跑记录
 
-（交付时填写）
+2026-11-24，提交 `eb46a7b`，Windows 11 本机，Node 24.14.1，执行者：实现方（不是独立代理）。
+
+| 环 | 状态 | 说明 |
+|---|---|---|
+| 1 入口（工具 / 面板接口） | 替身实跑 | `test/smoke.mjs` 通过真实的 `registerTools` 和 `RelayRemote` 调用；DSH 会话、建会话服务、goal 服务是替身 |
+| 2 门禁 | 替身实跑 | 封存比对用真实文件系统；验证命令是真实的子进程（`node -e ...`），含超时、孤儿进程 |
+| 3 落盘 | 替身实跑 | 真实写 `relay.json` / `features.json` / 封存 / 宿主审计，宿主目录指向临时目录 |
+| 4 评审 | 替身实跑 | 评审会话由替身 `sessionController` 建；提示词内容、`relay_review` 的判定和状态迁移是真实代码 |
+| 5 用户可见（面板） | 仅单测 | `test/hooks-render.mjs` 用假 React 渲染卡片并检查按钮接线；没在真实 DSH 面板里看过 |
+
+现跑命令（插件目录下）：`node test/smoke.mjs && node test/hooks-render.mjs && node test/client-boot.mjs`。
+
+未做：在真实 DSH 里安装插件，让真实模型会话跑一条链（建链 → 改文件被拦 → 插件验证 → 评审 → 面板确认）。需要改 profile 并消耗模型调用，等需求方授权。
+
+## 7. 待需求方决定
+
+验证命令在 Host 进程里执行、不受会话沙箱约束（第 4 节第 1 条）。可选：
+
+1. 接受现状并写进文档：门禁防的是「改文件 / 自报完成」，不防「借测试执行任意代码」。成本为零。
+2. 改为让验证命令在会话自己的沙箱里执行（通过 DSH 的作业或 shell 服务），插件只读取退出码。最彻底，但要先查 DSH 有没有可供插件调用、能拿到退出码的沙箱执行接口；本仓库里没有 DSH 源码，没法确认。
+3. 折中：验证子进程去掉 `DSH_HOME` 等环境变量，封存文件改成只追加的哈希链并加宿主侧签名。能提高门槛，但同一用户身份下的代码仍然能改任何文件，挡不住有意的攻击。
+
+## 8. 残留（已登记，未修）
+
+- `handleTamper` 只暂停链头 goal，集群 worker 的 goal 继续推进，每次 checkpoint 都被 `truth_tampered` 拒掉，白耗轮次。
+- `tamperPausedGoals` 只在内存里，插件重载后再裁决，链头 goal 不会自动恢复，要人在目标条里手动恢复。
+- 链被删进回收站后（`trashed:true`）不做封存比对；模型在原位置重建 `.relay/<id>` 并补回 index.json，伪造的链会被当作活链读出。前提是人已经删过这条链。
+- `market/index.json` 没有登记 1.6.0：登记需要发布提交的完整哈希，属于发版动作，等需求方确认。
