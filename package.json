@@ -6,8 +6,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/syncaus/dsh-plugins.git",
-    "directory": "dsh-longtask-relay-1.1.0/package"
+    "url": "git+https://github.com/syncaus/dsh-longtask-relay.git"
   },
   "keywords": [
     "dsh",
