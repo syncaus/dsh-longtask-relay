@@ -5655,6 +5655,9 @@ check('the status projection lists the commands waiting for approval', () => {
   assert.equal(read().chains[0].commandsPending, 1)
   world.remote.approveCommands(world.chain.chainId, [FLAG_CMD])
   assert.equal(read().chains[0].commandsPending, 0)
+  // A chain that is past finishing has no approval left to take, so it must not linger in the list.
+  world.local.update(world.chain.chainId, (record) => { record.status = 'done' })
+  assert.equal(read().chains[0].commandsPending, 0)
 })
 
 check('a delivered chain refuses coverage changes through the batch path too', () => {
