@@ -5606,6 +5606,110 @@ await checkAsync('a chain finished while its head was away completes its goal on
   assert.equal(states.get('session-old'), 'complete')
 })
 
+await checkAsync('a worker cannot park a verify command on a feature it does not own', async () => {
+  const world = gateWorld()
+  world.engine.checkpoint({ agent: world.oldAgent, addFeatures: [{ id: 'F003', title: 'third' }], reason: 'found while testing' })
+  const workerAgent = {
+    id: 'session-worker',
+    session: { id: 'session-worker', header: { cwd: world.chain.cwd }, events: [] },
+    status: 'idle',
+    inbox: { nextTurn: [], nextStep: [] },
+    followup() {},
+    inject() {},
+  }
+  world.local.update(world.chain.chainId, (record) => {
+    record.sessions.push({ sessionId: 'session-worker', role: 'worker', index: 1, joinedAt: new Date().toISOString(), parentSessionId: 'session-old' })
+  })
+  const agents = world.engine.ctx.get('agents')
+  const get = agents.get
+  agents.get = id => (id === 'session-worker' ? workerAgent : get(id))
+  world.engine.members.set('session-worker', { chainId: world.chain.chainId, truthDir: world.local.truthDir })
+  try {
+    const result = await world.engine.verifyFeatures({
+      agent: workerAgent,
+      ids: ['F003'],
+      overrides: new Map([['F003', 'node -e "process.exit(0)"']]),
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.items[0].code, RELAY_CODES.workerReadOnly)
+    assert.equal(world.feature('F003').verify, '', 'a worker must not write a command onto another feature')
+  } finally {
+    agents.get = get
+    world.engine.members.delete('session-worker')
+  }
+})
+
+await checkAsync('a checkpoint cannot replace an existing verify command', async () => {
+  const world = gateWorld()
+  const result = await world.tool('relay_checkpoint').execute({ features: [{ id: 'F001', passes: true, verify: 'node -e "process.exit(0)"' }] }, world.head)
+  assert.equal(result.code, 'verify_locked')
+  assert.equal(world.feature('F001').verify, FLAG_CMD, 'the recorded command stays')
+  assert.equal(world.feature('F001').passes, false)
+})
+
+check('the status projection lists the commands waiting for approval', () => {
+  const world = gateWorld()
+  const registered = new Map()
+  registerTools({ tools: { register: definition => registered.set(definition.name, definition) } }, world.engine)
+  const read = () => registered.get('relay_status').execute({ chainId: world.chain.chainId }, {})
+  assert.equal(read().chains[0].commandsPending, 1)
+  world.remote.approveCommands(world.chain.chainId, [FLAG_CMD])
+  assert.equal(read().chains[0].commandsPending, 0)
+})
+
+check('a delivered chain refuses coverage changes through the batch path too', () => {
+  const world = sealedWorld()
+  world.local.update(world.chain.chainId, (record) => { record.status = 'awaiting_acceptance' })
+  assert.throws(
+    () => world.engine.acceptCoverageMany({ chainId: world.chain.chainId }),
+    error => error.code === 'chain_under_review',
+  )
+})
+
+await checkAsync('a handoff and a pause are refused while a finish runs its commands', async () => {
+  const world = gateWorld()
+  await passAll(world)
+  world.engine.finishingChains.add(world.chain.chainId)
+  try {
+    await assert.rejects(
+      () => world.engine.handoffNow({ chainId: world.chain.chainId }),
+      error => error instanceof RelayError && error.code === RELAY_CODES.busy,
+    )
+    assert.throws(
+      () => world.engine.setPaused({ chainId: world.chain.chainId, paused: true }),
+      error => error instanceof RelayError && error.code === RELAY_CODES.busy,
+    )
+  } finally {
+    world.engine.finishingChains.delete(world.chain.chainId)
+  }
+})
+
+await checkAsync('a second finisher cannot run the commands at once', async () => {
+  const world = gateWorld()
+  await passAll(world)
+  world.engine.finishingChains.add(world.chain.chainId)
+  try {
+    await assert.rejects(
+      () => world.engine.finishVerified({ agent: world.oldAgent, evidence: 'all done' }),
+      error => error instanceof RelayError && error.code === RELAY_CODES.busy,
+    )
+  } finally {
+    world.engine.finishingChains.delete(world.chain.chainId)
+  }
+})
+
+await checkAsync('an idle head does not hand off while a finish runs its commands', async () => {
+  const world = gateWorld()
+  world.setRatio(0.9)
+  world.engine.finishingChains.add(world.chain.chainId)
+  try {
+    await world.engine.evaluate(world.oldAgent)
+  } finally {
+    world.engine.finishingChains.delete(world.chain.chainId)
+  }
+  assert.equal(world.calls.length, 0, 'a finish owns the chain until it settles')
+})
+
 check('a chain from before the host audit keeps its older workspace history', () => {
   const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-legacy-audit-'))
   const plain = ChainStore.forCwd(workspaceDir)
