@@ -5021,6 +5021,16 @@ check('deleting and restoring a chain is not tampering', () => {
   assert.equal(world.engine.guard.tamperOf(world.chain.chainId), null)
 })
 
+check('a tampered chain can still be deleted, and comes back tampered', () => {
+  const world = sealedWorld()
+  handEditFeatures(world, (document) => { document.features[0].passes = true })
+  world.local.readFeatures(world.chain.chainId)
+  assert.throws(() => world.engine.setPaused({ chainId: world.chain.chainId, paused: true }), error => error.code === RELAY_CODES.tampered)
+  world.engine.deleteChain(world.chain.chainId)
+  world.engine.restoreChain(world.chain.chainId)
+  assert.notEqual(world.engine.guard.tamperOf(world.chain.chainId), null, 'a restore must not launder the change')
+})
+
 await checkAsync('a tampered chain is not supervised', async () => {
   const world = sealedWorld()
   handEditFeatures(world, (document) => { document.features[0].passes = true })

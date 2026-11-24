@@ -231,6 +231,48 @@ window.__ModuleLoader__.load({
       attnApproval: '等待审批',
       attnQuestion: '等待回答',
       attnError: '出错',
+      confirm: '确认',
+      status_reviewing: '评审中',
+      status_awaiting_acceptance: '待验收',
+      paused_review_failed: '评审会话未能启动',
+      tamperTitle: '真理源在插件之外被改动',
+      tamperNote: '下列封存文件被直接改过（模型的文件工具或手工编辑）。这条链已停住，你裁决之前任何写入都会被拒绝。恢复：把封存版本写回磁盘；采纳：把磁盘上的内容当作新的封存版本，需要写明理由。',
+      tamperSealed: '封存版本',
+      tamperDisk: '磁盘上的版本',
+      tamperMissing: '（文件已被删除）',
+      tamperRestore: '恢复封存版本',
+      tamperAdopt: '采纳磁盘改动',
+      tamperReason: '为什么采纳这些改动（必填，写进审计）',
+      tamperChip: '真理源被改动',
+      attnTamper: '真理源被改动',
+      commandsTitle: '验证命令',
+      commandsNote: '插件会在会话沙箱之外直接执行这些命令，用退出码判定功能是否通过。批准前逐条看清命令内容。',
+      commandsApprove: '批准 {count} 条待批命令',
+      commandsMissing: '没有验证命令的功能',
+      commandApproved: '已批准',
+      commandPending: '待批准',
+      attnCommands: '验证命令待批准',
+      reviewTitle: '独立评审',
+      reviewRunning: '评审会话正在对照 SPEC.md / PLAN.md 核验交付，结论出来前链不会推进。',
+      reviewRestart: '重新评审',
+      reviewRound: '第 {n} 轮',
+      reviewPassed: '独立评审认为交付与设计一致。',
+      reviewFailedNote: '上一轮评审没有通过，不一致的功能已重开，链头会话会继续修。',
+      reviewSkippedUnavailable: '未经独立评审：这个 Host 不能新建会话。',
+      reviewSkippedDisabled: '独立评审已在配置里关闭，没有做设计核验。',
+      reviewLimit: '评审已连续 {n} 轮未通过，需要你决定确认还是驳回。',
+      acceptTitle: '待你验收',
+      acceptChain: '确认完成',
+      rejectChain: '驳回',
+      rejectReason: '驳回理由（会发给链头会话）',
+      attnAccept: '待你验收',
+      attnReview: '评审会话未能启动',
+      verdict_match: '一致',
+      verdict_mismatch: '不一致',
+      verdict_missing: '缺失',
+      verdict_uncovered: '未覆盖需求',
+      verifiedByPlugin: '插件验证',
+      verifyFailed: '验证未通过',
       questions: '个问题',
       decisionShort: '待决策',
       goalTitle: '当前目标',
@@ -588,6 +630,48 @@ window.__ModuleLoader__.load({
       attnApproval: 'Approval',
       attnQuestion: 'Question',
       attnError: 'Error',
+      confirm: 'Confirm',
+      status_reviewing: 'In review',
+      status_awaiting_acceptance: 'Awaiting acceptance',
+      paused_review_failed: 'Review session failed to start',
+      tamperTitle: 'Truth source changed outside the plugin',
+      tamperNote: 'These sealed files were edited directly (a model file tool or a hand edit). The chain stands still and every write is refused until you decide. Restore writes the sealed copy back; adopt makes the file on disk the new sealed copy and needs a reason.',
+      tamperSealed: 'Sealed copy',
+      tamperDisk: 'On disk',
+      tamperMissing: '(file deleted)',
+      tamperRestore: 'Restore sealed copy',
+      tamperAdopt: 'Adopt the change',
+      tamperReason: 'Why the change is accepted (required, audited)',
+      tamperChip: 'Truth source changed',
+      attnTamper: 'Truth source changed',
+      commandsTitle: 'Verify commands',
+      commandsNote: 'The plugin runs these commands outside the session sandbox and decides a pass by the exit code. Read each one before approving.',
+      commandsApprove: 'Approve {count} pending',
+      commandsMissing: 'Features without a verify command',
+      commandApproved: 'Approved',
+      commandPending: 'Pending',
+      attnCommands: 'Verify commands to approve',
+      reviewTitle: 'Independent review',
+      reviewRunning: 'A review session is checking the delivery against SPEC.md / PLAN.md; the chain waits for its verdict.',
+      reviewRestart: 'Restart review',
+      reviewRound: 'Round {n}',
+      reviewPassed: 'The independent review found the delivery matches the design.',
+      reviewFailedNote: 'The last review did not pass; mismatched features were reopened and the head keeps working.',
+      reviewSkippedUnavailable: 'Not independently reviewed: this Host cannot open sessions.',
+      reviewSkippedDisabled: 'Independent review is turned off in the settings; the design was not checked.',
+      reviewLimit: 'The review failed {n} rounds in a row; confirm or reject it.',
+      acceptTitle: 'Waiting for your acceptance',
+      acceptChain: 'Confirm done',
+      rejectChain: 'Reject',
+      rejectReason: 'Why (sent to the chain head)',
+      attnAccept: 'Waiting for your acceptance',
+      attnReview: 'Review session failed to start',
+      verdict_match: 'Match',
+      verdict_mismatch: 'Mismatch',
+      verdict_missing: 'Missing',
+      verdict_uncovered: 'Uncovered',
+      verifiedByPlugin: 'Verified by plugin',
+      verifyFailed: 'Verify failed',
       questions: 'questions',
       decisionShort: 'Decide',
       goalTitle: 'Goal',
@@ -885,6 +969,17 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-chip { display: inline-flex; align-items: center; flex: none; height: 17px; padding: 0 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 5px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 11px; font-weight: 600; white-space: nowrap; }
 .relay-chip.is-warn { border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 35%, var(--dsw-alias-border-l2)); color: var(--dsw-alias-state-warn-primary); }
 .relay-chip.is-error { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 35%, var(--dsw-alias-border-l2)); color: var(--dsw-alias-state-error-primary); }
+.relay-chip.is-success { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 35%, var(--dsw-alias-border-l2)); color: var(--dsw-alias-state-success-primary); }
+.relay-gate.is-error { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, var(--dsw-alias-border-l2)); }
+.relay-gate.is-warn { border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 40%, var(--dsw-alias-border-l2)); }
+.relay-gate.is-success { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 40%, var(--dsw-alias-border-l2)); }
+.relay-gate .relay-text.is-warn { color: var(--dsw-alias-state-warn-primary); }
+.relay-gate-file { margin-top: 6px; }
+.relay-gate-file > summary { cursor: pointer; font-size: 12px; }
+.relay-gate-diff { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin-top: 6px; }
+.relay-gate-label { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-bottom: 2px; }
+.relay-gate-pre { margin: 0; max-height: 260px; overflow: auto; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-layer-2); font-size: 11px; line-height: 15px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.relay-gate-command { font-size: 11px; overflow-wrap: anywhere; }
 .relay-chip.is-human { border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 35%, var(--dsw-alias-border-l2)); color: var(--dsw-alias-state-business-primary); }
 .relay-chip.is-mode { border-style: dashed; color: var(--dsw-alias-label-tertiary); font-weight: 500; }
 .relay-chip.is-cluster { border-style: solid; border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, var(--dsw-alias-border-l2)); background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent); color: var(--dsw-alias-state-business-primary); font-weight: 600; }
@@ -1926,15 +2021,23 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             ? feature.assignedSessionId
             : null
           const proof = feature.passes ? feature.evidence : feature.verify
+          // The plugin's own run outranks whatever the session wrote as evidence.
+          const run = feature.verification ?? null
           const acceptable = onAccept !== undefined && showsCoverage
           return h('li', { className: `relay-feature${feature.passes ? ' is-done' : ''}` },
             h('span', { className: 'relay-check', 'aria-hidden': true }, feature.passes ? '✓' : '○'),
             h('span', { className: 'relay-mono' }, feature.id),
             h('div', { className: 'relay-feature-body' },
               h('span', { className: 'relay-feature-title' }, feature.title),
-              showsCoverage || accepted || owner !== null || acceptable
+              showsCoverage || accepted || owner !== null || acceptable || run !== null
                 ? h('div', { className: 'relay-feature-tags' },
                   showsCoverage ? h('span', { className: 'relay-chip is-warn' }, label('coverage', coverage)) : null,
+                  run === null
+                    ? null
+                    : h('span', {
+                      className: `relay-chip ${run.exitCode === 0 ? 'is-success' : 'is-error'}`,
+                      title: `${run.command}\n${run.at ?? ''}${run.head ? ` @ ${run.head.slice(0, 8)}` : ''}`,
+                    }, `${run.exitCode === 0 ? t('verifiedByPlugin') : t('verifyFailed')} · exit ${run.exitCode ?? '-'}`),
                   accepted ? h('span', { className: 'relay-chip is-human' }, t('acceptedByHuman')) : null,
                   owner === null ? null : h('span', { className: 'relay-chip', title: owner }, `${t('owner')} ${shortId(owner)}`),
                   acceptable
@@ -2232,6 +2335,169 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           )
         }
 
+        /**
+         * A sealed truth file changed outside the plugin. The chain stands still
+         * until the human restores the sealed copy or adopts the change with a reason.
+         */
+        function TamperCard({ chain, detail, onAct, busy }) {
+          const [reason, setReason] = useState('')
+          const files = Array.isArray(detail.tamperDetail?.files) ? detail.tamperDetail.files : []
+          return h('section', { className: 'relay-card relay-gate is-error' },
+            h(CardTitle, { sub: detail.tamperDetail?.detectedAt ? ago(detail.tamperDetail.detectedAt) : '' }, t('tamperTitle')),
+            h('div', { className: 'relay-text' }, t('tamperNote')),
+            files.map(file => h('details', { key: file.file, className: 'relay-gate-file' },
+              h('summary', {}, h('span', { className: 'relay-mono' }, file.file)),
+              h('div', { className: 'relay-gate-diff' },
+                h('div', {},
+                  h('div', { className: 'relay-gate-label' }, t('tamperSealed')),
+                  h('pre', { className: 'relay-gate-pre' }, file.sealed ?? ''),
+                ),
+                h('div', {},
+                  h('div', { className: 'relay-gate-label' }, t('tamperDisk')),
+                  h('pre', { className: 'relay-gate-pre' }, file.disk === null ? t('tamperMissing') : file.disk),
+                ),
+              ),
+            )),
+            h('div', { className: 'relay-actions' },
+              h(ConfirmButton, {
+                primary: true,
+                disabled: busy,
+                confirmLabel: t('confirm'),
+                onConfirm: () => { void onAct('relay/resolveTamper', { chainId: chain.chainId, action: 'restore' }) },
+              }, t('tamperRestore')),
+            ),
+            h('form', {
+              className: 'relay-finish',
+              onSubmit: (event) => {
+                event.preventDefault()
+                if (reason.trim().length > 0) void onAct('relay/resolveTamper', { chainId: chain.chainId, action: 'adopt', reason: reason.trim() })
+              },
+            },
+              h('input', {
+                className: 'relay-input',
+                value: reason,
+                placeholder: t('tamperReason'),
+                'aria-label': t('tamperReason'),
+                onChange: event => setReason(event.target.value),
+              }),
+              h('button', { type: 'submit', className: 'relay-btn', disabled: busy || reason.trim().length === 0 }, t('tamperAdopt')),
+            ),
+          )
+        }
+
+        /**
+         * The verify commands the plugin runs outside the session sandbox.
+         * Each needs a human's approval before its first run.
+         */
+        function CommandsCard({ chain, detail, onAct, busy }) {
+          const commands = Array.isArray(detail.commands) ? detail.commands : []
+          const missing = Array.isArray(detail.missingVerify) ? detail.missingVerify : []
+          if (commands.length === 0 && missing.length === 0) return null
+          const pending = commands.filter(entry => entry.approved !== true)
+          return h('section', { className: `relay-card relay-gate${pending.length > 0 ? ' is-warn' : ''}` },
+            h(CardTitle, { sub: `${commands.length - pending.length}/${commands.length}` }, t('commandsTitle')),
+            pending.length > 0 ? h('div', { className: 'relay-text' }, t('commandsNote')) : null,
+            h('ul', { className: 'relay-list' }, commands.map(entry => h('li', { key: entry.command, className: 'relay-feature' },
+              h('span', { className: `relay-chip ${entry.approved ? 'is-success' : 'is-warn'}` }, entry.approved ? t('commandApproved') : t('commandPending')),
+              h('div', { className: 'relay-feature-body' },
+                h('code', { className: 'relay-gate-command' }, entry.command),
+                h('div', { className: 'relay-feature-line' },
+                  h('span', {}, [...(entry.features ?? []), ...(entry.full ? ['verifyFull'] : [])].join(', ')),
+                ),
+              ),
+            ))),
+            missing.length > 0
+              ? h('div', { className: 'relay-text is-warn' }, `${t('commandsMissing')}: ${missing.join(', ')}`)
+              : null,
+            pending.length > 0
+              ? h('div', { className: 'relay-actions' },
+                h(ConfirmButton, {
+                  primary: true,
+                  disabled: busy,
+                  confirmLabel: t('confirm'),
+                  onConfirm: () => { void onAct('relay/approveCommands', { chainId: chain.chainId, commands: pending.map(entry => entry.command) }) },
+                }, t('commandsApprove').replace('{count}', String(pending.length))),
+              )
+              : null,
+          )
+        }
+
+        /**
+         * The independent review of a finished chain and the human's final word on it.
+         */
+        function ReviewCard({ chain, detail, onAct, busy }) {
+          const [reason, setReason] = useState('')
+          const review = chain.review ?? null
+          const reviewing = chain.status === 'reviewing'
+          const awaiting = chain.status === 'awaiting_acceptance'
+          const failedStart = chain.status === 'paused' && chain.pausedBy === 'review-failed'
+          if (!reviewing && !awaiting && !failedStart && (review === null || review.outcome !== 'failed')) return null
+          const sessions = Array.isArray(detail.sessions) ? detail.sessions : []
+          const reviewer = sessions.find(session => session.sessionId === review?.sessionId) ?? null
+          const counts = review?.counts ?? null
+          const round = String(review?.round ?? 0)
+          const notes = []
+          if (review?.skipped === 'unavailable') notes.push(t('reviewSkippedUnavailable'))
+          if (review?.skipped === 'disabled') notes.push(t('reviewSkippedDisabled'))
+          if (review?.limitReached === true) notes.push(t('reviewLimit').replace('{n}', round))
+          return h('section', { className: `relay-card relay-gate${awaiting ? ' is-success' : reviewing ? '' : ' is-warn'}` },
+            h(CardTitle, { sub: t('reviewRound').replace('{n}', round) }, awaiting ? t('acceptTitle') : t('reviewTitle')),
+            reviewing ? h('div', { className: 'relay-text' }, t('reviewRunning')) : null,
+            awaiting && review?.outcome === 'passed' ? h('div', { className: 'relay-text' }, t('reviewPassed')) : null,
+            !reviewing && !awaiting && review?.outcome === 'failed' ? h('div', { className: 'relay-text' }, t('reviewFailedNote')) : null,
+            notes.map(note => h('div', { key: note, className: 'relay-text is-warn' }, note)),
+            typeof review?.summary === 'string' && review.summary.length > 0
+              ? h('div', { className: 'relay-feature-line' }, h('span', {}, review.summary))
+              : null,
+            counts === null
+              ? null
+              : h('div', { className: 'relay-pills' },
+                h('span', { className: 'relay-chip is-success' }, `${t('verdict_match')} ${counts.match ?? 0}`),
+                (counts.mismatch ?? 0) > 0 ? h('span', { className: 'relay-chip is-warn' }, `${t('verdict_mismatch')} ${counts.mismatch}`) : null,
+                (counts.missing ?? 0) > 0 ? h('span', { className: 'relay-chip is-warn' }, `${t('verdict_missing')} ${counts.missing}`) : null,
+                (counts.uncovered ?? 0) > 0 ? h('span', { className: 'relay-chip is-warn' }, `${t('verdict_uncovered')} ${counts.uncovered}`) : null,
+              ),
+            h('div', { className: 'relay-actions' },
+              reviewer === null
+                ? null
+                : h('button', { type: 'button', className: 'relay-btn is-small', onClick: () => openSession(reviewer.sessionId) }, `${t('open')} ${shortId(reviewer.sessionId)}`),
+              reviewing || failedStart
+                ? h(ConfirmButton, {
+                  disabled: busy,
+                  confirmLabel: t('confirm'),
+                  onConfirm: () => { void onAct('relay/restartReview', { chainId: chain.chainId }) },
+                }, t('reviewRestart'))
+                : null,
+              awaiting
+                ? h(ConfirmButton, {
+                  primary: true,
+                  disabled: busy,
+                  confirmLabel: t('confirm'),
+                  onConfirm: () => { void onAct('relay/acceptChain', { chainId: chain.chainId }) },
+                }, t('acceptChain'))
+                : null,
+            ),
+            awaiting
+              ? h('form', {
+                className: 'relay-finish',
+                onSubmit: (event) => {
+                  event.preventDefault()
+                  if (reason.trim().length > 0) void onAct('relay/rejectChain', { chainId: chain.chainId, reason: reason.trim() })
+                },
+              },
+                h('input', {
+                  className: 'relay-input',
+                  value: reason,
+                  placeholder: t('rejectReason'),
+                  'aria-label': t('rejectReason'),
+                  onChange: event => setReason(event.target.value),
+                }),
+                h('button', { type: 'submit', className: 'relay-btn', disabled: busy || reason.trim().length === 0 }, t('rejectChain')),
+              )
+              : null,
+          )
+        }
+
         /** Everything about the selected chain. */
         /**
          * The launch proposal of a planning cluster chain.
@@ -2515,6 +2781,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const phase = phaseOf(chain)
           const goalOwned = blocker !== null && typeof blocker.action === 'string' && blocker.action.startsWith('goal blocked:')
           const finishable = total > 0 && done === total && !isDone
+            && chain.status !== 'reviewing' && chain.status !== 'awaiting_acceptance'
+            && (chain.tamper === null || chain.tamper === undefined)
           const handoffCap = chain.maxHandoffs ?? 0
           const handoffTone = handoffCap > 0 && (chain.handoffCount ?? 0) >= Math.max(1, Math.floor(handoffCap * 0.7)) ? 'warn' : 'brand'
           const metas = [
@@ -2645,6 +2913,11 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 ),
               ),
             ),
+            detail.tamperDetail === null || detail.tamperDetail === undefined
+              ? null
+              : h(TamperCard, { chain, detail, onAct, busy }),
+            h(ReviewCard, { chain, detail, onAct, busy }),
+            h(CommandsCard, { chain, detail, onAct, busy }),
             isPlanning ? h(LaunchCard, { chain, detail, onAct, busy }) : h(WaitingGroupsCard, { detail }),
             h('section', { className: 'relay-card' },
               h(CardTitle, { icon: true, sub: `${chain.handoffCount ?? 0}/${handoffCap} ${t('statHandoffs')}` }, t('track')),
@@ -3768,6 +4041,36 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 kind: label('blocker', chain.blocker.kind),
                 text: chain.blocker.action ?? '',
                 meta: [chain.title, chain.blocker.who].filter(part => typeof part === 'string' && part.length > 0).join(' / '),
+                action: { label: t('viewChain'), run: () => focusChain(chain.chainId) },
+              })
+            }
+            if (chain.tamper !== null && chain.tamper !== undefined) {
+              attention.push({
+                key: `tamper:${chain.chainId}`,
+                tone: 'error',
+                kind: t('attnTamper'),
+                text: (chain.tamper.files ?? []).join(', '),
+                meta: chain.title ?? '',
+                action: { label: t('viewChain'), run: () => focusChain(chain.chainId) },
+              })
+            }
+            if (chain.status === 'awaiting_acceptance') {
+              attention.push({
+                key: `accept:${chain.chainId}`,
+                tone: 'warn',
+                kind: t('attnAccept'),
+                text: chain.objective ?? '',
+                meta: chain.title ?? '',
+                action: { label: t('viewChain'), run: () => focusChain(chain.chainId) },
+              })
+            }
+            if ((chain.commandsPending ?? 0) > 0) {
+              attention.push({
+                key: `commands:${chain.chainId}`,
+                tone: 'warn',
+                kind: t('attnCommands'),
+                text: String(chain.commandsPending),
+                meta: chain.title ?? '',
                 action: { label: t('viewChain'), run: () => focusChain(chain.chainId) },
               })
             }

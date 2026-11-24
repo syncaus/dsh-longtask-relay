@@ -3092,6 +3092,10 @@ export class RelayEngine {
               jobs: this.jobsOf(chain),
               tamper: this.guard.tamperOf(chainId),
             }),
+            // Verify commands waiting for a human's approval, for the attention list.
+            commandsPending: this.config.pluginVerify && this.config.requireCommandApproval && document !== undefined
+              ? this.commandsOf(chainId, document).commands.filter(entry => !entry.approved).length
+              : 0,
             sessionsDetail: chain.sessions.map(session => this.sessionSnapshot(session)),
             head: this.headState(chain),
           })
@@ -3209,6 +3213,11 @@ export class RelayEngine {
       }),
       // Sealed and on-disk text of each changed file, for the human's decision.
       tamperDetail: this.guard.tamperDetail(chainId, store),
+      // What the plugin will run to verify each feature, and whether a human approved it.
+      ...(() => {
+        const { commands, missing } = this.commandsOf(chainId, document)
+        return { commands: this.config.pluginVerify ? commands : [], missingVerify: this.config.pluginVerify ? missing : [] }
+      })(),
       features: (document?.features ?? []).map(feature => ({
         id: feature.id,
         title: feature.title,
@@ -3700,6 +3709,9 @@ export class RelayEngine {
       // a launch that opened nothing must leave the list editable. The sessions exist by now, so a fingerprint
       // that cannot be written only warns.
       try {
+        // Passes written by hand while planning are claims; they go back to false before the seal.
+        const planned = store.readFeatures(chain.chainId)
+        if (planned !== undefined) this.resetUnverifiedPasses(chain, store, planned)
         this.fingerprints.set(chain.chainId, snapshot)
         this.guard.arm(chain.chainId, store)
       } catch (error) {
