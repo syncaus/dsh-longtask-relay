@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Long-task relay",
-    "description": "Turn a long task into a session chain: the truth source lives in workspace files, and when context nears its limit the plugin wraps up, opens a fresh session, and hands the work over. The new session keeps the permission preset, goal, and plan mode. Cluster mode plans first, then opens several sessions in parallel once you confirm the grouping. The panel lists what needs a human, shows the relay track, features, and truth source, and can pause, hand off, clear a blocker, or finish a chain.",
+    "description": "Turn a long task into a session chain: the truth source lives in workspace files, and when context nears its limit the plugin wraps up, opens a fresh session, and hands the work over. The new session keeps the permission preset, goal, and plan mode. The truth source is sealed on the host, so edits that bypass the plugin are caught; the plugin runs each feature's verify command itself to decide a pass, an independent session reviews the delivery against the design, and you confirm it done. Cluster mode plans first, then opens several sessions in parallel once you confirm the grouping. The panel lists what needs a human, shows the relay track, features, and truth source, and can pause, hand off, clear a blocker, or finish a chain.",
     "detail": "docs/DETAIL.md"
   },
   "ui": {
