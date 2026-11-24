@@ -1,1 +1,3 @@
 node_modules/
+# MemSearch keeps its workspace memory here; it is per-machine state, not part of the plugins.
+.memsearch/
