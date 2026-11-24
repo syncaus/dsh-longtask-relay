@@ -1157,6 +1157,10 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-feature-title { overflow-wrap: anywhere; }
 .relay-feature.is-done .relay-feature-title { color: var(--dsw-alias-label-secondary); }
 .relay-feature-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+/* A verify command row: a chip and the command body. It is not the three-column feature
+   grid, so it gets its own row instead of borrowing that layout. */
+.relay-command { display: flex; align-items: baseline; gap: 8px; padding: 6px 0; border-top: 1px solid var(--dsw-alias-border-l1); font-size: 12.5px; line-height: 18px; }
+.relay-command .relay-feature-body { flex: 1; min-width: 0; }
 .relay-feature-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .relay-feature-line { display: flex; gap: 6px; min-width: 0; color: var(--dsw-alias-label-tertiary); font-size: 11.5px; line-height: 16px; }
 .relay-feature-line > * { min-width: 0; overflow-wrap: anywhere; }
@@ -2405,7 +2409,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           return h('section', { className: `relay-card relay-gate${pending.length > 0 ? ' is-warn' : ''}` },
             h(CardTitle, { sub: `${commands.length - pending.length}/${commands.length}` }, t('commandsTitle')),
             pending.length > 0 ? h('div', { className: 'relay-text' }, t('commandsNote')) : null,
-            h('ul', { className: 'relay-list' }, commands.map(entry => h('li', { key: entry.command, className: 'relay-feature' },
+            h('ul', { className: 'relay-list' }, commands.map(entry => h('li', { key: entry.command, className: 'relay-command' },
               h('span', { className: `relay-chip ${entry.approved ? 'is-success' : 'is-warn'}` }, entry.approved ? t('commandApproved') : t('commandPending')),
               h('div', { className: 'relay-feature-body' },
                 h('code', { className: 'relay-gate-command' }, entry.command),
