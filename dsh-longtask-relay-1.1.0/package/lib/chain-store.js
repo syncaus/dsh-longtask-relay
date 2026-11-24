@@ -19,6 +19,7 @@ import { randomUUID } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { sameDir } from './seals.js'
 
 /** Stable error codes reported by tools. */
 export const RELAY_CODES = Object.freeze({
@@ -551,7 +552,7 @@ export class ChainStore {
       if (!(error instanceof RelayError) || error.code !== RELAY_CODES.invalid) throw error
       // An unreadable record with no seal behind it is reported as before.
       const sealed = this.guard.seals.get(chainId)
-      if (sealed === undefined || sealed.relay === null || sealed.truthDir !== this.truthDir) throw error
+      if (sealed === undefined || sealed.relay === null || typeof sealed.truthDir !== 'string' || !sameDir(sealed.truthDir, this.truthDir)) throw error
       unreadable = true
     }
     return this.guard.filterChain(chainId, record, this, { unreadable })
@@ -910,8 +911,25 @@ export class ChainStore {
       } catch (error) {
         throw new RelayError(RELAY_CODES.io, `cannot read the host audit for ${chainId}: ${error instanceof Error ? error.message : String(error)}`)
       }
-      if (hosted !== undefined) return hosted
+      // A chain from before the host copy existed keeps its older workspace history in front.
+      if (hosted !== undefined) {
+        const first = hosted[0]?.at
+        if (hosted.length >= take || typeof first !== 'string' || !existsSync(path)) return hosted
+        const older = this.readWorkspaceAudit(path, take).filter(record => typeof record.at === 'string' && record.at < first)
+        return [...older, ...hosted].slice(-take)
+      }
     }
+    return this.readWorkspaceAudit(path, take)
+  }
+
+  /**
+   * Newest records of the workspace audit log.
+   * @param {string} path - the workspace `audit.jsonl`.
+   * @param {number} take - newest records to return.
+   * @returns {Array<object>} records, oldest first within the returned window.
+   */
+  readWorkspaceAudit(path, take) {
+    const chainId = basename(dirname(path))
     if (!existsSync(path)) return []
     let text
     try {

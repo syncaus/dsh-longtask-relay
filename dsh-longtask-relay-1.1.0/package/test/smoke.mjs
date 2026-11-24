@@ -5344,6 +5344,142 @@ await checkAsync('a review session that fails to start pauses the chain and the 
   assert.equal(world.status(), 'reviewing')
 })
 
+// ---- Fixes from the branch review ----
+
+check('a copy of the chain directory in another truth directory is not the sealed chain', () => {
+  const world = sealedWorld()
+  const otherRoot = mkdtempSync(join(tmpdir(), 'relay-copy-ws-'))
+  const copy = world.engine.attach(ChainStore.forCwd(otherRoot))
+  copy.ensureRoot()
+  const target = copy.paths(world.chain.chainId).dir
+  mkdirSync(target, { recursive: true })
+  for (const name of ['relay.json', 'features.json', 'PLAN.md']) {
+    writeFileSync(join(target, name), readFileSync(join(world.paths.dir, name)))
+  }
+  writeFileSync(join(copy.truthDir, 'index.json'), JSON.stringify({ version: 1, chains: [world.chain.chainId] }))
+  assert.equal(copy.readChain(world.chain.chainId), undefined, 'the copy must not be read as the chain')
+  assert.equal(copy.readFeatures(world.chain.chainId), undefined)
+  // The seal stays with the original, so a later forgery there is still caught.
+  handEditFeatures(world, (document) => { document.features[0].passes = true })
+  assert.equal(world.local.readFeatures(world.chain.chainId).features[0].passes, false)
+  assert.notEqual(world.engine.guard.tamperOf(world.chain.chainId), null)
+})
+
+check('a differently cased spelling of the truth directory is the same directory on Windows', () => {
+  if (process.platform !== 'win32') return
+  const world = sealedWorld()
+  const flipped = world.local.truthDir.replace(/^[A-Za-z]/, letter => (letter === letter.toUpperCase() ? letter.toLowerCase() : letter.toUpperCase()))
+  const other = world.engine.attach(new ChainStore(flipped))
+  const raw = JSON.parse(readFileSync(world.paths.chain, 'utf8'))
+  raw.status = 'awaiting_acceptance'
+  writeFileSync(world.paths.chain, JSON.stringify(raw))
+  assert.equal(other.readChain(world.chain.chainId).status, 'active', 'a case variant must not skip the comparison')
+  assert.notEqual(world.engine.guard.tamperOf(world.chain.chainId), null)
+})
+
+await checkAsync('the head cannot cancel its own review; a cancelled review does not use up the budget', async () => {
+  const world = gateWorld({ maxReviewRounds: 1 })
+  await passAll(world)
+  await world.tool('relay_finish').execute({ evidence: 'all done' }, world.head)
+  const byModel = await world.tool('relay_control').execute({ action: 'pause' }, world.head)
+  assert.equal(byModel.ok, false)
+  assert.equal(byModel.code, 'chain_under_review')
+  assert.equal(world.status(), 'reviewing')
+  for (let round = 0; round < 3; round += 1) {
+    world.engine.setPaused({ chainId: world.chain.chainId, paused: true })
+    world.engine.setPaused({ chainId: world.chain.chainId, paused: false })
+    const again = await world.tool('relay_finish').execute({ evidence: 'all done' }, world.head)
+    assert.equal(again.status, 'reviewing', `cancelled rounds must not count (round ${round + 1}): ${JSON.stringify(again)}`)
+  }
+})
+
+check('in a relay chain a SPEC.md written after the freeze is tampering', () => {
+  const world = sealedWorld()
+  assert.equal(existsSync(world.paths.spec), false)
+  writeFileSync(world.paths.spec, '# SPEC\n\nwhatever was built\n')
+  world.local.readChain(world.chain.chainId)
+  assert.deepEqual(world.engine.guard.tamperOf(world.chain.chainId).files, ['SPEC.md'])
+  world.engine.resolveTamper({ chainId: world.chain.chainId, action: 'restore' })
+  assert.equal(existsSync(world.paths.spec), false, 'restoring an absent document removes it')
+})
+
+await checkAsync('a command that exits but leaves a process holding its output still reports its exit code', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'relay-orphan-'))
+  const child = "require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 15000)'], { stdio: 'inherit', detached: true }).unref()"
+  writeFileSync(join(dir, 'orphan.cjs'), `${child}\nconsole.log('done')\n`)
+  const { runVerifyCommand } = await import('../lib/verify.js')
+  const started = Date.now()
+  const run = await runVerifyCommand('node orphan.cjs', { cwd: dir, timeoutMs: 8000 })
+  assert.equal(run.exitCode, 0, JSON.stringify(run))
+  assert.equal(run.timedOut, false)
+  assert.ok(Date.now() - started < 6000, `the run must end soon after the exit, took ${Date.now() - started}ms`)
+})
+
+check('a second seal store over the same home sees what the first one wrote', () => {
+  const world = sealedWorld()
+  const home = world.engine.seals.dir.replace(/[\\/]longtask-relay[\\/]seals$/, '')
+  const reloaded = new RelayEngine(world.engine.ctx, world.engine.config, {
+    chainIndex: new ChainIndex(home), trashIndex: new ChainTrashIndex(home), fingerprints: new ChainFingerprints(home), seals: new SealStore(home),
+  })
+  const second = reloaded.storeFor(world.local.truthDir)
+  assert.equal(second.readChain(world.chain.chainId).status, 'active')
+  // The old instance keeps writing (an in-flight task of a replaced engine).
+  world.local.update(world.chain.chainId, record => { record.lastError = 'from the old instance' })
+  assert.equal(second.readChain(world.chain.chainId).lastError, 'from the old instance')
+  assert.equal(reloaded.guard.tamperOf(world.chain.chainId), null, 'a write by another instance is not tampering')
+  reloaded.dispose()
+})
+
+check('a verification record or acceptance written before the freeze does not survive it', () => {
+  const world = fakeWorld({ pluginVerify: true })
+  world.local.update(world.chain.chainId, record => { record.status = 'initializing' })
+  world.local.writeFeatures(world.chain.chainId, {
+    version: 1,
+    objective: 'engine objective',
+    features: [{
+      id: 'F001', title: 'a', passes: true, verify: 'npm test', coverage: 'smoke',
+      verification: { command: 'npm test', exitCode: 0 }, acceptedBy: 'human', acceptedAt: new Date().toISOString(),
+    }],
+  })
+  world.engine.checkpoint({ agent: world.oldAgent, note: 'list ready' })
+  const feature = world.local.readFeatures(world.chain.chainId).features[0]
+  assert.equal(feature.passes, false)
+  assert.equal(feature.verification, null)
+  assert.equal(feature.acceptedBy, null)
+  assert.equal(feature.acceptedAt, null)
+})
+
+await checkAsync('approving a command covers the features it was shown for, not features added later', async () => {
+  const world = gateWorld()
+  world.remote.approveCommands(world.chain.chainId, [FLAG_CMD])
+  world.engine.checkpoint({ agent: world.oldAgent, addFeatures: [{ id: 'F003', title: 'third', verify: FLAG_CMD }], reason: 'found later' })
+  const reuse = await world.tool('relay_checkpoint').execute({ features: [{ id: 'F003', passes: true }] }, world.head)
+  assert.equal(reuse.code, 'verify_unapproved', 'a new use of an approved command needs its own approval')
+  const listed = world.engine.detail(world.chain.chainId).commands.find(entry => entry.command === FLAG_CMD)
+  assert.deepEqual(listed.uses, ['F001', 'F002', 'F003'])
+  assert.equal(listed.approved, false)
+  world.remote.approveCommands(world.chain.chainId, [FLAG_CMD])
+  const ok = await world.tool('relay_checkpoint').execute({ features: [{ id: 'F003', passes: true }] }, world.head)
+  assert.equal(ok.ok, true, JSON.stringify(ok))
+})
+
+check('a chain from before the host audit keeps its older workspace history', () => {
+  const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-legacy-audit-'))
+  const plain = ChainStore.forCwd(workspaceDir)
+  const chain = plain.create({ objective: 'legacy', cwd: workspaceDir })
+  plain.appendAudit(chain.chainId, { kind: 'chain.started', actor: 'session-1' })
+  const home = mkdtempSync(join(tmpdir(), 'relay-legacy-home-'))
+  const engine = new RelayEngine({ logger: { warn: () => {} }, get: () => undefined }, resolveConfig({}), {
+    chainIndex: new ChainIndex(home), trashIndex: new ChainTrashIndex(home), fingerprints: new ChainFingerprints(home), seals: new SealStore(home),
+  })
+  const store = engine.storeFor(plain.truthDir)
+  store.readChain(chain.chainId)
+  const kinds = store.readAudit(chain.chainId, 20).map(record => record.kind)
+  assert.equal(kinds[0], 'chain.started', `older workspace records come first: ${kinds.join(',')}`)
+  assert.ok(kinds.includes('truth.sealed'))
+  engine.dispose()
+})
+
 rmSync(workspace, { recursive: true, force: true })
 
 console.log(`\n${checks - failures.length}/${checks} checks passed`)

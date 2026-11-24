@@ -76,6 +76,7 @@ export function runVerifyCommand(command, { cwd, timeoutMs }) {
     let timedOut = false
     let settled = false
     let timer
+    let backstop
     const keep = (chunk) => {
       output += chunk.toString('utf8')
       if (output.length > OUTPUT_TAIL * 2) output = output.slice(-OUTPUT_TAIL)
@@ -84,6 +85,7 @@ export function runVerifyCommand(command, { cwd, timeoutMs }) {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(backstop)
       const text = `${output}${extra}`
       resolvePromise({
         command,
@@ -116,6 +118,29 @@ export function runVerifyCommand(command, { cwd, timeoutMs }) {
     child.stdout?.on('data', keep)
     child.stderr?.on('data', keep)
     child.on('error', (error) => finish(null, `\n[relay] could not start: ${error.message}`))
-    child.on('close', (code) => finish(timedOut ? null : code, timedOut ? `\n[relay] killed after ${Math.round(timeoutMs / 1000)}s` : ''))
+    // The exit code decides as soon as the command exits. A background process it left behind
+    // can keep the output pipes open forever, so 'close' only gets a short grace for the tail.
+    const release = () => {
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+    }
+    child.on('exit', (code) => {
+      const result = timedOut ? null : code
+      const extra = timedOut ? `\n[relay] killed after ${Math.round(timeoutMs / 1000)}s` : ''
+      const grace = setTimeout(() => {
+        release()
+        finish(result, `${extra}\n[relay] output closed after exit; a process the command started may still run`)
+      }, 1000)
+      child.once('close', () => {
+        clearTimeout(grace)
+        finish(result, extra)
+      })
+    })
+    // A last resort for a child whose exit is never reported: the run counts as failed.
+    backstop = setTimeout(() => {
+      release()
+      finish(null, '\n[relay] no exit reported; counted as failed')
+    }, timeoutMs + 10_000)
+    backstop.unref?.()
   })
 }

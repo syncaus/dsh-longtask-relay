@@ -697,14 +697,14 @@ export class RelayEngine {
    * @param {string} [actor] - session that triggered the freeze.
    * @returns {boolean} whether this call froze the list.
    */
-  freezeFeatures(chain, store, actor) {
+  freezeFeatures(chain, store, actor, verified) {
     // A cluster chain keeps editing its list while it plans; `launchCluster` freezes it.
     if (chain.status === 'planning') return false
     const document = store.readFeatures(chain.chainId)
     if (document === undefined || document.features.length === 0) return false
     const snapshot = document.features.map(feature => ({ id: feature.id, title: feature.title }))
     if (this.fingerprints.get(chain.chainId) !== undefined) return false
-    this.resetUnverifiedPasses(chain, store, document)
+    this.resetUnverifiedPasses(chain, store, document, verified instanceof Map ? new Set(verified.keys()) : new Set())
     this.fingerprints.set(chain.chainId, snapshot)
     if (chain.status === 'initializing') {
       store.update(chain.chainId, record => { record.status = 'active' })
@@ -726,14 +726,26 @@ export class RelayEngine {
    * @param {object} document - the list about to be frozen.
    * @returns {Array<string>} feature ids reset.
    */
-  resetUnverifiedPasses(chain, store, document) {
-    if (!this.config.pluginVerify) return []
-    const reset = document.features
-      .filter(feature => feature.passes && (feature.verification === null || feature.verification.exitCode !== 0))
+  resetUnverifiedPasses(chain, store, document, keep = new Set()) {
+    // A verification record in the file is as forgeable as the pass itself: only the runs
+    // this very checkpoint made (`keep`) survive. A human acceptance written before the
+    // freeze is a claim too, and a human accepts again from the panel.
+    const reset = this.config.pluginVerify
+      ? document.features
+        .filter(feature => !keep.has(feature.id) && (feature.passes || feature.verification !== null))
+        .map(feature => feature.id)
+      : []
+    const unsigned = document.features
+      .filter(feature => feature.acceptedBy !== null || feature.acceptedAt !== null)
       .map(feature => feature.id)
-    if (reset.length === 0) return []
-    store.patchFeatures(chain.chainId, reset.map(id => ({ id, passes: false })))
-    this.record(store, chain.chainId, { kind: 'feature.unverified-reset', actor: 'system', detail: { ids: reset } })
+    if (reset.length === 0 && unsigned.length === 0) return []
+    const ids = new Set([...reset, ...unsigned])
+    store.patchFeatures(chain.chainId, [...ids].map(id => ({
+      id,
+      ...(reset.includes(id) ? { passes: false, verification: null } : {}),
+      ...(unsigned.includes(id) ? { acceptedBy: null, acceptedAt: null } : {}),
+    })))
+    this.record(store, chain.chainId, { kind: 'feature.unverified-reset', actor: 'system', detail: { ids: reset, acceptances: unsigned } })
     return reset
   }
 
@@ -1261,7 +1273,7 @@ export class RelayEngine {
     }
     // The initializer's first accepted list freezes it; an announced append
     // refreshes the fingerprint so it stays the frozen contract.
-    this.freezeFeatures(chain, store, agent?.session?.id)
+    this.freezeFeatures(chain, store, agent?.session?.id, verified)
     if (appended.length > 0) this.updateFingerprint(chain, store)
     if (typeof note === 'string' && note.trim().length > 0) {
       const stamp = new Date().toISOString()
@@ -1859,13 +1871,15 @@ export class RelayEngine {
     const round = (previous?.round ?? 0) + 1
     const reviewWanted = this.config.independentReview
     // Too many failed reviews: a human decides from the last findings instead of another round.
-    const limitReached = reviewWanted && round > this.config.maxReviewRounds
+    // Only reviews that were submitted and failed count; a cancelled or unstarted one does not.
+    const failedRounds = previous?.failedRounds ?? 0
+    const limitReached = reviewWanted && failedRounds >= this.config.maxReviewRounds
     if (reviewWanted && !limitReached) {
       store.update(chain.chainId, (record) => {
         record.status = 'reviewing'
         record.pausedBy = null
         record.lastError = null
-        record.review = { round, requestedAt: new Date().toISOString(), requestedBy: actor, sessionId: null, outcome: null, evidence }
+        record.review = { round, failedRounds, requestedAt: new Date().toISOString(), requestedBy: actor, sessionId: null, outcome: null, evidence }
       })
       this.pauseHeadGoalForBlock(chain, store, 'review')
       this.syncWorkerGoals(chain, store)
@@ -1880,11 +1894,11 @@ export class RelayEngine {
         record.lastError = null
         record.review = limitReached
           ? { ...previous, limitReached: true }
-          : { round: previous?.round ?? 0, skipped: 'disabled', outcome: null, evidence }
+          : { round: previous?.round ?? 0, failedRounds, skipped: 'disabled', outcome: null, evidence }
       })
       this.pauseHeadGoalForBlock(chain, store, 'acceptance')
       this.syncWorkerGoals(chain, store)
-      this.record(store, chain.chainId, { kind: 'chain.awaiting-acceptance', actor, detail: limitReached ? { limitReached: true, round: previous?.round ?? 0 } : { review: 'disabled' } })
+      this.record(store, chain.chainId, { kind: 'chain.awaiting-acceptance', actor, detail: limitReached ? { limitReached: true, failedRounds } : { review: 'disabled' } })
       return { ok: true, chainId: chain.chainId, status: 'awaiting_acceptance', featuresTotal: progress.total, ...(limitReached ? { reviewLimitReached: true } : {}) }
     }
     this.completeChain(chain, store, actor, evidence)
@@ -2075,6 +2089,7 @@ export class RelayEngine {
    * @returns {{ commands: Array<{ command: string, features: Array<string>, full: boolean, approved: boolean }>, missing: Array<string> }} commands.
    */
   commandsOf(chainId, document, overrides) {
+    // Approval is per use: approving `npm test` for F001 does not approve it for a feature added later.
     const approved = this.guard.approvedCommands(chainId)
     const byCommand = new Map()
     const missing = []
@@ -2096,10 +2111,15 @@ export class RelayEngine {
       byCommand.set(full, entry)
     }
     return {
-      commands: [...byCommand.values()].map(entry => ({
-        ...entry,
-        approved: !this.config.requireCommandApproval || approved.has(entry.command),
-      })),
+      commands: [...byCommand.values()].map((entry) => {
+        const uses = [...entry.features, ...(entry.full ? ['@full'] : [])]
+        const seen = approved.get(entry.command) ?? new Set()
+        return {
+          ...entry,
+          uses,
+          approved: !this.config.requireCommandApproval || uses.every(use => seen.has(use)),
+        }
+      }),
       missing,
     }
   }
@@ -2115,14 +2135,16 @@ export class RelayEngine {
     }
     const { chain, store } = this.findChain(chainId)
     const document = store.readFeatures(chain.chainId)
-    const known = new Set(this.commandsOf(chain.chainId, document).commands.map(entry => entry.command))
+    const known = new Map(this.commandsOf(chain.chainId, document).commands.map(entry => [entry.command, entry.uses]))
     const unknown = commands.filter(command => !known.has(command))
     if (unknown.length > 0) {
       throw new RelayError(RELAY_CODES.invalid, `not a verify command of this chain: ${unknown[0]}`)
     }
-    this.guard.approveCommands(chain.chainId, commands)
+    // The approval covers the uses the human saw now; a later feature reusing a command asks again.
+    const approvals = commands.map(command => ({ command, uses: known.get(command) }))
+    this.guard.approveCommands(chain.chainId, approvals)
     this.statusCache = null
-    this.record(store, chain.chainId, { kind: 'commands.approved', actor: 'human', detail: { commands } })
+    this.record(store, chain.chainId, { kind: 'commands.approved', actor: 'human', detail: { approvals } })
     return { chainId: chain.chainId, approved: commands.length, commands: this.commandsOf(chain.chainId, document).commands }
   }
 
@@ -2259,6 +2281,12 @@ export class RelayEngine {
       const preset = this.presetFor(head)
       const created = await controller.create({ cwd: chain.cwd, ...(preset === undefined ? {} : { agentPreset: preset }) })
       createdSessionId = created.sessionId
+      // The wait can outlast the review: a human may have cancelled it, or another start won.
+      const settledBefore = store.readChain(chain.chainId)
+      if (settledBefore?.status !== 'reviewing' || (settledBefore.review?.sessionId !== null && settledBefore.review?.sessionId !== undefined && settledBefore.review.sessionId !== chain.review?.sessionId)) {
+        this.record(store, chain.chainId, { kind: 'review.superseded', actor: 'system', detail: { round, sessionId: createdSessionId } })
+        return { started: false, reason: 'superseded', sessionId: createdSessionId }
+      }
       store.update(chain.chainId, (record) => {
         for (const session of record.sessions) {
           if (session.role === 'reviewer' && (session.retiredAt === null || session.retiredAt === undefined)) {
@@ -2320,6 +2348,8 @@ export class RelayEngine {
       const message = error instanceof Error ? error.message : String(error)
       try {
         store.update(chain.chainId, (record) => {
+          // A chain that left review meanwhile keeps whatever state it moved to.
+          if (record.status !== 'reviewing') return
           record.status = 'paused'
           record.pausedBy = 'review-failed'
           record.lastError = `the review session could not be started: ${message}`
@@ -2395,7 +2425,14 @@ export class RelayEngine {
       ...(gaps.length === 0 ? [] : ['', 'Requirements no feature covers:', ...gaps.map(item => `- ${item}`)]),
     ].join('\n')
     store.writeText(reviewFile, `${current.replace(/\s*$/, '\n\n')}${block}\n`)
-    const review = { ...chain.review, outcome, submittedAt: now, summary: summary.trim().slice(0, 2000), counts }
+    const review = {
+      ...chain.review,
+      outcome,
+      submittedAt: now,
+      summary: summary.trim().slice(0, 2000),
+      counts,
+      failedRounds: (chain.review?.failedRounds ?? 0) + (outcome === 'failed' ? 1 : 0),
+    }
     const retire = (record) => {
       const own = record.sessions.find(session => session.sessionId === entry.sessionId)
       if (own !== undefined) {
@@ -2501,7 +2538,7 @@ export class RelayEngine {
     store.update(chain.chainId, (record) => {
       record.status = 'active'
       record.pausedBy = null
-      record.review = { ...record.review, outcome: 'rejected', rejectedAt: new Date().toISOString(), rejectReason: text.slice(0, 2000), round: 0 }
+      record.review = { ...record.review, outcome: 'rejected', rejectedAt: new Date().toISOString(), rejectReason: text.slice(0, 2000), round: 0, failedRounds: 0 }
     })
     this.record(store, chain.chainId, { kind: 'chain.rejected', actor: 'human', detail: { reason: text } })
     this.sendBack(store.readChain(chain.chainId), store, { by: 'human', reopened: [], uncovered: [], reason: text })
@@ -2635,6 +2672,10 @@ export class RelayEngine {
     // Pausing a review cancels it; the reviewer session retires and the chain resumes as active work.
     if (chain.status === 'reviewing' && !paused) {
       throw new RelayError(RELAY_CODES.invalid, `chain ${chain.chainId} is being reviewed; pause it to cancel the review`)
+    }
+    // Only a human cancels a review: a head that could cancel it could also wait out its own review.
+    if (chain.status === 'reviewing' && agent !== undefined) {
+      throw new RelayError('chain_under_review', `chain ${chain.chainId} is being reviewed; only a human can cancel the review`)
     }
     const cancelReview = chain.status === 'reviewing' && paused
     store.update(chain.chainId, record => {
