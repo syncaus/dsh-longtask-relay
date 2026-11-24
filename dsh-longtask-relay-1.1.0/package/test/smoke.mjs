@@ -26,6 +26,14 @@ import { applyPluginUpdate, checkPluginUpdate } from '../lib/update.js'
 // Every default host store (index, seals, host audit) lands in a throwaway home, never the real one.
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'relay-smoke-home-'))
 
+/**
+ * The gates as they were before plugin verification, review, and human acceptance.
+ * The relay, handoff, and cluster checks below exercise the chain mechanics, not the
+ * delivery gates, so their worlds run in this mode; the gate checks at the end use the
+ * shipped defaults.
+ */
+const LEGACY_GATES = Object.freeze({ pluginVerify: false, independentReview: false, requireHumanFinish: false })
+
 const failures = []
 let checks = 0
 
@@ -133,6 +141,7 @@ check('the chain index remembers a chain across lifetimes', () => {
 /** Build a fake agent and the services the engine reads. */
 function fakeWorld({ goalService = true, ...overrides } = {}) {
   const config = resolveConfig({
+    ...LEGACY_GATES,
     cooldownMs: 0,
     wrapupRatio: 0.5,
     handoffRatio: 0.6,
@@ -1149,17 +1158,17 @@ check('relay_recall forwards the query to the engine', () => {
   assert.equal(definition.execute({ query: '  ' }, exec).code, 'invalid_arguments')
 })
 
-check('relay_checkpoint refuses weak evidence and unexplained additions', () => {
+await checkAsync('relay_checkpoint refuses weak evidence and unexplained additions', async () => {
   const registered = new Map()
   const ctx = { tools: { register: definition => registered.set(definition.name, definition) } }
   registerTools(ctx, { checkpoint: () => ({ ok: true }) })
   const definition = registered.get('relay_checkpoint')
   const exec = { agent: { session: { header: {} } } }
 
-  const weak = definition.execute({ features: [{ id: 'F001', passes: true, evidence: 'all green' }] }, exec)
+  const weak = await definition.execute({ features: [{ id: 'F001', passes: true, evidence: 'all green' }] }, exec)
   assert.equal(weak.code, 'evidence_too_weak')
 
-  const strong = definition.execute({
+  const strong = await definition.execute({
     features: [{ id: 'F001', passes: true, evidence: 'node test/smoke.mjs -> exit 0, 13/13 passed' }],
   }, exec)
   assert.equal(strong.ok, true)
@@ -1174,14 +1183,14 @@ check('relay_checkpoint refuses weak evidence and unexplained additions', () => 
     '验证脚本 -> 通过 23/23',
     'tsc --noEmit -> exit 0, 0 errors',
   ]) {
-    const accepted = definition.execute({ features: [{ id: 'F001', passes: true, evidence }] }, exec)
+    const accepted = await definition.execute({ features: [{ id: 'F001', passes: true, evidence }] }, exec)
     assert.equal(accepted.ok, true, `evidence should be accepted: ${evidence}`)
   }
 
-  const unreasoned = definition.execute({ addFeatures: [{ id: 'F002', title: 'new' }] }, exec)
+  const unreasoned = await definition.execute({ addFeatures: [{ id: 'F002', title: 'new' }] }, exec)
   assert.equal(unreasoned.code, 'missing_reason')
 
-  const vague = definition.execute({ blocker: { kind: 'external' } }, exec)
+  const vague = await definition.execute({ blocker: { kind: 'external' } }, exec)
   assert.equal(vague.code, 'invalid_arguments')
 
   // requireStrongEvidence=false：只要求长度与数字，不要求结果标记
@@ -1191,10 +1200,10 @@ check('relay_checkpoint refuses weak evidence and unexplained additions', () => 
     { checkpoint: () => ({ ok: true }), config: { requireStrongEvidence: false } },
   )
   const loose = relaxed.get('relay_checkpoint')
-  const accepted = loose.execute({ features: [{ id: 'F001', passes: true, evidence: '手工走查过一遍，确认没问题' }] }, exec)
+  const accepted = await loose.execute({ features: [{ id: 'F001', passes: true, evidence: '手工走查过一遍，确认没问题' }] }, exec)
   assert.equal(accepted.ok, true)
   // 强模式下这类散文证据仍然被拒
-  const prose = definition.execute({ features: [{ id: 'F001', passes: true, evidence: '手工走查过一遍，确认没问题' }] }, exec)
+  const prose = await definition.execute({ features: [{ id: 'F001', passes: true, evidence: '手工走查过一遍，确认没问题' }] }, exec)
   assert.equal(prose.code, 'evidence_too_weak')
 })
 
@@ -1277,7 +1286,7 @@ await checkAsync('requireHumanAcceptedCoverage=false lets partial work finish', 
 
 /** Build a world for delegation checks. */
 function spawnWorld() {
-  const config = resolveConfig({ cooldownMs: 0 })
+  const config = resolveConfig({ ...LEGACY_GATES, cooldownMs: 0 })
   const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-spawn-'))
   const indexHome = mkdtempSync(join(tmpdir(), 'relay-spawn-home-'))
   const local = ChainStore.forCwd(workspaceDir)
@@ -1568,12 +1577,12 @@ await checkAsync('a delegated worker only writes its own features', async () => 
   )
 })
 
-check('the model cannot write acceptedBy itself', () => {
+await checkAsync('the model cannot write acceptedBy itself', async () => {
   const world = fakeWorld()
   const registered = new Map()
   registerTools({ tools: { register: definition => registered.set(definition.name, definition) } }, world.engine)
   const definition = registered.get('relay_checkpoint')
-  const result = definition.execute({
+  const result = await definition.execute({
     features: [{ id: 'F001', passes: true, evidence: 'npm test -> exit 0, 3/3 passed', acceptedBy: 'human' }],
   }, { agent: world.oldAgent })
   assert.equal(result.ok, false)
@@ -1598,12 +1607,14 @@ check('the panel acceptance path releases partial coverage', () => {
   const refused = world.engine.finish({ agent: world.oldAgent, evidence: 'done' })
   assert.equal(refused.ok, false, 'partial coverage must not finish before acceptance')
   const remote = new RelayRemote(world.engine)
+  // Revoking puts the gate back; a finished chain is terminal, so the revoke is checked first.
   remote.acceptCoverage(world.chain.chainId, 'F001', true)
-  const accepted = world.engine.finish({ agent: world.oldAgent, evidence: 'done' })
-  assert.equal(accepted.ok, true)
   remote.acceptCoverage(world.chain.chainId, 'F001', false)
   const revoked = world.engine.finish({ agent: world.oldAgent, evidence: 'done' })
   assert.equal(revoked.ok, false)
+  remote.acceptCoverage(world.chain.chainId, 'F001', true)
+  const accepted = world.engine.finish({ agent: world.oldAgent, evidence: 'done' })
+  assert.equal(accepted.ok, true)
   const descriptor = Object.getOwnPropertyDescriptor(RelayRemote.prototype, '@deepseek-ai/dsh-typert-protocol/remote-methods')
   assert.ok(descriptor.value.methods.some(method => method.method === 'acceptCoverage'))
 })
@@ -2280,7 +2291,7 @@ check('a cluster handoff names the workers and the verification rule', () => {
   assert.match(prompt, /Cluster rules/)
   assert.ok(prompt.includes('- session-w1:') && prompt.includes('- session-w2:'), 'workers must be listed')
   assert.ok(prompt.includes('F002') && prompt.includes('F003'), 'unfinished worker features must be named')
-  assert.match(prompt, /re-run .*verify/i)
+  assert.match(prompt, /verified by the plugin running its verify command/i)
   // The single-session relay keeps the old prompt: no worker section.
   const relay = renderHandoffPrompt({ ...base, chain: { ...base.chain, mode: 'relay' } })
   assert.ok(!relay.includes('Cluster rules'))
@@ -3226,7 +3237,7 @@ check('start still refuses in plan mode when the cluster entry exists', () => {
  * `failCreate` lists the 1-based create calls that must throw.
  */
 function clusterWorld({ failCreate = [], ...overrides } = {}) {
-  const config = resolveConfig({ cooldownMs: 0, ...overrides })
+  const config = resolveConfig({ ...LEGACY_GATES, cooldownMs: 0, ...overrides })
   const workspaceDir = mkdtempSync(join(tmpdir(), 'relay-cluster-'))
   const indexHome = mkdtempSync(join(tmpdir(), 'relay-cluster-home-'))
   const local = ChainStore.forCwd(workspaceDir)
@@ -4418,7 +4429,7 @@ check('scope fields are read leniently: a single string, mixed arrays, nothing u
   assert.equal('files' in features[2], false)
 })
 
-check('relay_checkpoint addFeatures accepts files and dependsOn and stores them', () => {
+await checkAsync('relay_checkpoint addFeatures accepts files and dependsOn and stores them', async () => {
   const world = clusterWorld()
   const registered = new Map()
   registerTools({ tools: { register: definition => registered.set(definition.name, definition) } }, world.engine)
@@ -4426,7 +4437,7 @@ check('relay_checkpoint addFeatures accepts files and dependsOn and stores them'
   const item = checkpoint.parameters.properties.addFeatures.items.properties
   assert.deepEqual(item.files, { type: 'array', items: { type: 'string' } })
   assert.deepEqual(item.dependsOn, { type: 'array', items: { type: 'string' } })
-  const result = checkpoint.execute({
+  const result = await checkpoint.execute({
     addFeatures: [{ id: 'F007', title: 'seventh', files: ['src/z'], dependsOn: ['F002'] }],
     reason: 'found while planning',
   }, { agent: world.head })
@@ -5018,6 +5029,309 @@ await checkAsync('a tampered chain is not supervised', async () => {
   await world.engine.evaluate(world.oldAgent)
   assert.equal(world.calls.filter(call => call.kind === 'create').length, 0)
   assert.equal(world.calls.filter(call => /<relay_wrapup>/.test(call.text ?? '')).length, 0)
+})
+
+// ---- Plugin verification, independent review, and human acceptance (shipped defaults) ----
+
+/** Exits 1 while `fail.flag` exists in the workspace, 0 otherwise. */
+const FLAG_CMD = "node -e \"process.exit(require('fs').existsSync('fail.flag') ? 1 : 0)\""
+
+/** A world on the shipped gate defaults, with a frozen two-feature list whose commands really run. */
+function gateWorld(overrides = {}) {
+  const defaults = resolveConfig({})
+  assert.equal(defaults.pluginVerify, true, 'plugin verification is on by default')
+  assert.equal(defaults.independentReview, true, 'the independent review is on by default')
+  assert.equal(defaults.requireHumanFinish, true, 'human acceptance is on by default')
+  assert.equal(defaults.requireCommandApproval, true, 'command approval is on by default')
+  const world = fakeWorld({ pluginVerify: true, independentReview: true, requireHumanFinish: true, requireCommandApproval: true, ...overrides })
+  world.local.writeFeatures(world.chain.chainId, {
+    version: 1,
+    objective: 'engine objective',
+    features: [
+      { id: 'F001', title: 'first', verify: FLAG_CMD },
+      { id: 'F002', title: 'second', verify: FLAG_CMD },
+    ],
+  })
+  world.local.writeText(world.local.paths(world.chain.chainId).spec, '# SPEC\n\n- first\n- second\n')
+  world.engine.checkpoint({ agent: world.oldAgent, note: 'list ready' })
+  const registered = new Map()
+  registerTools({ tools: { register: definition => registered.set(definition.name, definition) } }, world.engine)
+  const flagFile = join(world.chain.cwd, 'fail.flag')
+  return {
+    ...world,
+    tool: name => registered.get(name),
+    head: { agent: world.oldAgent },
+    remote: new RelayRemote(world.engine),
+    fail: (on) => { if (on) writeFileSync(flagFile, 'x'); else rmSync(flagFile, { force: true }) },
+    feature: id => world.local.readFeatures(world.chain.chainId).features.find(entry => entry.id === id),
+    status: () => world.local.readChain(world.chain.chainId).status,
+  }
+}
+
+/** Pass both features through the tool, approving the command first. */
+async function passAll(world) {
+  world.remote.approveCommands(world.chain.chainId, [FLAG_CMD])
+  const result = await world.tool('relay_checkpoint').execute({ features: [{ id: 'F001', passes: true }, { id: 'F002', passes: true }] }, world.head)
+  assert.equal(result.ok, true, JSON.stringify(result))
+}
+
+await checkAsync('a pass with an unapproved command is refused and nothing runs', async () => {
+  const world = gateWorld()
+  const result = await world.tool('relay_checkpoint').execute({ features: [{ id: 'F001', passes: true, evidence: 'exit 0, 5/5 passed' }] }, world.head)
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'verify_unapproved')
+  assert.equal(world.feature('F001').passes, false)
+  const detail = world.engine.commandsOf(world.chain.chainId, world.local.readFeatures(world.chain.chainId))
+  assert.deepEqual(detail.commands.map(entry => [entry.command, entry.approved]), [[FLAG_CMD, false]])
+  assert.throws(() => world.remote.approveCommands(world.chain.chainId, ['rm -rf /']), /not a verify command/)
+})
+
+await checkAsync('the plugin runs the command: a failing command keeps the feature open, a passing one records its own evidence', async () => {
+  const world = gateWorld()
+  world.remote.approveCommands(world.chain.chainId, [FLAG_CMD])
+  world.fail(true)
+  const failed = await world.tool('relay_checkpoint').execute({ features: [{ id: 'F001', passes: true, evidence: 'exit 0, 12/12 passed' }] }, world.head)
+  assert.equal(failed.ok, false)
+  assert.equal(failed.code, 'verify_failed')
+  assert.equal(failed.items[0].exitCode, 1)
+  assert.equal(world.feature('F001').passes, false, 'a claimed pass with a failing command must not pass')
+  world.fail(false)
+  const passed = await world.tool('relay_checkpoint').execute({ features: [{ id: 'F001', passes: true }] }, world.head)
+  assert.equal(passed.ok, true, JSON.stringify(passed))
+  const feature = world.feature('F001')
+  assert.equal(feature.passes, true)
+  assert.equal(feature.verification.exitCode, 0)
+  assert.equal(feature.verification.by, 'plugin')
+  assert.equal(feature.verification.command, FLAG_CMD)
+  assert.ok(world.local.readAudit(world.chain.chainId, 50).some(record => record.kind === 'verify.ran'))
+})
+
+await checkAsync('the model cannot supply a verification record or skip the run', async () => {
+  const world = gateWorld()
+  const forged = await world.tool('relay_checkpoint').execute({
+    features: [{ id: 'F001', passes: true, verification: { command: FLAG_CMD, exitCode: 0 } }],
+  }, world.head)
+  assert.equal(forged.ok, false)
+  assert.equal(forged.code, 'invalid_arguments')
+  assert.throws(
+    () => world.engine.checkpoint({ agent: world.oldAgent, features: [{ id: 'F001', passes: true }] }),
+    error => error instanceof RelayError && error.code === 'verification_required',
+  )
+  assert.equal(world.feature('F001').passes, false)
+})
+
+await checkAsync('a feature without a verify command gets one in the same checkpoint, and it still needs approval', async () => {
+  const world = gateWorld()
+  const store = world.engine.storeFor(world.local.truthDir)
+  // Append a feature with no command through the announced path.
+  world.engine.checkpoint({ agent: world.oldAgent, addFeatures: [{ id: 'F003', title: 'third' }], reason: 'found while testing' })
+  const missing = await world.tool('relay_checkpoint').execute({ features: [{ id: 'F003', passes: true }] }, world.head)
+  assert.equal(missing.code, 'verify_missing')
+  const command = 'node -e "process.exit(0)"'
+  const unapproved = await world.tool('relay_checkpoint').execute({ features: [{ id: 'F003', passes: true, verify: command }] }, world.head)
+  assert.equal(unapproved.code, 'verify_unapproved')
+  // The panel lists the command only once it is on the feature; set it first, then approve.
+  await world.tool('relay_checkpoint').execute({ features: [{ id: 'F003', verify: command }] }, world.head)
+  world.remote.approveCommands(world.chain.chainId, [command])
+  const ok = await world.tool('relay_checkpoint').execute({ features: [{ id: 'F003', passes: true }] }, world.head)
+  assert.equal(ok.ok, true, JSON.stringify(ok))
+  assert.throws(
+    () => store.patchFeatures(world.chain.chainId, [{ id: 'F003', verify: 'node -e "0"' }]),
+    /already has a verify command/,
+  )
+})
+
+check('freezing the list resets passes the initializer wrote by hand', () => {
+  const world = fakeWorld({ pluginVerify: true })
+  world.local.update(world.chain.chainId, record => { record.status = 'initializing' })
+  world.local.writeFeatures(world.chain.chainId, {
+    version: 1,
+    objective: 'engine objective',
+    features: [{ id: 'F001', title: 'a', passes: true, evidence: 'npm test exit 0, 9/9 passed', verify: 'npm test' }],
+  })
+  world.engine.checkpoint({ agent: world.oldAgent, note: 'list ready' })
+  assert.equal(world.local.readFeatures(world.chain.chainId).features[0].passes, false)
+  assert.ok(world.local.readAudit(world.chain.chainId, 50).some(record => record.kind === 'feature.unverified-reset'))
+})
+
+await checkAsync('finishing re-runs every command; a feature that broke since its pass is reopened', async () => {
+  const world = gateWorld()
+  await passAll(world)
+  world.fail(true)
+  const refused = await world.tool('relay_finish').execute({ evidence: 'all done' }, world.head)
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, 'verify_failed')
+  assert.deepEqual(refused.features.map(item => item.id), ['F001', 'F002'])
+  assert.equal(world.feature('F001').passes, false, 'a regressed feature must be reopened')
+  assert.equal(world.status(), 'active')
+  assert.ok(world.local.readAudit(world.chain.chainId, 50).some(record => record.kind === 'feature.regressed'))
+})
+
+await checkAsync('a verified finish opens a read-only review session instead of finishing', async () => {
+  const world = gateWorld()
+  await passAll(world)
+  const result = await world.tool('relay_finish').execute({ evidence: 'all done' }, world.head)
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.status, 'reviewing')
+  assert.equal(result.review.started, true)
+  const chain = world.local.readChain(world.chain.chainId)
+  const reviewer = chain.sessions.find(session => session.role === 'reviewer')
+  assert.equal(reviewer.sessionId, 'session-new')
+  assert.equal(chain.currentSessionId, 'session-old', 'the review does not take over the chain')
+  assert.equal(chain.review.sessionId, 'session-new')
+  const prompt = world.calls.find(call => call.kind === 'prompt' && call.sessionId === 'session-new')
+  assert.match(prompt.text, /<relay_review>/)
+  assert.match(prompt.text, /SPEC\.md/)
+  assert.match(prompt.text, /- F001 — first/)
+  // Nothing moves while the review is open.
+  await assert.rejects(
+    async () => world.engine.checkpoint({ agent: world.oldAgent, note: 'more' }),
+    error => error.code === 'chain_under_review',
+  )
+  assert.throws(() => world.engine.setPaused({ chainId: world.chain.chainId, paused: false }), /being reviewed/)
+  await assert.rejects(() => world.engine.handoffNow({ agent: world.oldAgent }), /reviewing/)
+})
+
+await checkAsync('the reviewer only judges: it cannot write, and only it may submit a review', async () => {
+  const world = gateWorld()
+  await passAll(world)
+  await world.tool('relay_finish').execute({ evidence: 'all done' }, world.head)
+  const reviewer = { agent: world.newAgent }
+  const write = await world.tool('relay_checkpoint').execute({ note: 'looks fine' }, reviewer)
+  assert.equal(write.code, 'reviewer_read_only')
+  const control = await world.tool('relay_control').execute({ action: 'pause' }, reviewer)
+  assert.equal(control.code, 'reviewer_read_only')
+  const byHead = await world.tool('relay_review').execute({ verdicts: [{ id: 'F001', verdict: 'match' }, { id: 'F002', verdict: 'match' }], summary: 'fine' }, world.head)
+  assert.equal(byHead.code, 'reviewer_only')
+  const partial = await world.tool('relay_review').execute({ verdicts: [{ id: 'F001', verdict: 'match' }], summary: 'half' }, reviewer)
+  assert.equal(partial.ok, false)
+  assert.match(partial.message, /every feature needs a verdict/)
+  const bare = await world.tool('relay_review').execute({ verdicts: [{ id: 'F001', verdict: 'match' }, { id: 'F002', verdict: 'mismatch' }], summary: 'x' }, reviewer)
+  assert.match(bare.message, /needs findings/)
+  assert.equal(world.status(), 'reviewing', 'refused reviews change nothing')
+})
+
+await checkAsync('a mismatch sends the feature back with the findings and wakes the head', async () => {
+  const world = gateWorld()
+  await passAll(world)
+  await world.tool('relay_finish').execute({ evidence: 'all done' }, world.head)
+  const followups = []
+  world.oldAgent.followup = message => followups.push(message.content[0].text)
+  const result = await world.tool('relay_review').execute({
+    verdicts: [
+      { id: 'F001', verdict: 'match' },
+      { id: 'F002', verdict: 'mismatch', findings: 'SPEC asks for paging; src/list.js returns everything' },
+    ],
+    uncovered: ['SPEC: export as CSV'],
+    summary: 'one feature differs, one requirement is missing',
+  }, { agent: world.newAgent })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.outcome, 'failed')
+  assert.equal(world.status(), 'active')
+  assert.equal(world.feature('F002').passes, false)
+  assert.equal(world.feature('F002').verification, null)
+  assert.match(world.feature('F002').notes, /\[review r1\] mismatch: SPEC asks for paging/)
+  assert.equal(world.feature('F001').passes, true)
+  assert.match(readFileSync(world.local.paths(world.chain.chainId).review, 'utf8'), /Round 1 — failed/)
+  assert.match(world.local.readProgress(world.chain.chainId), /uncovered requirement — SPEC: export as CSV/)
+  assert.ok(followups.some(text => /<relay_review_outcome>/.test(text) && /F002/.test(text) && /export as CSV/.test(text)))
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.ok(chain.sessions.find(session => session.role === 'reviewer').retiredAt, 'the reviewer retires after submitting')
+})
+
+await checkAsync('an all-match review waits for a human; only the panel confirms it done', async () => {
+  const world = gateWorld()
+  await passAll(world)
+  await world.tool('relay_finish').execute({ evidence: 'all done' }, world.head)
+  const result = await world.tool('relay_review').execute({
+    verdicts: [{ id: 'F001', verdict: 'match' }, { id: 'F002', verdict: 'match' }],
+    summary: 'built as designed',
+  }, { agent: world.newAgent })
+  assert.equal(result.outcome, 'passed')
+  assert.equal(world.status(), 'awaiting_acceptance')
+  const again = await world.tool('relay_finish').execute({ evidence: 'really done' }, world.head)
+  assert.equal(again.ok, false)
+  assert.match(again.message, /awaiting_acceptance/)
+  assert.throws(() => world.engine.setPaused({ chainId: world.chain.chainId, paused: true }), /confirm or reject/)
+  world.remote.acceptChain(world.chain.chainId)
+  assert.equal(world.status(), 'done')
+  const finished = world.local.readAudit(world.chain.chainId, 80).find(record => record.kind === 'chain.finished')
+  assert.equal(finished.actor, 'human')
+})
+
+await checkAsync('a human rejection needs a reason and sends the chain back with it', async () => {
+  const world = gateWorld()
+  await passAll(world)
+  await world.tool('relay_finish').execute({ evidence: 'all done' }, world.head)
+  await world.tool('relay_review').execute({ verdicts: [{ id: 'F001', verdict: 'match' }, { id: 'F002', verdict: 'match' }], summary: 'ok' }, { agent: world.newAgent })
+  assert.throws(() => world.remote.rejectChain(world.chain.chainId, '  '), /needs a reason/)
+  const followups = []
+  world.oldAgent.followup = message => followups.push(message.content[0].text)
+  world.remote.rejectChain(world.chain.chainId, 'the export button is missing')
+  assert.equal(world.status(), 'active')
+  assert.equal(world.local.readChain(world.chain.chainId).review.round, 0, 'a human look restarts the review budget')
+  assert.ok(followups.some(text => /A human rejected/.test(text) && /export button/.test(text)))
+})
+
+await checkAsync('after the review budget is spent the chain goes to a human instead of another round', async () => {
+  const world = gateWorld({ maxReviewRounds: 1 })
+  await passAll(world)
+  await world.tool('relay_finish').execute({ evidence: 'all done' }, world.head)
+  await world.tool('relay_review').execute({
+    verdicts: [{ id: 'F001', verdict: 'match' }, { id: 'F002', verdict: 'missing', findings: 'no code for it' }],
+    summary: 'one missing',
+  }, { agent: world.newAgent })
+  const pass = await world.tool('relay_checkpoint').execute({ features: [{ id: 'F002', passes: true }] }, world.head)
+  assert.equal(pass.ok, true)
+  const creates = world.calls.filter(call => call.kind === 'create').length
+  const result = await world.tool('relay_finish').execute({ evidence: 'fixed' }, world.head)
+  assert.equal(result.status, 'awaiting_acceptance')
+  assert.equal(result.reviewLimitReached, true)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, creates, 'no further review session')
+})
+
+await checkAsync('without a way to open sessions the review is skipped visibly and a human still decides', async () => {
+  const world = gateWorld()
+  await passAll(world)
+  const controller = world.engine.ctx.get('sessionController')
+  const services = world.engine.ctx
+  world.engine.ctx = { ...services, get: name => (name === 'sessionController' ? undefined : services.get(name)) }
+  const result = await world.tool('relay_finish').execute({ evidence: 'all done' }, world.head)
+  assert.equal(result.review.started, false)
+  assert.equal(world.status(), 'awaiting_acceptance')
+  assert.equal(world.local.readChain(world.chain.chainId).review.skipped, 'unavailable')
+  world.engine.ctx = services
+  assert.ok(controller !== undefined)
+})
+
+await checkAsync('pausing a review cancels it and retires the reviewer', async () => {
+  const world = gateWorld()
+  await passAll(world)
+  await world.tool('relay_finish').execute({ evidence: 'all done' }, world.head)
+  world.engine.setPaused({ chainId: world.chain.chainId, paused: true })
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.status, 'paused')
+  assert.equal(chain.review.outcome, 'cancelled')
+  assert.ok(chain.sessions.find(session => session.role === 'reviewer').retiredAt)
+  const late = await world.tool('relay_review').execute({ verdicts: [{ id: 'F001', verdict: 'match' }, { id: 'F002', verdict: 'match' }], summary: 'late' }, { agent: world.newAgent })
+  assert.equal(late.ok, false, 'a cancelled reviewer cannot submit')
+})
+
+await checkAsync('a review session that fails to start pauses the chain and the panel can restart it', async () => {
+  const world = gateWorld()
+  await passAll(world)
+  const controller = world.engine.ctx.get('sessionController')
+  const create = controller.create
+  controller.create = async () => { throw new Error('no capacity') }
+  const result = await world.tool('relay_finish').execute({ evidence: 'all done' }, world.head)
+  assert.equal(result.review.started, false)
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(chain.status, 'paused')
+  assert.equal(chain.pausedBy, 'review-failed')
+  controller.create = create
+  const restarted = await world.remote.restartReview(world.chain.chainId)
+  assert.equal(restarted.started, true)
+  assert.equal(world.status(), 'reviewing')
 })
 
 rmSync(workspace, { recursive: true, force: true })

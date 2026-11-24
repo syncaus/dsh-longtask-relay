@@ -23,6 +23,7 @@ export function truthPaths(paths) {
     history: join(paths.truthDir, 'history.md'),
     decisions: join(paths.truthDir, 'decisions.md'),
     traps: join(paths.truthDir, 'traps.md'),
+    review: join(paths.truthDir, 'REVIEW.md'),
   }
 }
 
@@ -97,20 +98,20 @@ export function renderInitializerPrompt(input) {
     '',
     'Then begin feature 1 only. Rules for the rest of this session:',
     '- Work on one feature at a time; finish it before starting another.',
-    '- Mark a feature passing only after its verify command actually passed. Evidence must contain the',
-    '  command, its exit code or a count, and enough text to show what ran — "all green" proves nothing.',
+    '- Give every feature a "verify" command that proves it: relay_checkpoint passes=true makes the plugin run',
+    '  that command itself, and the feature only passes when it exits 0. A human approves each command in the',
+    '  panel before its first run; until then keep working and retry later. A pass you write into the file is ignored.',
     '- Never write a count into the truth source by hand. Quote the command that produced it.',
-    '- Never add, remove, or rename an entry in features.json directly; only change',
-    '  `passes`, `evidence`, `coverage`, and `notes`. The list is frozen the first time relay_checkpoint',
-    '  accepts it: after that, editing ids or titles by hand is refused, and a human accepts partial coverage',
-    '  in the panel. Work you discover later is appended with',
-    '  relay_checkpoint `addFeatures` plus a `reason`, so the miss stays visible.',
+    '- The first time relay_checkpoint accepts the list, features.json, PLAN.md, and SPEC.md are sealed. After',
+    '  that, every change goes through relay_checkpoint (passes, notes, coverage, a missing verify, addFeatures',
+    '  with a `reason`). A hand edit of a sealed file freezes the chain until a human restores or adopts it.',
     `- Update ${paths.progress} before you stop for any reason.`,
     '- When a blocker needs a human (credentials, machine access, a decision only the owner can make),',
     '  record it with relay_checkpoint `blocker` kind=external and say which action clears it. Do not keep',
     '  spending rounds on it.',
-    '- Call relay_finish only when every feature passes, each pass carries usable evidence, and a human',
-    '  has accepted any partial coverage in the panel (you cannot accept it yourself).',
+    '- Call relay_finish only when every feature passes and a human has accepted any partial coverage in the',
+    '  panel. Finishing re-runs every verify command, then a fresh read-only session reviews the delivery against',
+    '  SPEC.md and PLAN.md, then a human confirms it; the chain is done only after that confirmation.',
     '</relay_start>',
   ].join('\n')
 }
@@ -135,7 +136,7 @@ export function renderWrapupPrompt(input) {
     `3. Rewrite ${paths.progress}: Done / In progress (exactly what remains) / Next (the next feature id) / Errors / Notes.`,
     `4. Append to ${paths.decisions} every decision this session made that the next one must not silently undo`,
     '   (a skipped item, an accepted difference, a trade-off), as "what — why — what would make it wrong".',
-    `   ${paths.plan} only changes together with a decisions.md entry saying why.`,
+    `   ${paths.plan} is sealed: propose a change in decisions.md; only a human changes the plan.`,
     `5. Append to ${paths.traps} every trap that cost real time, with the exact command or syntax.`,
     `6. Rewrite ${paths.handoff} (60 lines or fewer) inside a <!-- relay:state --> block: what you completed,`,
     '   the exact next action, the verification commands, how to reach the environment (credential variable',
@@ -294,8 +295,9 @@ export function renderHandoffPrompt(input) {
         '',
         'Cluster rules:',
         '- Your own work is the features with no assignedSessionId; never duplicate a feature a worker owns.',
-        '- A worker\'s report is a claim: re-run that feature\'s verify command before trusting it. A passing report',
-        '  wakes you, a progress-only checkpoint does not; check relay_status, features.json, or the panel\'s downstream tab before stopping.',
+        '- A worker\'s pass was verified by the plugin running its verify command; you still own whether the change',
+        '  fits the plan. A passing report wakes you, a progress-only checkpoint does not; check relay_status,',
+        '  features.json, or the panel\'s downstream tab before stopping.',
         '- A stuck worker can be reclaimed with relay_control (reclaim); its unfinished features come back to you.',
       ]
       : []),
@@ -304,12 +306,12 @@ export function renderHandoffPrompt(input) {
     ...steps.map((step, index) => `${index + 1}. ${step}`),
     '',
     'Rules for this session:',
-    '- One feature at a time; mark it passing only after its verify command passed, putting the command and',
-    '  its exit code or a count in `evidence`. "All green" is a claim, not evidence.',
+    '- One feature at a time. passes=true makes the plugin run its verify command; exit 0 passes.',
+    '- features.json, PLAN.md, SPEC.md are sealed; never hand-edit them.',
     '- Set `coverage` honestly (full / partial / smoke); only a human can accept partial coverage, from the panel.',
     '- Append discovered work with relay_checkpoint `addFeatures` plus a `reason`; never rewrite the list.',
     `- Update ${paths.progress} before you stop. Earlier narration is not evidence; the files are.`,
-    '- Finish with relay_finish once all pass; on a blocker pass blocker={kind:external|code|decision, who, action}',
+    '- relay_finish once all pass (re-verify, review, human sign-off follow); on a blocker pass blocker={kind:external|code|decision, who, action}',
     '  (kind=external pauses the chain until a human unblocks it).',
     '</relay_handoff>',
   ].join('\n')
@@ -349,7 +351,8 @@ export function renderDelegationPrompt(input) {
     'Rules for this session:',
     '- Only work on the features listed above. Never take another session\'s feature.',
     '- Never add, remove, rename, or reassign features; that belongs to the parent.',
-    '- Mark a feature passing only after its verify command actually passed, and record the evidence.',
+    '- relay_checkpoint passes=true makes the plugin run the feature\'s verify command; it passes only on exit 0.',
+    '  Never edit features.json, PLAN.md, or SPEC.md by hand: they are sealed.',
     `- Update ${paths.progress} before you stop for any reason.`,
     '- When all your features pass, call relay_checkpoint with a one-line note saying so.',
     `- Record every trap that cost you real time in ${paths.traps} and any judgement the whole chain must keep in ${paths.decisions}; the parent and the next session only see the files.`,
@@ -426,9 +429,89 @@ export function renderClusterLaunchedNotice(input) {
     '',
     'Rules:',
     '- Work your own features one at a time.',
-    '- When a worker reports a feature done, re-run that feature\'s verify command before trusting it.',
-    '- Call relay_finish only when every feature passes.',
+    '- A worker\'s pass was verified by the plugin running its verify command; check that the change fits the plan.',
+    '- Call relay_finish only when every feature passes; an independent review and a human confirmation follow.',
     '</relay_cluster_launched>',
+  ].join('\n')
+}
+
+/**
+ * First message of the independent review session.
+ * @param {{
+ *   chain: object,
+ *   truthDir: string,
+ *   round: number,
+ *   baseCommit: string|null,
+ *   features: Array<{ id: string, title: string, verify?: string, files?: Array<string> }>,
+ * }} input - review input.
+ * @returns {string} the review prompt.
+ */
+export function renderReviewPrompt(input) {
+  const paths = truthPaths({ truthDir: input.truthDir })
+  const diff = input.baseCommit === null
+    ? 'The chain start commit is unknown: compare the workspace against SPEC.md and PLAN.md directly.'
+    : `The chain started at commit ${input.baseCommit}: read \`git diff ${input.baseCommit}\` (and \`git log ${input.baseCommit}..\`) for what was delivered.`
+  return [
+    '<relay_review>',
+    `You are the independent reviewer of relay chain ${input.chain.chainId} (review round ${input.round}).`,
+    'You did not write this code. Check that what was delivered matches the design, not that the tests are green:',
+    'the plugin already ran every verify command and they exit 0.',
+    '',
+    `Objective: ${JSON.stringify(input.chain.objective)}`,
+    `Design: ${paths.spec} (requirements and acceptance criteria, when present) and ${paths.plan}.`,
+    `Decisions the sessions recorded: ${paths.decisions}.`,
+    diff,
+    '',
+    'Features to judge:',
+    ...input.features.map(feature => `- ${feature.id} — ${feature.title}${feature.files?.length ? ` (files: ${feature.files.slice(0, 3).join(', ')})` : ''}`),
+    '',
+    'For every feature decide:',
+    '- match: the delivered code does what the design asks for this feature;',
+    '- mismatch: it was built differently from the design (name what differs and where);',
+    '- missing: the code for it is absent or only stubbed.',
+    'Also list every requirement in the design that no feature covers.',
+    '',
+    'Rules:',
+    '- Read only. Do not edit files, commit, or run commands that change the workspace.',
+    '- Judge from the code and the design, not from PROGRESS.md or HANDOFF.md: those are the implementers\' claims.',
+    '- A decision in decisions.md that knowingly changes the design is not a mismatch only if it says why and what it costs.',
+    '- Every mismatch or missing verdict needs concrete findings with file paths.',
+    '- Finish by calling relay_review once with a verdict for every feature, the uncovered requirements, and a summary.',
+    '</relay_review>',
+  ].join('\n')
+}
+
+/**
+ * Notice to the chain head when the review or the human sent the chain back.
+ * @param {{
+ *   chainId: string,
+ *   truthDir: string,
+ *   by: 'review'|'human',
+ *   round?: number,
+ *   reopened: Array<{ id: string, verdict?: string, findings?: string }>,
+ *   uncovered: Array<string>,
+ *   reason?: string,
+ * }} input - outcome.
+ * @returns {string} the notice text.
+ */
+export function renderReviewOutcomeNotice(input) {
+  const paths = truthPaths({ truthDir: input.truthDir })
+  return [
+    '<relay_review_outcome>',
+    input.by === 'review'
+      ? `The independent review (round ${input.round}) of chain ${input.chainId} did not accept the delivery.`
+      : `A human rejected the delivery of chain ${input.chainId}.`,
+    ...(typeof input.reason === 'string' && input.reason.length > 0 ? [`Reason: ${input.reason}`] : []),
+    ...(input.reopened.length === 0
+      ? []
+      : ['Reopened features:', ...input.reopened.map(item => `- ${item.id}${item.verdict ? ` (${item.verdict})` : ''}${item.findings ? `: ${item.findings}` : ''}`)]),
+    ...(input.uncovered.length === 0
+      ? []
+      : ['Requirements no feature covers (append them with relay_checkpoint addFeatures and a reason):', ...input.uncovered.map(item => `- ${item}`)]),
+    '',
+    `The findings are in ${paths.review} and in each feature's notes. Fix them one feature at a time, mark them`,
+    'passing again through relay_checkpoint, then call relay_finish.',
+    '</relay_review_outcome>',
   ].join('\n')
 }
 
@@ -492,7 +575,7 @@ export function renderClusterGroupOpenedNotice(input) {
     '<relay_cluster_group_opened>',
     `Chain ${input.chainId}: their dependencies now pass, so waiting groups were opened:`,
     ...input.groups.map(group => `- ${group.sessionId} (group ${group.id}): ${group.features.join(', ')}`),
-    'Treat their reports like the other workers\': re-run each verify command before trusting a feature.',
+    'Treat their reports like the other workers\': the plugin verified each pass; check that the change fits the plan.',
     '</relay_cluster_group_opened>',
   ].join('\n')
 }
@@ -522,7 +605,7 @@ export function renderWorkerReportNotice(input) {
       ? 'That worker has no unfinished features left.'
       : `Its unfinished features: ${remaining.join(', ')} (${input.total - remaining.length}/${input.total} passed).`,
     '',
-    'A worker\'s evidence is a claim: re-run each feature\'s verify command before trusting it.',
+    'The plugin ran each feature\'s verify command before accepting the pass; check that the change fits the plan.',
     `Check the other workers with relay_status, ${paths.features}, or the panel's downstream tab.`,
     '</relay_worker_report>',
   ].join('\n')

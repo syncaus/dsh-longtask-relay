@@ -12,6 +12,7 @@
     "deleteBlocked": "Pause the chain before deleting it",
     "raiseHandoffLimit": "Raise handoff limit",
     "handoffTitle": "{title} · handoff {n}",
-    "subtaskTitle": "{title} · subtask"
+    "subtaskTitle": "{title} · subtask",
+    "reviewTitle": "{title} · review {n}"
   }
 }

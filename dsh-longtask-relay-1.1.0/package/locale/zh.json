@@ -12,6 +12,7 @@
     "deleteBlocked": "先暂停这条链才能删除",
     "raiseHandoffLimit": "调高交接上限",
     "handoffTitle": "{title} · 接力 {n}",
-    "subtaskTitle": "{title} · 子任务"
+    "subtaskTitle": "{title} · 子任务",
+    "reviewTitle": "{title} · 评审 {n}"
   }
 }
