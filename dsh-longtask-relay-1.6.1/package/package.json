@@ -1,6 +1,6 @@
 {
   "name": "dsh-longtask-relay",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "type": "module",
   "description": "Keep one long task moving across fresh sessions: truth source in workspace files, handoff carries goal and preset, delivery gated by a seal, plugin-run verify, independent review, and human sign-off.",
   "license": "Apache-2.0",
