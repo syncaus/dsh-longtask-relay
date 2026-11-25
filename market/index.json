@@ -104,12 +104,12 @@
       },
       "versions": [
         {
-          "version": "1.6.2",
-          "publishTimestamp": 1795588052,
+          "version": "1.6.3",
+          "publishTimestamp": 1795605740,
           "source": {
             "type": "git",
             "url": "https://github.com/syncaus/dsh-longtask-relay",
-            "commit": "101c5aecbea82ff727981cfa41286b60709e04ad"
+            "commit": "54ab471bccb2f280d5e87e073beeb09a8651ee06"
           },
           "engines": {
             "dsh": ">=0.2.2-rc.3"
