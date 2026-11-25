@@ -448,8 +448,7 @@ export function renderClusterLaunchedNotice(input) {
  * }} input - review input.
  * @returns {string} the review prompt.
  */
-export function renderReviewPrompt(input) {
-  const paths = truthPaths({ truthDir: input.truthDir })
+export function renderReviewPrompt(input) {  const paths = truthPaths({ truthDir: input.truthDir })
   const diff = input.baseCommit === null
     ? 'The chain start commit is unknown: compare the workspace against SPEC.md and PLAN.md directly.'
     : `The chain started at commit ${input.baseCommit}: read \`git diff ${input.baseCommit}\` (and \`git log ${input.baseCommit}..\`) for what was delivered.`
@@ -627,5 +626,22 @@ export function renderReclaimNotice(input) {
     `The chain ${input.chainId} took back these features: ${input.features.join(', ')}.`,
     'Stop working on them; write anything the next session needs into PROGRESS.md and traps.md, then stop.',
     '</relay_reclaimed>',
+  ].join('\n')
+}
+
+/**
+ * Opening notice left inside the review session itself.
+ * The reviewer window appears out of nowhere in the session list, so the first
+ * thing it shows should say what it is and who closes the chain out.
+ * @param {{ chainId: string, title: string, round: number }} input - notice input.
+ * @returns {string} the notice text.
+ */
+export function renderReviewNotice(input) {
+  return [
+    '<relay_review_notice>',
+    `这是长任务链「${input.title}」的第 ${input.round} 轮独立评审会话（只读，不会改代码）。`,
+    '审查结论会自动写回链；通过之后还要在长任务面板里由人签核，链才算完成。',
+    `Read-only review session for relay chain ${input.chainId}, round ${input.round}. The verdict goes back to the chain; a human signs it off in the relay panel.`,
+    '</relay_review_notice>',
   ].join('\n')
 }

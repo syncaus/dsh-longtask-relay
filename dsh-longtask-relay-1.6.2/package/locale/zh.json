@@ -13,6 +13,6 @@
     "raiseHandoffLimit": "调高交接上限",
     "handoffTitle": "{title} · 接力 {n}",
     "subtaskTitle": "{title} · 子任务",
-    "reviewTitle": "{title} · 评审 {n}"
+    "reviewTitle": "独立评审 第{n}轮 · {title}"
   }
 }

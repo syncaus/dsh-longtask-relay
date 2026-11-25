@@ -18,7 +18,7 @@ import { gitHead, resolveVerify, runVerifyCommand } from './verify.js'
 import {
   renderClusterGroupOpenedNotice, renderClusterLaunchedNotice, renderClusterPlanningPrompt,
   renderContinuePrompt, renderDelegationPrompt, renderHandoffPrompt, renderInitializerPrompt,
-  renderReclaimNotice, renderRetireNotice, renderReviewOutcomeNotice, renderReviewPrompt,
+  renderReclaimNotice, renderRetireNotice, renderReviewNotice, renderReviewOutcomeNotice, renderReviewPrompt,
   renderWorkerReportNotice, renderWorkerWrapupPrompt, renderWrapupPrompt,
 } from './prompts.js'
 
@@ -2457,6 +2457,17 @@ export class RelayEngine {
           this.ctx.get('sessionTitle')?.rename(reviewer.session, sessionTitle('review', { title: chain.title, index: round }))
         } catch {
           /* naming is advisory */
+        }
+        // The window pops up by itself; without a first message the reader has to
+        // guess why a new conversation started.
+        try {
+          reviewer.inject(relayMessage(renderReviewNotice({
+            chainId: chain.chainId,
+            title: typeof chain.title === 'string' && chain.title.length > 0 ? chain.title : chain.chainId,
+            round,
+          })))
+        } catch (error) {
+          this.warn(`could not leave the review notice in ${createdSessionId}: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
       const document = store.readFeatures(chain.chainId)
