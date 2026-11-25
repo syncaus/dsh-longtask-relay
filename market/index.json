@@ -21,7 +21,11 @@
         "url": "https://github.com/syncaus/local-kadda-rules"
       },
       "metadata": {
-        "keywords": ["rules", "workflow", "prompt"]
+        "keywords": [
+          "rules",
+          "workflow",
+          "prompt"
+        ]
       },
       "versions": [
         {
@@ -53,7 +57,11 @@
         "url": "https://github.com/syncaus/dsh-mcp-playwright"
       },
       "metadata": {
-        "keywords": ["mcp", "playwright", "browser"]
+        "keywords": [
+          "mcp",
+          "playwright",
+          "browser"
+        ]
       },
       "versions": [
         {
@@ -86,16 +94,22 @@
         "url": "https://github.com/syncaus/dsh-longtask-relay"
       },
       "metadata": {
-        "keywords": ["relay", "handoff", "context", "long-running", "session"]
+        "keywords": [
+          "relay",
+          "handoff",
+          "context",
+          "long-running",
+          "session"
+        ]
       },
       "versions": [
         {
-          "version": "1.6.1",
-          "publishTimestamp": 1795532653,
+          "version": "1.6.2",
+          "publishTimestamp": 1795588052,
           "source": {
             "type": "git",
             "url": "https://github.com/syncaus/dsh-longtask-relay",
-            "commit": "99f4fab71bd5a6dbe53f0cbf31422a6b0e7957db"
+            "commit": "101c5aecbea82ff727981cfa41286b60709e04ad"
           },
           "engines": {
             "dsh": ">=0.2.2-rc.3"
