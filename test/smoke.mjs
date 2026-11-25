@@ -174,7 +174,7 @@ function fakeWorld({ goalService = true, ...overrides } = {}) {
     status: 'idle',
     inbox: { nextTurn: [], nextStep: [] },
     followup() {},
-    inject() {},
+    inject(message) { calls.push({ kind: 'inject', sessionId: newSessionId, text: message.content[0].text }) },
   }
   let ratio = 0.2
   let goal
@@ -2263,6 +2263,7 @@ check('a compaction before the first evaluation starts from the durable count', 
 check('session titles come from the locale file', () => {
   assert.equal(sessionTitle('handoff', { title: 'demo', index: 3 }), 'demo · 接力 3')
   assert.equal(sessionTitle('subtask', { title: 'demo' }), 'demo · 子任务')
+  assert.equal(sessionTitle('review', { title: 'demo', index: 2 }), '独立评审 第2轮 · demo')
 })
 
 check('handoff steps are numbered without gaps', () => {
@@ -5216,6 +5217,12 @@ await checkAsync('a verified finish opens a read-only review session instead of 
   assert.match(prompt.text, /<relay_review>/)
   assert.match(prompt.text, /SPEC\.md/)
   assert.match(prompt.text, /- F001 — first/)
+  // The window opens by itself, so its first message has to say what it is.
+  const notice = world.calls.find(call => call.kind === 'inject' && call.sessionId === 'session-new')
+  assert.ok(notice, 'the review session gets an opening notice')
+  assert.match(notice.text, /<relay_review_notice>/)
+  assert.match(notice.text, /第 1 轮独立评审/)
+  assert.match(notice.text, /只读/)
   // Nothing moves while the review is open.
   await assert.rejects(
     async () => world.engine.checkpoint({ agent: world.oldAgent, note: 'more' }),

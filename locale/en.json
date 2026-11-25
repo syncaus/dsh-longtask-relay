@@ -13,6 +13,6 @@
     "raiseHandoffLimit": "Raise handoff limit",
     "handoffTitle": "{title} · handoff {n}",
     "subtaskTitle": "{title} · subtask",
-    "reviewTitle": "{title} · review {n}"
+    "reviewTitle": "Independent review {n} · {title}"
   }
 }
