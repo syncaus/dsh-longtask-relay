@@ -1,3 +1,6 @@
 node_modules/
 # MemSearch keeps its workspace memory here; it is per-machine state, not part of the plugins.
 .memsearch/
+# Local scratch: the panel preview renderer, its screenshots, and the mutation
+# checks for it. Rebuild with `node .tmp/preview.mjs`; not part of any package.
+.tmp/

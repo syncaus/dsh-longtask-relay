@@ -59,7 +59,7 @@ window.__ModuleLoader__.load({
       statSessions: '会话',
       statHandoffs: '交接',
       statChains: '任务链',
-      statPaused: '已暂停',
+      statPaused: '已停止',
       statProgress: '功能进度',
       statContext: '最高上下文',
       statContextSub: '各会话的峰值',
@@ -85,6 +85,7 @@ window.__ModuleLoader__.load({
       failed: '读取失败',
       selectChain: '从列表选择一条链',
       selectChainBody: '这里显示它的接力轨道、功能清单、真理源文档和审计记录。',
+      loadingDetail: '正在读取这条链的详情…',
       objective: '目标',
       progress: '进度',
       sessions: '会话',
@@ -256,6 +257,7 @@ window.__ModuleLoader__.load({
       commandApproved: '已批准',
       commandPending: '待批准',
       attnCommands: '验证命令待批准',
+      attnCommandsCount: '{count} 条命令',
       reviewTitle: '独立评审',
       reviewRunning: '评审会话正在对照 SPEC.md / PLAN.md 核验交付，结论出来前链不会推进。',
       reviewRestart: '重新评审',
@@ -462,7 +464,7 @@ window.__ModuleLoader__.load({
       statSessions: 'Sessions',
       statHandoffs: 'Handoffs',
       statChains: 'Chains',
-      statPaused: 'paused',
+      statPaused: 'Stopped',
       statProgress: 'Feature progress',
       statContext: 'Peak context',
       statContextSub: 'highest session peak',
@@ -488,6 +490,7 @@ window.__ModuleLoader__.load({
       failed: 'Read failed',
       selectChain: 'Select a chain from the list',
       selectChainBody: 'Its relay track, feature list, truth-source documents, and audit log appear here.',
+      loadingDetail: 'Reading this chain…',
       objective: 'Objective',
       progress: 'Progress',
       sessions: 'Sessions',
@@ -659,6 +662,7 @@ window.__ModuleLoader__.load({
       commandApproved: 'Approved',
       commandPending: 'Pending',
       attnCommands: 'Verify commands to approve',
+      attnCommandsCount: '{count} commands',
       reviewTitle: 'Independent review',
       reviewRunning: 'A review session is checking the delivery against SPEC.md / PLAN.md; the chain waits for its verdict.',
       reviewRestart: 'Restart review',
@@ -916,35 +920,55 @@ window.__ModuleLoader__.load({
     ]
 
     const CSS = `
-.relay-page, .relay-tab, .relay-config { --relay-hue: var(--dsw-alias-border-l3); --relay-tone: var(--dsw-alias-state-success-primary); --relay-ease: var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out); }
+/* One spacing scale for every surface: blocks are separated by --relay-gap,
+   cards are padded by --relay-pad, and list rows share one row rhythm. */
+.relay-page, .relay-tab, .relay-config, .relay-launch-dock { --relay-hue: var(--dsw-alias-border-l3); --relay-tone: var(--dsw-alias-state-success-primary); --relay-ease: var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out); --relay-gap: 12px; --relay-pad: 12px; --relay-row: 6px; --relay-line: 18px; }
 .relay-page { box-sizing: border-box; display: flex; flex-direction: column; width: 100%; min-width: 0; height: 100%; min-height: 0; overflow: hidden; container: relay / inline-size; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-size: 13px; }
 .relay-scroll { flex: auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
-.relay-content { padding: 0 12px 16px; }
-.relay-tab { box-sizing: border-box; height: 100%; overflow-y: auto; padding: 12px 12px 16px; container: relay / inline-size; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-size: 13px; }
-.relay-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; padding-top: 16px; margin-bottom: 12px; }
-.relay-title { flex: 1; min-width: 0; margin: 0; font-size: 20px; font-weight: 500; line-height: 28px; white-space: nowrap; }
-.relay-head-actions { display: flex; align-items: center; gap: 6px; flex: none; }
-.relay-panel-tabs { display: flex; align-items: center; margin: -2px 0 12px; }
+.relay-content { padding: 0 var(--relay-pad) calc(var(--relay-pad) + 4px); }
+.relay-tab { box-sizing: border-box; height: 100%; overflow-y: auto; padding: var(--relay-pad) var(--relay-pad) 16px; container: relay / inline-size; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-size: 13px; }
+.relay-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding-top: 16px; margin-bottom: var(--relay-gap); }
+/* Title and the chain / trash switch form the left group; the version and the
+   two icon actions sit on the right. */
+.relay-head-main { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; flex: 1 1 auto; min-width: 0; }
+.relay-title { flex: none; min-width: 0; margin: 0; font-size: 20px; font-weight: 500; line-height: 28px; white-space: nowrap; }
+.relay-head-actions { display: flex; align-items: center; gap: 4px; flex: none; margin-left: auto; }
+.relay-panel-tabs { display: flex; align-items: center; flex: none; }
 .relay-panel-tabs .relay-seg-btn { padding: 4px 12px; font-size: 12px; }
-.relay-version { color: var(--dsw-alias-label-tertiary); font-size: 12px; white-space: nowrap; }
+.relay-version { min-width: 0; max-width: 240px; margin-right: 4px; overflow: hidden; color: var(--dsw-alias-label-tertiary); font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
+/* Header actions are icon controls: a label would crowd the title row. */
+.relay-icon-btn { box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; cursor: pointer; transition: color var(--relay-ease), background-color var(--relay-ease); }
+.relay-icon-btn:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.relay-icon-btn:disabled { cursor: default; }
+.relay-icon-btn svg { display: block; }
+/* A manual refresh spins until the Host answers (or 400ms, whichever is later). */
+.relay-icon-btn.is-busy svg { animation: relay-spin 0.9s linear infinite; }
+@keyframes relay-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .relay-icon-btn.is-busy svg { animation: none; } }
 .relay-card.is-update { border-color: var(--relay-tone); }
 .relay-update { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .relay-update-text { flex: 1; min-width: 0; }
 
-.relay-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
-.relay-kpi { display: flex; flex-direction: column; gap: 1px; min-width: 0; padding: 9px 12px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; }
+.relay-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--relay-gap); margin-bottom: var(--relay-gap); }
+/* One line per tile: the label and its number share a baseline, and the
+   explanation sits under them, so the strip stays one thin band instead of
+   three stacked lines above the chain list. */
+.relay-kpi { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; column-gap: 8px; row-gap: 1px; min-width: 0; padding: 8px var(--relay-pad); background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; }
 body:not([data-ds-dark-theme]) .relay-kpi { box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06); }
-.relay-kpi-label { color: var(--dsw-alias-label-secondary); font-size: 12px; font-weight: 600; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.relay-kpi-value { color: var(--dsw-alias-label-primary); font-size: 22px; font-weight: 600; line-height: 28px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.relay-kpi-sub { color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.relay-kpi-label { grid-column: 1; color: var(--dsw-alias-label-secondary); font-size: 12px; font-weight: 600; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.relay-kpi-value { grid-column: 2; color: var(--dsw-alias-label-primary); font-size: 19px; font-weight: 600; line-height: 24px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.relay-kpi-sub { grid-column: 1 / -1; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .relay-kpi.is-success .relay-kpi-value { color: var(--dsw-alias-state-success-primary); }
 .relay-kpi.is-business .relay-kpi-value { color: var(--dsw-alias-state-business-primary); }
 .relay-kpi.is-brand .relay-kpi-value { color: var(--dsw-alias-brand-primary); }
 .relay-kpi.is-warn .relay-kpi-value { color: var(--dsw-alias-state-warn-primary); }
 .relay-kpi.is-error .relay-kpi-value { color: var(--dsw-alias-state-error-primary); }
 
-.relay-card { box-sizing: border-box; min-width: 0; margin-bottom: 12px; padding: 10px 12px 12px; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; }
+.relay-card { box-sizing: border-box; min-width: 0; margin-bottom: var(--relay-gap); padding: var(--relay-pad); background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; }
 body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06); }
+/* The scroll container and the detail column own the trailing space; a last
+   card must not add a gap the reader cannot see past. */
+.relay-content > .relay-card:last-child, .relay-detail > .relay-card:last-child { margin-bottom: 0; }
 .relay-card-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; min-height: 24px; margin-bottom: 10px; font-weight: 600; }
 .relay-card-title-text { display: inline-flex; align-items: center; gap: 6px; flex: none; white-space: nowrap; }
 .relay-card-title-text svg { flex: none; color: var(--dsw-alias-label-secondary); }
@@ -962,10 +986,13 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-btn.is-small { height: 20px; padding: 0 7px; font-size: 11px; line-height: 18px; }
 .relay-page button:focus-visible, .relay-tab button:focus-visible, .relay-launch-dock button:focus-visible, .relay-config button:focus-visible, .relay-config input:focus-visible, .relay-config select:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 
-.relay-seg { display: inline-flex; flex: none; gap: 2px; padding: 2px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 7px; background: var(--dsw-alias-bg-layer-2); }
-.relay-seg-btn { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px; border: 0; border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; font-weight: 400; white-space: nowrap; cursor: pointer; }
-.relay-seg-btn:hover { color: var(--dsw-alias-label-primary); }
-.relay-seg-btn.is-on { background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font-weight: 600; box-shadow: 0 0 0 1px var(--dsw-alias-border-l2); }
+/* Segmented switch: the selected button carries its own tint. A tinted track
+   with a white selection disappeared on white cards, where the unselected
+   buttons read as the selected one. */
+.relay-seg { display: inline-flex; flex: none; gap: 2px; padding: 0; border: 0; background: transparent; }
+.relay-seg-btn { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; font-weight: 400; white-space: nowrap; cursor: pointer; }
+.relay-seg-btn:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.relay-seg-btn.is-on { background: color-mix(in srgb, var(--dsw-alias-label-tertiary) 18%, transparent); color: var(--dsw-alias-label-primary); font-weight: 600; }
 .relay-seg-count { color: var(--dsw-alias-label-tertiary); font-weight: 400; font-variant-numeric: tabular-nums; }
 
 .relay-status { display: inline-flex; align-items: center; flex: none; height: 18px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 999px; font-size: 11px; font-weight: 600; line-height: 16px; white-space: nowrap; color: var(--dsw-alias-label-secondary); }
@@ -999,7 +1026,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-text { margin: 0; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .relay-mono { overflow: hidden; color: var(--dsw-alias-label-secondary); font-family: var(--dsw-font-family-mono, ui-monospace, monospace); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
 .relay-tag { color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.relay-error { display: flex; align-items: flex-start; gap: 7px; margin-bottom: 12px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 35%, var(--dsw-alias-border-l2)); border-radius: 8px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 7%, var(--dsw-alias-bg-layer-1)); color: var(--dsw-alias-state-error-primary); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.relay-error { display: flex; align-items: flex-start; gap: 7px; margin-bottom: var(--relay-gap); padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 35%, var(--dsw-alias-border-l2)); border-radius: 8px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 7%, var(--dsw-alias-bg-layer-1)); color: var(--dsw-alias-state-error-primary); font-size: 12px; line-height: var(--relay-line); overflow-wrap: anywhere; }
 .relay-card .relay-error { margin: 8px 0 0; }
 
 .relay-bar { height: 4px; border-radius: 999px; background: color-mix(in srgb, var(--dsw-alias-label-tertiary) 22%, transparent); overflow: hidden; }
@@ -1014,22 +1041,29 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-gauge-peak { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--dsw-alias-label-primary); opacity: 0.6; }
 
 .relay-attn { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
-.relay-attn-item { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto; align-items: center; column-gap: 10px; padding: 7px 0; border-top: 1px solid var(--dsw-alias-border-l1); }
-.relay-attn-item:first-child { border-top: none; padding-top: 0; }
-.relay-attn-item:last-child { padding-bottom: 0; }
-.relay-attn-kind { color: var(--dsw-alias-state-warn-primary); font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.relay-attn-item { border-top: 1px solid var(--dsw-alias-border-l1); }
+.relay-attn-item:first-child { border-top: none; }
+/* One row per pending decision; the row itself is the action, so the text keeps
+   the full width and only a chevron marks it as clickable. */
+.relay-attn-row { display: grid; grid-template-columns: 84px minmax(0, 1fr) 14px; align-items: center; column-gap: 10px; box-sizing: border-box; width: calc(100% + 12px); margin: 0 -6px; padding: var(--relay-row) 6px; border: 0; border-radius: 7px; background: transparent; color: inherit; font: inherit; text-align: left; }
+.relay-attn-item:first-child .relay-attn-row { padding-top: 0; }
+.relay-attn-item:last-child .relay-attn-row { padding-bottom: 0; }
+.relay-attn-row.is-action { cursor: pointer; }
+.relay-attn-row.is-action:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.relay-attn-row.is-action:hover .relay-attn-go { color: var(--dsw-alias-label-primary); }
+.relay-attn-kind { color: var(--dsw-alias-state-warn-primary); font-size: 12px; line-height: var(--relay-line); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .relay-attn-item.is-error .relay-attn-kind { color: var(--dsw-alias-state-error-primary); }
 .relay-attn-main { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
-.relay-attn-text { font-size: 12.5px; line-height: 18px; overflow-wrap: anywhere; }
+.relay-attn-text { font-size: 12.5px; line-height: var(--relay-line); overflow-wrap: anywhere; }
 .relay-attn-meta { overflow: hidden; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.relay-attn-go { color: var(--dsw-alias-label-tertiary); font-size: 15px; line-height: 1; text-align: right; }
 .relay-card.is-attn { border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 40%, var(--dsw-alias-border-l2)); }
 
-.relay-split { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); align-items: start; gap: 12px; }
-.relay-rail { position: sticky; top: 0; max-height: calc(100vh - 32px); margin-bottom: 0; padding: 10px 8px 8px; overflow-y: auto; }
-.relay-rail .relay-card-title { padding: 0 4px; }
+.relay-split { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); align-items: start; gap: var(--relay-gap); }
+.relay-rail { position: sticky; top: 0; max-height: calc(100vh - 32px); margin-bottom: 0; padding: var(--relay-pad); overflow-y: auto; }
 .relay-rows { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
-.relay-row { position: relative; box-sizing: border-box; display: flex; flex-direction: column; gap: 5px; width: 100%; min-width: 0; padding: 8px 8px 9px 14px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; transition: background-color var(--relay-ease), border-color var(--relay-ease); }
-.relay-row::before { content: ''; position: absolute; top: 9px; bottom: 9px; left: 5px; width: 3px; border-radius: 2px; background: var(--relay-hue); }
+.relay-row { position: relative; box-sizing: border-box; display: flex; flex-direction: column; gap: 5px; width: 100%; min-width: 0; padding: 8px 8px 9px 12px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; transition: background-color var(--relay-ease), border-color var(--relay-ease); }
+.relay-row::before { content: ''; position: absolute; top: 9px; bottom: 9px; left: 4px; width: 3px; border-radius: 2px; background: var(--relay-hue); }
 .relay-row:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .relay-row.is-selected { border-color: var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2); }
 :is(.relay-row, .relay-detail, .relay-card).is-active { --relay-hue: var(--dsw-alias-state-success-primary); }
@@ -1055,6 +1089,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-row-open:hover { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-label-tertiary); }
 
 .relay-detail { min-width: 0; }
+/* The section switch between the track and the feature list is a block of its
+   own, so it keeps the same gap below it as any card above it. */
+.relay-detail-sections { display: flex; align-items: center; margin: 0 0 var(--relay-gap); }
 .relay-detail-head { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .relay-detail-main { flex: 1 1 260px; min-width: 0; }
 .relay-detail-title { margin: 0 0 6px; font-size: 15px; font-weight: 600; line-height: 22px; overflow-wrap: anywhere; }
@@ -1075,12 +1112,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-notice-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .relay-notice-text { flex: 1 1 240px; min-width: 0; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
 .relay-notice-sessions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 6px; }
-.relay-trash { padding-bottom: 8px; }
-.relay-trash-head { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
-.relay-trash-heading { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.relay-trash-heading b { color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 19px; }
-.relay-trash-hint { color: var(--dsw-alias-label-tertiary); font-size: 11.5px; line-height: 16px; }
-.relay-trash-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; padding: 7px 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 7px; background: var(--dsw-alias-bg-layer-2); }
+.relay-trash-hint { margin: 0 0 2px; color: var(--dsw-alias-label-tertiary); font-size: 11.5px; line-height: 16px; }
+.relay-trash-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; padding: 8px 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 7px; background: var(--dsw-alias-bg-layer-2); }
 .relay-trash-main { flex: 1 1 260px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .relay-trash-title { min-width: 0; max-width: 100%; color: var(--dsw-alias-label-primary); font-size: 12.5px; font-weight: 600; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .relay-trash-when { color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; }
@@ -1104,7 +1137,6 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-meta.is-error .relay-meta-value { color: var(--dsw-alias-state-error-primary); }
 .relay-meta.is-business .relay-meta-value { color: var(--dsw-alias-state-business-primary); }
 .relay-meta-label { color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 15px; white-space: nowrap; }
-.relay-progress-line { margin-top: 10px; }
 
 .relay-track { display: grid; grid-template-columns: repeat(auto-fill, minmax(176px, 1fr)); gap: 14px 10px; margin: 0; padding: 0; list-style: none; }
 .relay-leg { --relay-hue: var(--dsw-alias-border-l3); position: relative; display: flex; flex-direction: column; gap: 4px; min-width: 0; padding-top: 18px; }
@@ -1129,7 +1161,10 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-kid-row > .relay-kid { flex: 1; }
 .relay-search { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .relay-search .relay-input { flex: 1 1 220px; width: auto; }
-.relay-hit { display: grid; grid-template-columns: 132px minmax(0, 1fr); align-items: baseline; column-gap: 10px; padding: 5px 0; border-top: 1px solid var(--dsw-alias-border-l1); font-size: 12px; line-height: 17px; }
+/* The button sits beside a 26px input, so it grows to the same height instead of
+   hanging 2px short of it. */
+.relay-search .relay-btn { height: 26px; line-height: 24px; }
+.relay-hit { display: grid; grid-template-columns: 132px minmax(0, 1fr); align-items: baseline; column-gap: 10px; padding: var(--relay-row) 0; border-top: 1px solid var(--dsw-alias-border-l1); font-size: 12px; line-height: var(--relay-line); }
 .relay-hit:first-child { border-top: none; padding-top: 0; }
 .relay-hit-where { overflow: hidden; padding: 0; border: 0; background: transparent; color: var(--dsw-alias-brand-primary); font-family: var(--dsw-font-family-mono, ui-monospace, monospace); font-size: 11px; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .relay-hit-text { color: var(--dsw-alias-label-primary); overflow-wrap: anywhere; }
@@ -1138,7 +1173,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-finish .relay-input { flex: 1 1 220px; width: auto; }
 .relay-blocker-text { flex: 1 1 200px; min-width: 0; }
 .relay-blocker-hint { flex-basis: 100%; color: var(--dsw-alias-label-tertiary); }
-.relay-rail-tools { display: flex; flex-direction: column; gap: 6px; margin: 0 4px 8px; }
+.relay-rail-tools { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; }
 .relay-rail-tools .relay-seg { align-self: flex-start; }
 .relay-section-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 14px; margin: 0 2px 10px; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; }
 .relay-section-line b { color: var(--dsw-alias-label-primary); font-size: 13px; }
@@ -1150,7 +1185,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-track-note { margin-top: 10px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 15px; }
 
 .relay-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
-.relay-feature { display: grid; grid-template-columns: 16px 46px minmax(0, 1fr); align-items: baseline; column-gap: 8px; padding: 6px 0; border-top: 1px solid var(--dsw-alias-border-l1); font-size: 12.5px; line-height: 18px; }
+.relay-feature { display: grid; grid-template-columns: 16px 46px minmax(0, 1fr); align-items: baseline; column-gap: 8px; padding: var(--relay-row) 0; border-top: 1px solid var(--dsw-alias-border-l1); font-size: 12.5px; line-height: var(--relay-line); }
 .relay-feature:first-child { border-top: none; padding-top: 0; }
 .relay-check { color: var(--dsw-alias-label-tertiary); font-family: var(--dsw-font-family-mono, ui-monospace, monospace); font-size: 12px; }
 .relay-feature.is-done .relay-check { color: var(--dsw-alias-state-success-primary); }
@@ -1159,7 +1194,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-feature-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 /* A verify command row: a chip and the command body. It is not the three-column feature
    grid, so it gets its own row instead of borrowing that layout. */
-.relay-command { display: flex; align-items: baseline; gap: 8px; padding: 6px 0; border-top: 1px solid var(--dsw-alias-border-l1); font-size: 12.5px; line-height: 18px; }
+.relay-command { display: flex; align-items: baseline; gap: 8px; padding: var(--relay-row) 0; border-top: 1px solid var(--dsw-alias-border-l1); font-size: 12.5px; line-height: var(--relay-line); }
 .relay-command .relay-feature-body { flex: 1; min-width: 0; }
 .relay-feature-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .relay-feature-line { display: flex; gap: 6px; min-width: 0; color: var(--dsw-alias-label-tertiary); font-size: 11.5px; line-height: 16px; }
@@ -1171,7 +1206,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-doc-foot { display: flex; align-items: center; gap: 8px; min-width: 0; margin-top: 8px; color: var(--dsw-alias-label-tertiary); font-size: 11.5px; line-height: 16px; }
 .relay-doc-foot .relay-mono { flex: 0 1 auto; min-width: 0; }
 
-.relay-audit-row { display: grid; grid-template-columns: 96px 108px minmax(0, 1fr) auto; align-items: baseline; column-gap: 10px; padding: 5px 0; border-top: 1px solid var(--dsw-alias-border-l1); font-size: 12px; line-height: 17px; }
+.relay-audit-row { display: grid; grid-template-columns: 96px 108px minmax(0, 1fr) auto; align-items: baseline; column-gap: 10px; padding: var(--relay-row) 0; border-top: 1px solid var(--dsw-alias-border-l1); font-size: 12px; line-height: var(--relay-line); }
 .relay-audit-row:first-child { border-top: none; padding-top: 0; }
 .relay-audit-time { color: var(--dsw-alias-label-tertiary); font-family: var(--dsw-font-family-mono, ui-monospace, monospace); font-size: 11px; white-space: nowrap; }
 .relay-audit-kind { overflow: hidden; color: var(--dsw-alias-label-primary); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
@@ -1196,7 +1231,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-banner-side { display: flex; align-items: center; flex: 0 1 300px; gap: 10px; min-width: 200px; }
 .relay-banner-progress { display: flex; flex-direction: column; flex: 1; gap: 4px; min-width: 0; color: var(--dsw-alias-label-secondary); font-size: 11.5px; line-height: 16px; }
 .relay-banner-progress b { color: var(--dsw-alias-label-primary); font-variant-numeric: tabular-nums; }
-.relay-children { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); align-items: start; gap: 10px; }
+.relay-children { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); align-items: start; gap: var(--relay-gap); }
 .relay-child { display: flex; flex-direction: column; gap: 8px; margin-bottom: 0; border-left: 3px solid var(--relay-hue); }
 .relay-child.is-running { --relay-hue: var(--dsw-alias-state-success-primary); }
 .relay-child.is-idle, .relay-child.is-waiting { --relay-hue: var(--dsw-alias-state-warn-primary); }
@@ -1210,7 +1245,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-child-feature.is-done > :last-child { color: var(--dsw-alias-label-secondary); }
 .relay-gauge-row { display: flex; align-items: center; gap: 8px; color: var(--dsw-alias-label-secondary); font-size: 11.5px; line-height: 16px; font-variant-numeric: tabular-nums; }
 .relay-gauge-row .relay-gauge { flex: 1; }
-.relay-task-grid { display: grid; grid-template-columns: minmax(0, 320px) minmax(0, 1fr); align-items: start; gap: 12px; }
+.relay-task-grid { display: grid; grid-template-columns: minmax(0, 320px) minmax(0, 1fr); align-items: start; gap: var(--relay-gap); }
 .relay-task-grid > .relay-card, .relay-task-side > .relay-card:last-child { margin-bottom: 0; }
 .relay-task-side { display: flex; flex-direction: column; min-width: 0; }
 
@@ -1248,13 +1283,16 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-launch-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .relay-launch-ask { color: var(--dsw-alias-label-secondary); font-size: 11.5px; line-height: 16px; }
 .relay-launch-note { color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; }
-.relay-launch-dock { box-sizing: border-box; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, var(--dsw-alias-border-l2)); border-radius: 10px; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 5%, var(--dsw-alias-bg-layer-1)); }
-.relay-launch-dock-row { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px 12px; }
+/* Above the composer this bar used to stretch across the whole conversation
+   width, leaving the text on the far left and the launch button on the far
+   right. It now keeps a reading width and centres itself in the composer. */
+.relay-launch-dock { box-sizing: border-box; width: 100%; max-width: 640px; margin: 0 auto; padding: var(--relay-pad); border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, var(--dsw-alias-border-l2)); border-radius: 12px; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 5%, var(--dsw-alias-bg-layer-1)); }
+.relay-launch-dock-row { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 10px 12px; }
 .relay-launch-dock-main { flex: 1 1 240px; min-width: 0; }
-.relay-launch-dock-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--dsw-alias-label-primary); font-size: 12.5px; font-weight: 600; line-height: 18px; }
-.relay-launch-dock-groups { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.relay-launch-dock-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--dsw-alias-label-primary); font-size: 12.5px; font-weight: 600; line-height: var(--relay-line); }
+.relay-launch-dock-groups { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .relay-launch-dock-groups .relay-chip { max-width: 100%; overflow: hidden; }
-.relay-launch-dock-note { margin-top: 4px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; }
+.relay-launch-dock-note { margin-top: 6px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; }
 .relay-launch-dock-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .relay-launch-dock .relay-error { margin: 8px 0 0; }
 .relay-launch-dock .relay-blocker { margin-top: 6px; }
@@ -1272,6 +1310,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 @container relay (max-width: 900px) {
   .relay-audit-row { grid-template-columns: 96px 100px minmax(0, 1fr); }
   .relay-audit-row > :nth-child(4) { display: none; }
+  /* Five tiles stop fitting their label and number side by side; three per
+     row keeps both readable instead of ellipsizing the label. */
+  .relay-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @container relay (max-width: 760px) {
   .relay-split { grid-template-columns: minmax(0, 1fr); }
@@ -1284,7 +1325,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 }
 @container relay (max-width: 520px) {
   .relay-children { grid-template-columns: minmax(0, 1fr); }
-  .relay-attn-item { grid-template-columns: minmax(0, 1fr) auto; }
+  .relay-attn-row { grid-template-columns: minmax(0, 1fr) 14px; row-gap: 2px; }
   .relay-attn-kind { grid-column: 1 / -1; }
   .relay-audit-row { grid-template-columns: minmax(0, 1fr); row-gap: 1px; }
   .relay-field { grid-template-columns: minmax(0, 1fr); gap: 6px; }
@@ -1710,6 +1751,49 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           )
         }
 
+        /** Settings: three sliders, the header's way into the plugin page. */
+        function SlidersIcon() {
+          return h('svg', {
+            viewBox: '0 0 24 24',
+            width: 15,
+            height: 15,
+            fill: 'none',
+            stroke: 'currentColor',
+            strokeWidth: 1.9,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+            'aria-hidden': true,
+          },
+            h('path', { d: 'M5 21v-6' }),
+            h('path', { d: 'M5 9V3' }),
+            h('path', { d: 'M12 21v-9' }),
+            h('path', { d: 'M12 8V3' }),
+            h('path', { d: 'M19 21v-4' }),
+            h('path', { d: 'M19 11V3' }),
+            h('path', { d: 'M2 15h6' }),
+            h('path', { d: 'M9 8h6' }),
+            h('path', { d: 'M16 17h6' }),
+          )
+        }
+
+        /** Refresh: one full turn. */
+        function RefreshIcon() {
+          return h('svg', {
+            viewBox: '0 0 24 24',
+            width: 15,
+            height: 15,
+            fill: 'none',
+            stroke: 'currentColor',
+            strokeWidth: 1.9,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+            'aria-hidden': true,
+          },
+            h('path', { d: 'M20.5 12a8.5 8.5 0 1 1-2.49-6.01' }),
+            h('path', { d: 'M20.5 4.5V10h-5.5' }),
+          )
+        }
+
         /** Card title: a label, optional controls, and a trailing count. */
         function CardTitle({ children, sub, tools, icon = false }) {
           return h('div', { className: 'relay-card-title' },
@@ -1783,6 +1867,23 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           }
           return h('button', { type: 'button', className: `relay-btn${small ? ' is-small' : ''}`, onClick: copy },
             copied ? t('copied') : children)
+        }
+
+        /**
+         * Square icon control for the header. The label is never rendered, so it
+         * has to be carried by `title` and `aria-label` both. `busy` spins the
+         * icon and blocks a second press while the action runs.
+         */
+        function IconButton({ label, onClick, busy = false, children }) {
+          return h('button', {
+            type: 'button',
+            className: `relay-icon-btn${busy ? ' is-busy' : ''}`,
+            title: label,
+            'aria-label': label,
+            'aria-busy': busy ? 'true' : undefined,
+            disabled: busy,
+            onClick,
+          }, children)
         }
 
         /**
@@ -2901,7 +3002,6 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                   h('span', { className: 'relay-meta-label' }, meta.label),
                 )),
               ),
-              h('div', { className: 'relay-progress-line' }, h(Bar, { done, total })),
               h('dl', { className: 'relay-facts' },
                 h('dt', {}, t('workspace')),
                 h('dd', {},
@@ -2956,7 +3056,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                   onReclaim: (sessionId) => { void onAct('relay/reclaimWorker', { chainId: chain.chainId, sessionId }) },
                 }),
             ),
-            h('div', { style: { marginBottom: '8px' } }, h(Seg, { options: sections, value: section, onChange: setSection })),
+            h('div', { className: 'relay-detail-sections' }, h(Seg, { options: sections, value: section, onChange: setSection })),
             section === 'features'
               ? h(FeatureCard, {
                 chainId: chain.chainId,
@@ -3436,10 +3536,6 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 h('div', { className: 'relay-launch-dock-groups' },
                   groups.map(group => h('span', { key: group.id, className: 'relay-chip' }, `${group.title} · ${group.features.length}`)),
                 ),
-                worktree > 0
-                  ? h('div', { className: 'relay-launch-dock-note' }, `${worktree} ${t('launchGroupsUnit')} · ${t('launchWorktreeNote')}`)
-                  : null,
-                h('div', { className: 'relay-launch-dock-note' }, t('launchDockNote')),
               ),
               h('div', { className: 'relay-launch-dock-actions' },
                 finished
@@ -3465,6 +3561,12 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                       }, launchLabel),
                       h('button', { type: 'button', className: 'relay-btn', onClick: () => showChainInPanel(chain.chainId) }, t('launchDockAdjust')))),
             ),
+            // The notes explain the plan, so they take the full width instead of
+            // wrapping inside the column the launch buttons leave over.
+            worktree > 0
+              ? h('div', { className: 'relay-launch-dock-note' }, `${worktree} ${t('launchGroupsUnit')} · ${t('launchWorktreeNote')}`)
+              : null,
+            h('div', { className: 'relay-launch-dock-note' }, t('launchDockNote')),
             finished
               ? h(React.Fragment, {},
                 failed.length === 0
@@ -3823,12 +3925,8 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
         function RecentlyDeleted({ items, busy, onRestore, onPurge }) {
           const list = Array.isArray(items) ? items : []
           return h('section', { className: 'relay-card relay-trash' },
-            h('div', { className: 'relay-trash-head' },
-              h('div', { className: 'relay-trash-heading' },
-                h('b', {}, `${t('recentlyDeleted')} (${list.length})`),
-                h('span', { className: 'relay-trash-hint' }, t('trashLiveHint')),
-              ),
-            ),
+            h(CardTitle, { sub: String(list.length) }, t('recentlyDeleted')),
+            h('div', { className: 'relay-trash-hint' }, t('trashLiveHint')),
             list.length === 0
               ? h('div', { className: 'relay-empty' },
                 h('div', { className: 'relay-empty-title' }, t('emptyTrashTitle')),
@@ -3875,6 +3973,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
           const [section, setSection] = useState('features')
           const [deleteArmed, setDeleteArmed] = useState(false)
           const [panelView, setPanelView] = useState('chains')
+          // Spinner state for the header's refresh control only; polling keeps
+          // its own silent loop.
+          const [refreshing, setRefreshing] = useState(false)
           const selectedRef = useRef(focus.chainId ?? panelCache.selectedId)
           const splitRef = useRef(null)
           const decisions = usePendingDecisions()
@@ -3921,6 +4022,19 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
               setLoading(false)
             }
           }, [])
+
+          /**
+           * Manual refresh. A local read finishes in milliseconds, so the press
+           * would show nothing; the icon spins for at least a moment instead.
+           */
+          const refreshNow = useCallback(async () => {
+            setRefreshing(true)
+            try {
+              await Promise.all([refresh(), new Promise(resolve => setTimeout(resolve, 400))])
+            } finally {
+              setRefreshing(false)
+            }
+          }, [refresh])
 
           const select = useCallback((chainId) => {
             selectedRef.current = chainId
@@ -4103,7 +4217,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 key: `commands:${chain.chainId}`,
                 tone: 'warn',
                 kind: t('attnCommands'),
-                text: String(chain.commandsPending),
+                text: t('attnCommandsCount').replace('{count}', String(chain.commandsPending)),
                 meta: chain.title ?? '',
                 action: { label: t('viewChain'), run: () => focusChain(chain.chainId) },
               })
@@ -4149,26 +4263,31 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
             h('div', { className: 'relay-scroll' },
               h('div', { className: 'relay-content' },
                 h('div', { className: 'relay-head' },
-                  h('h2', { className: 'relay-title' }, t('panel')),
+                  h('div', { className: 'relay-head-main' },
+                    h('h2', { className: 'relay-title' }, t('panel')),
+                    // The chain / trash switch belongs to the title line: it
+                    // changes what the whole page lists, so it must not cost a
+                    // row of its own above the first card.
+                    h('div', { className: 'relay-panel-tabs' },
+                      h(Seg, {
+                        options: [
+                          { id: 'chains', label: t('chains'), count: chains.length },
+                          { id: 'deleted', label: t('recentlyDeleted'), count: deleted.length },
+                        ],
+                        value: panelView,
+                        onChange: setPanelView,
+                      }),
+                    ),
+                  ),
                   h('div', { className: 'relay-head-actions' },
                     updateNote !== null
-                      ? h('span', { className: 'relay-version' }, updateNote)
+                      ? h('span', { className: 'relay-version', title: updateNote }, updateNote)
                       : update === null
                         ? h('span', { className: 'relay-version' }, t('checkingUpdate'))
                         : h('span', { className: 'relay-version' }, `v${update.currentVersion ?? '?'}`),
-                    h('button', { type: 'button', className: 'relay-btn', onClick: openPluginPage }, t('openPluginPage')),
-                    h('button', { type: 'button', className: 'relay-btn', onClick: () => { void refresh() } }, t('refresh')),
+                    h(IconButton, { label: t('refresh'), busy: refreshing, onClick: () => { void refreshNow() } }, h(RefreshIcon)),
+                    h(IconButton, { label: t('openPluginPage'), onClick: openPluginPage }, h(SlidersIcon)),
                   ),
-                ),
-                h('div', { className: 'relay-panel-tabs' },
-                  h(Seg, {
-                    options: [
-                      { id: 'chains', label: t('chains'), count: chains.length },
-                      { id: 'deleted', label: t('recentlyDeleted'), count: deleted.length },
-                    ],
-                    value: panelView,
-                    onChange: setPanelView,
-                  }),
                 ),
                 update !== null && update.available
                   ? h('section', { className: 'relay-card is-update' },
@@ -4212,23 +4331,35 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 ),
                 attention.length === 0 ? null : h('section', { className: 'relay-card is-attn' },
                   h(CardTitle, { sub: String(attention.length) }, t('attention')),
-                  h('ul', { className: 'relay-attn' }, attention.map(item => h('li', {
-                    key: item.key,
-                    className: `relay-attn-item is-${item.tone}`,
-                  },
-                    h('span', { className: 'relay-attn-kind' }, item.kind),
-                    h('span', { className: 'relay-attn-main' },
-                      h('span', { className: 'relay-attn-text' }, item.text),
-                      item.meta === '' ? null : h('span', { className: 'relay-attn-meta' }, item.meta),
-                    ),
-                    item.action === null
-                      ? null
-                      : h('button', { type: 'button', className: 'relay-btn', onClick: item.action.run }, item.action.label),
-                  ))),
+                  h('ul', { className: 'relay-attn' }, attention.map((item) => {
+                    // The whole row is the action: five identical "view chain"
+                    // buttons repeated the same command five times and pushed
+                    // the text column narrow.
+                    const body = [
+                      h('span', { key: 'kind', className: 'relay-attn-kind' }, item.kind),
+                      h('span', { key: 'main', className: 'relay-attn-main' },
+                        h('span', { className: 'relay-attn-text' }, item.text),
+                        item.meta === '' ? null : h('span', { className: 'relay-attn-meta' }, item.meta),
+                      ),
+                    ]
+                    return h('li', { key: item.key, className: `relay-attn-item is-${item.tone}` },
+                      item.action === null
+                        ? h('div', { className: 'relay-attn-row' }, body, h('span', { className: 'relay-attn-go' }))
+                        : h('button', {
+                          type: 'button',
+                          className: 'relay-attn-row is-action',
+                          title: item.action.label,
+                          onClick: item.action.run,
+                        }, body, h('span', { className: 'relay-attn-go', 'aria-hidden': true }, '›')),
+                    )
+                  })),
                 ),
                 chains.length === 0 ? null : h(Kpis, { items: kpis }),
                 loading && chains.length === 0 ? h('div', { className: 'relay-text' }, t('loading')) : null,
-                !loading && chains.length === 0
+                // A failed read leaves no chains to show either, but the guide
+                // would then invite the reader to start a chain the Host never
+                // said was missing.
+                !loading && error === null && chains.length === 0
                   ? deleted.length > 0
                     ? h(NoLiveChains, { count: deleted.length })
                     : h('section', { className: 'relay-card' }, h(EmptyState))
@@ -4262,7 +4393,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                   detail === null || detail.chain?.chainId !== selectedId
                     ? h('section', { className: 'relay-card' },
                       h(CardTitle, {}, selectedId === null ? t('selectChain') : t('loading')),
-                      selectedId === null ? h('div', { className: 'relay-text' }, t('selectChainBody')) : null,
+                      h('div', { className: 'relay-text' }, selectedId === null ? t('selectChainBody') : t('loadingDetail')),
                     )
                     : h(ChainDetail, {
                       key: selectedId,
