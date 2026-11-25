@@ -790,18 +790,41 @@ await checkAsync('a blocked goal pauses the chain and is recorded once', async (
     activation: 'disarmed',
     objective: 'engine objective',
     maxGoalRounds: 16,
-    roundsStarted: 16,
-    blockedReason: { code: 'round-limit', message: 'round cap reached' },
+    roundsStarted: 4,
+    blockedReason: { code: 'model-reported', message: 'needs a human decision' },
   })
   await world.engine.evaluate(world.oldAgent)
   const chain = world.local.readChain(world.chain.chainId)
   assert.equal(chain.status, 'paused')
   assert.equal(chain.blocker.kind, 'external')
-  assert.match(chain.blocker.action, /round cap reached/)
+  assert.match(chain.blocker.action, /needs a human decision/)
   const progress = world.local.readProgress(world.chain.chainId)
   await world.engine.evaluate(world.oldAgent)
   assert.equal(world.local.readProgress(world.chain.chainId), progress, 'the blocker was recorded twice')
-  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0, 'a blocked goal must not hand off')
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 0, 'a model-reported blocker must not hand off')
+})
+
+await checkAsync('a goal that ran out of rounds hands off instead of parking the chain', async () => {
+  const world = fakeWorld({ seedGoalOnHandoff: true })
+  world.setGoal({
+    id: 'goal-1',
+    revision: 1,
+    phase: 'blocked',
+    activation: 'disarmed',
+    objective: 'engine objective',
+    maxGoalRounds: 16,
+    roundsStarted: 16,
+    blockedReason: { code: 'round-limit', message: 'round cap reached' },
+  })
+  await world.engine.evaluate(world.oldAgent)
+  const chain = world.local.readChain(world.chain.chainId)
+  assert.equal(world.calls.filter(call => call.kind === 'create').length, 1, 'an exhausted goal must hand the chain off')
+  assert.equal(chain.handoffCount, 1)
+  assert.equal(chain.status, 'active', 'the successor took over, so the chain is running')
+  assert.equal(chain.blocker ?? null, null, 'no external blocker is left behind')
+  const audit = world.local.readAudit(chain.chainId, 200)
+  assert.ok(audit.some(record => record.kind === 'handoff.completed' && record.detail?.reason === 'goal-rounds'), 'the handoff records why it happened')
+  assert.ok(!audit.some(record => record.kind === 'goal.inherit-skipped'), 'a fresh goal is seeded instead of inheriting an exhausted one')
 })
 
 await checkAsync('resuming the goal releases the chain blocker', async () => {
@@ -813,8 +836,8 @@ await checkAsync('resuming the goal releases the chain blocker', async () => {
     activation: 'disarmed',
     objective: 'engine objective',
     maxGoalRounds: 16,
-    roundsStarted: 16,
-    blockedReason: { code: 'round-limit', message: 'round cap reached' },
+    roundsStarted: 4,
+    blockedReason: { code: 'model-reported', message: 'needs a human decision' },
   }
   world.setGoal(blocked)
   await world.engine.evaluate(world.oldAgent)
@@ -835,8 +858,8 @@ await checkAsync('pauseOnExternalBlocker=false keeps handing off past a blocked 
     activation: 'disarmed',
     objective: 'engine objective',
     maxGoalRounds: 16,
-    roundsStarted: 16,
-    blockedReason: { code: 'round-limit', message: 'round cap reached' },
+    roundsStarted: 4,
+    blockedReason: { code: 'model-reported', message: 'needs a human decision' },
   })
   world.setRatio(0.7)
   await world.engine.evaluate(world.oldAgent)
