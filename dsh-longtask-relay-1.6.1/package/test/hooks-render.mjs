@@ -133,7 +133,7 @@ function createFakeReact() {
  * components plus the RPC stub.
  * @returns {{ registrations: object[], calls: object[] }}
  */
-function boot({ failSessionViewOnce = false, failList = false, headPlanMode = true, chains = null, onOpenSession = null, planning = false, preview = null, launchResults = [], clusterChildren = false, mainline = false, deleted = null, deletedSessionView = null, runningSession = false, pausedChain = false, gates = null } = {}) {
+function boot({ failSessionViewOnce = false, failList = false, initializing = false, headPlanMode = true, chains = null, onOpenSession = null, planning = false, preview = null, launchResults = [], clusterChildren = false, mainline = false, deleted = null, deletedSessionView = null, runningSession = false, pausedChain = false, gates = null } = {}) {
   const react = createFakeReact()
   const registrations = []
   const calls = []
@@ -185,7 +185,7 @@ function boot({ failSessionViewOnce = false, failList = false, headPlanMode = tr
   }
   const chainView = planning ? planningChainView : activeChainView
 
-  const chainSummary = { chainId: 'chain-1', status: runningSession || pausedChain ? 'paused' : 'active', title: 'demo', objective: 'ship it', featuresTotal: 2, featuresDone: 1, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null, sessions: 1 }
+  const chainSummary = { chainId: 'chain-1', status: initializing ? 'initializing' : (runningSession || pausedChain ? 'paused' : 'active'), title: 'demo', objective: 'ship it', featuresTotal: 2, featuresDone: 1, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null, sessions: 1 }
   const panelChains = chains ?? {
     chains: [{
       ...chainSummary,
@@ -577,6 +577,13 @@ const mismatchBoot = boot({ chains: { chains: [{ chainId: 'chain-x', status: 'pa
 const mismatchPanel = mismatchBoot.registrations.find(entry => entry.options.name === 'main')
 const mismatchText = collectText(await mismatchBoot.react.settle(mismatchPanel.component, {}))
 assert.ok(mismatchText.includes('loadingDetail'), 'the detail placeholder must say what it is waiting for')
+
+// "Initializing" alone reads like a stuck chain: the detail has to say that the
+// list is still unfrozen and what changes that.
+const initBoot = boot({ initializing: true })
+const initPanel = initBoot.registrations.find(entry => entry.options.name === 'main')
+const initText = collectText(await initBoot.react.settle(initPanel.component, {}))
+assert.ok(initText.some(text => text.includes('initializingHint')), 'an initializing chain must explain what it is waiting for')
 
 /**
  * Every element of a rendered tree, rendering child components where possible.

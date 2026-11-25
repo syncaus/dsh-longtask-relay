@@ -86,6 +86,7 @@ window.__ModuleLoader__.load({
       selectChain: '从列表选择一条链',
       selectChainBody: '这里显示它的接力轨道、功能清单、真理源文档和审计记录。',
       loadingDetail: '正在读取这条链的详情…',
+      initializingHint: '功能清单还没冻结：模型调一次 relay_checkpoint 之后，这条链才会转入进行中。',
       objective: '目标',
       progress: '进度',
       sessions: '会话',
@@ -491,6 +492,7 @@ window.__ModuleLoader__.load({
       selectChain: 'Select a chain from the list',
       selectChainBody: 'Its relay track, feature list, truth-source documents, and audit log appear here.',
       loadingDetail: 'Reading this chain…',
+      initializingHint: 'The feature list is not frozen yet: the chain turns active after the model calls relay_checkpoint once.',
       objective: 'Objective',
       progress: 'Progress',
       sessions: 'Sessions',
@@ -1024,6 +1026,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-facts .relay-facts-note { grid-column: 2; }
 
 .relay-text { margin: 0; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.relay-text.is-warn { color: var(--dsw-alias-state-warn-primary); }
 .relay-mono { overflow: hidden; color: var(--dsw-alias-label-secondary); font-family: var(--dsw-font-family-mono, ui-monospace, monospace); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
 .relay-tag { color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .relay-error { display: flex; align-items: flex-start; gap: 7px; margin-bottom: var(--relay-gap); padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 35%, var(--dsw-alias-border-l2)); border-radius: 8px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 7%, var(--dsw-alias-bg-layer-1)); color: var(--dsw-alias-state-error-primary); font-size: 12px; line-height: var(--relay-line); overflow-wrap: anywhere; }
@@ -1054,7 +1057,9 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
 .relay-attn-kind { color: var(--dsw-alias-state-warn-primary); font-size: 12px; line-height: var(--relay-line); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .relay-attn-item.is-error .relay-attn-kind { color: var(--dsw-alias-state-error-primary); }
 .relay-attn-main { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
-.relay-attn-text { font-size: 12.5px; line-height: var(--relay-line); overflow-wrap: anywhere; }
+/* A blocker's sentence can run to several lines; the attention row keeps two so
+   one long external blocker cannot push the whole card down the page. */
+.relay-attn-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12.5px; line-height: var(--relay-line); overflow-wrap: anywhere; }
 .relay-attn-meta { overflow: hidden; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 15px; text-overflow: ellipsis; white-space: nowrap; }
 .relay-attn-go { color: var(--dsw-alias-label-tertiary); font-size: 15px; line-height: 1; text-align: right; }
 .relay-card.is-attn { border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 40%, var(--dsw-alias-border-l2)); }
@@ -2975,6 +2980,12 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                 ),
               ),
               h('p', { className: 'relay-text' }, chain.objective),
+              // An initializing chain is not stuck: the list is editable until the
+              // first relay_checkpoint freezes it. Without this line the status
+              // chip is the only signal, and it reads as "nothing is happening".
+              chain.status === 'initializing'
+                ? h('div', { className: 'relay-text is-warn' }, t('initializingHint'))
+                : null,
               errorOf(chain) !== null
                 ? h('div', { className: 'relay-error' }, errorOf(chain))
                 : null,
@@ -4338,7 +4349,7 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                     const body = [
                       h('span', { key: 'kind', className: 'relay-attn-kind' }, item.kind),
                       h('span', { key: 'main', className: 'relay-attn-main' },
-                        h('span', { className: 'relay-attn-text' }, item.text),
+                        h('span', { className: 'relay-attn-text', title: item.text }, item.text),
                         item.meta === '' ? null : h('span', { className: 'relay-attn-meta' }, item.meta),
                       ),
                     ]
