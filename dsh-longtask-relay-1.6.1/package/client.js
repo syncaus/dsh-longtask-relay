@@ -114,6 +114,7 @@ window.__ModuleLoader__.load({
       acceptCoverage: '接受',
       revokeCoverage: '撤销接受',
       raiseHandoffLimit: '调高交接上限',
+      raiseHandoffHint: '把这条链的交接次数上限提高 8 次；上限在链启动时确定，随时可以调高',
       docSpec: '需求',
       launchTitle: '启动方案',
       launchPlanning: '主会话正在规划：谈需求、交计划、写 SPEC.md 和 PLAN.md。计划批准后它会提交启动方案，由你在这里确认。',
@@ -520,6 +521,7 @@ window.__ModuleLoader__.load({
       acceptCoverage: 'Accept',
       revokeCoverage: 'Revoke',
       raiseHandoffLimit: 'Raise handoff limit',
+      raiseHandoffHint: 'Raise the handoff cap of this chain by 8; the cap is set when the chain starts and can be raised at any time',
       docSpec: 'Spec',
       launchTitle: 'Launch plan',
       launchPlanning: 'The main session is planning: requirements, the plan, SPEC.md and PLAN.md. Once the plan is approved it proposes a launch for you to confirm here.',
@@ -884,7 +886,7 @@ window.__ModuleLoader__.load({
           { key: 'autoHandoff', label: '自动交接', kind: 'boolean', hint: '允许自动收尾与交接；关掉后只能手动操作（自动续跑也停）' },
           { key: 'autoContinue', label: '自动续跑', kind: 'boolean', hint: '链头空闲且没有 goal 驱动时自动续跑下一个功能' },
           { key: 'maxAutoContinues', label: '续跑次数上限', kind: 'int', min: 1, hint: '每个会话自动续跑的次数上限，到顶记阻塞' },
-          { key: 'maxHandoffs', label: '交接次数上限', kind: 'int', min: 1, max: 1000, hint: '单条链的交接次数上限' },
+          { key: 'maxHandoffs', label: '交接次数上限', kind: 'int', min: 1, max: 1000, hint: '新建链的默认交接次数上限；已经在跑的链在面板详情里用「调高交接上限 +8」调整（链启动时如果工具显式传了次数，以工具参数为准）' },
           { key: 'notifyOldSession', label: '给旧会话留言', kind: 'boolean', hint: '交接后给旧会话留一条退役说明' },
         ],
       },
@@ -2964,19 +2966,21 @@ body:not([data-ds-dark-theme]) .relay-card { border-radius: 12px; box-shadow: 0 
                     confirmLabel: t('confirmHandoff'),
                     onConfirm: () => { void onAct('relay/handoffNow', { chainId: chain.chainId }) },
                   }, t('handoffNow')),
-                  chain.pausedBy === 'handoff-limit'
-                    ? h('button', {
-                      type: 'button',
-                      className: 'relay-btn',
-                      disabled: busy,
-                      onClick: () => {
-                        void onAct('relay/raiseHandoffLimit', {
-                          chainId: chain.chainId,
-                          maxHandoffs: Math.min(1000, (chain.maxHandoffs ?? 32) + 8),
-                        })
-                      },
-                    }, t('raiseHandoffLimit'))
-                    : null,
+                  // Always available: a chain's cap is fixed when it starts, and a
+                  // start that asked for too few handoffs would otherwise have to
+                  // wait for the wall before the control appears.
+                  h('button', {
+                    type: 'button',
+                    className: 'relay-btn',
+                    disabled: busy || (chain.maxHandoffs ?? 0) >= 1000,
+                    title: t('raiseHandoffHint'),
+                    onClick: () => {
+                      void onAct('relay/raiseHandoffLimit', {
+                        chainId: chain.chainId,
+                        maxHandoffs: Math.min(1000, (chain.maxHandoffs ?? 32) + 8),
+                      })
+                    },
+                  }, `${t('raiseHandoffLimit')} +8`),
                 ),
               ),
               h('p', { className: 'relay-text' }, chain.objective),

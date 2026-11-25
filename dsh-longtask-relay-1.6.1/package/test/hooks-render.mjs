@@ -524,6 +524,12 @@ assert.ok(panelText.includes('planModeChip'), 'the panel must show the plan mode
 assert.ok(panelText.includes('goalRow'), 'the panel must show the goal row')
 assert.ok(panelText.includes('goalBudget'), 'the chain detail must label the goal rounds as a chain-wide budget')
 assert.ok(panelText.includes('goalHeld'), 'the chain detail must explain a held goal')
+// The cap is fixed when the chain starts, so the control has to be there before
+// the chain hits the limit — otherwise the only way to raise it never appears.
+const raiseCapButton = nodesOf(panelTree).find(node => node.type === 'button'
+  && collectText(node).some(text => text.includes('raiseHandoffLimit')))
+assert.ok(raiseCapButton, 'the detail must offer raising the handoff cap before the limit is reached')
+assert.equal(raiseCapButton.props.disabled, false, 'a chain below the cap ceiling can be raised')
 
 // The chain / trash switch belongs to the title row. As a block of its own it
 // cost a full row above the first card on every visit, which is why it moved.
