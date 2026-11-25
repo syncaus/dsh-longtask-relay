@@ -133,7 +133,7 @@ function createFakeReact() {
  * components plus the RPC stub.
  * @returns {{ registrations: object[], calls: object[] }}
  */
-function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null, onOpenSession = null, planning = false, preview = null, launchResults = [], clusterChildren = false, mainline = false, deleted = null, deletedSessionView = null, runningSession = false, pausedChain = false, gates = null } = {}) {
+function boot({ failSessionViewOnce = false, failList = false, initializing = false, headPlanMode = true, chains = null, onOpenSession = null, planning = false, preview = null, launchResults = [], clusterChildren = false, mainline = false, deleted = null, deletedSessionView = null, runningSession = false, pausedChain = false, gates = null } = {}) {
   const react = createFakeReact()
   const registrations = []
   const calls = []
@@ -185,7 +185,7 @@ function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null,
   }
   const chainView = planning ? planningChainView : activeChainView
 
-  const chainSummary = { chainId: 'chain-1', status: runningSession || pausedChain ? 'paused' : 'active', title: 'demo', objective: 'ship it', featuresTotal: 2, featuresDone: 1, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null, sessions: 1 }
+  const chainSummary = { chainId: 'chain-1', status: initializing ? 'initializing' : (runningSession || pausedChain ? 'paused' : 'active'), title: 'demo', objective: 'ship it', featuresTotal: 2, featuresDone: 1, handoffCount: 0, maxHandoffs: 32, coveragePartial: 0, blocker: null, sessions: 1 }
   const panelChains = chains ?? {
     chains: [{
       ...chainSummary,
@@ -253,7 +253,10 @@ function boot({ failSessionViewOnce = false, headPlanMode = true, chains = null,
             }
             return Promise.resolve({ ok: true, value: chainView })
           }
-          if (endpoint === 'relay/listChains') return Promise.resolve({ ok: true, value: panelChains })
+          if (endpoint === 'relay/listChains') {
+            if (failList) return Promise.reject(new Error('transport down'))
+            return Promise.resolve({ ok: true, value: panelChains })
+          }
           if (endpoint === 'relay/listDeleted') return Promise.resolve({ ok: true, value: deleted ?? { chains: [] } })
           if (endpoint === 'relay/deleteChain') {
             return Promise.resolve({ ok: true, value: { chainId: 'chain-1', status: 'paused', title: 'demo', sessions: ['session-1'], deletedAt: '2026-11-23T11:11:55.928Z' } })
@@ -506,12 +509,87 @@ const panelTree = await react.settle(panel.component, {})
 const panelText = collectText(panelTree)
 assert.ok(panelText.includes('40%'), 'the chain card must show the peak context ratio')
 assert.ok(!panelText.includes('23%'), 'the chain row must show the peak, not the current reading')
-const viewChainButtons = panelText.filter(text => text === 'viewChain').length
-assert.equal(viewChainButtons, 1, 'a blocker echoed in lastError must produce one attention row, not two')
+// The attention row itself is the action: a repeated text button per row made
+// the text column narrow and pushed the card tall.
+const attentionCard = nodesOf(panelTree).find(node => String(node.props?.className ?? '').includes('is-attn'))
+assert.ok(attentionCard, 'the panel must render the attention card')
+const attentionButtons = nodesOf(attentionCard).filter(node => node.type === 'button')
+assert.equal(attentionButtons.length, 1, 'a blocker echoed in lastError must produce one attention row, not two')
+assert.ok(String(attentionButtons[0].props?.className ?? '').includes('relay-attn-row'), 'the attention row must be the clickable control')
+assert.ok(!nodesOf(attentionCard).some(node => String(node.props?.className ?? '') === 'relay-btn'), 'the attention card must not repeat a text button per row')
+// The summary tiles already carry the progress; the second bar under them only
+// repeated it and read like the tile border.
+assert.ok(!nodesOf(panelTree).some(node => String(node.props?.className ?? '') === 'relay-progress-line'), 'the summary must not repeat the progress bar')
 assert.ok(panelText.includes('planModeChip'), 'the panel must show the plan mode chip')
 assert.ok(panelText.includes('goalRow'), 'the panel must show the goal row')
 assert.ok(panelText.includes('goalBudget'), 'the chain detail must label the goal rounds as a chain-wide budget')
 assert.ok(panelText.includes('goalHeld'), 'the chain detail must explain a held goal')
+// The cap is fixed when the chain starts, so the control has to be there before
+// the chain hits the limit — otherwise the only way to raise it never appears.
+const raiseCapButton = nodesOf(panelTree).find(node => node.type === 'button'
+  && collectText(node).some(text => text.includes('raiseHandoffLimit')))
+assert.ok(raiseCapButton, 'the detail must offer raising the handoff cap before the limit is reached')
+assert.equal(raiseCapButton.props.disabled, false, 'a chain below the cap ceiling can be raised')
+
+// The chain / trash switch belongs to the title row. As a block of its own it
+// cost a full row above the first card on every visit, which is why it moved.
+const content = nodesOf(panelTree).find(node => node.props?.className === 'relay-content')
+assert.ok(content, 'the panel must render its content column')
+const contentBlocks = (Array.isArray(content.children) ? content.children : [content.children])
+  .filter(child => child !== null && child !== undefined && child !== false)
+  .map(child => (typeof child.props?.className === 'string' ? child.props.className : ''))
+assert.equal(contentBlocks[0], 'relay-head', 'the header row must be the first block')
+assert.ok(!contentBlocks.includes('relay-panel-tabs'), 'the chain / trash switch must not be a block of its own')
+const headRow = nodesOf(panelTree).find(node => node.props?.className === 'relay-head')
+const headRowText = collectText(headRow)
+assert.ok(
+  headRowText.includes('chains') && headRowText.includes('recentlyDeleted'),
+  'the chain / trash switch must render inside the header row',
+)
+// The title and the switch share the left group; the right side is the version
+// plus icon controls, so the row never grows a third text button.
+const headMain = nodesOf(panelTree).find(node => node.props?.className === 'relay-head-main')
+assert.ok(headMain, 'the title and the switch must share a left group')
+assert.ok(nodesOf(headMain).some(node => node.props?.className === 'relay-panel-tabs'), 'the switch must live in that left group')
+const headActions = nodesOf(panelTree).find(node => node.props?.className === 'relay-head-actions')
+assert.ok(headActions, 'the header must keep a right-hand action group')
+const actionButtons = nodesOf(headActions).filter(node => node.type === 'button')
+assert.equal(actionButtons.length, 2, 'the header keeps exactly two actions')
+for (const button of actionButtons) {
+  assert.ok(String(button.props?.className ?? '').includes('relay-icon-btn'), 'a header action must be an icon control')
+  assert.ok(String(button.props?.['aria-label'] ?? '').length > 0, 'an icon control needs an accessible name')
+}
+// A manual refresh finishes in milliseconds, so the control has to report the
+// press itself: it disables and raises aria-busy until the read settles.
+const refreshButton = actionButtons.find(button => button.props?.['aria-label'] === 'refresh')
+assert.ok(refreshButton, 'the header must render a refresh control')
+refreshButton.props.onClick()
+const busyTree = await react.settle(panel.component, {})
+const busyRefresh = nodesOf(busyTree).find(node => node.type === 'button' && node.props?.['aria-label'] === 'refresh')
+assert.equal(busyRefresh?.props?.['aria-busy'], 'true', 'the refresh control must report that it is working')
+assert.equal(busyRefresh?.props?.disabled, true, 'a running refresh must not be pressed twice')
+
+// A failed read leaves no chains to show, but the Host never said the list is
+// empty: the first-run guide must stay behind the error strip.
+const listFailBoot = boot({ failList: true })
+const listFailPanel = listFailBoot.registrations.find(entry => entry.options.name === 'main')
+const listFailText = collectText(await listFailBoot.react.settle(listFailPanel.component, {}))
+assert.ok(listFailText.some(text => text.includes('failed')), 'a failed chain read must be reported')
+assert.ok(!listFailText.includes('emptyTitle'), 'a failed chain read must not show the first-run guide')
+
+// While the selected chain's detail is still in flight, the placeholder card
+// says what it waits for instead of leaving an empty card under a bare title.
+const mismatchBoot = boot({ chains: { chains: [{ chainId: 'chain-x', status: 'paused', title: 'other', objective: 'x', featuresTotal: 1, featuresDone: 0, handoffCount: 0, maxHandoffs: 32, sessions: 0, sessionsDetail: [] }] } })
+const mismatchPanel = mismatchBoot.registrations.find(entry => entry.options.name === 'main')
+const mismatchText = collectText(await mismatchBoot.react.settle(mismatchPanel.component, {}))
+assert.ok(mismatchText.includes('loadingDetail'), 'the detail placeholder must say what it is waiting for')
+
+// "Initializing" alone reads like a stuck chain: the detail has to say that the
+// list is still unfrozen and what changes that.
+const initBoot = boot({ initializing: true })
+const initPanel = initBoot.registrations.find(entry => entry.options.name === 'main')
+const initText = collectText(await initBoot.react.settle(initPanel.component, {}))
+assert.ok(initText.some(text => text.includes('initializingHint')), 'an initializing chain must explain what it is waiting for')
 
 /**
  * Every element of a rendered tree, rendering child components where possible.
@@ -639,6 +717,13 @@ trashTree = await trashBoot.react.settle(trashPanel.component, {})
 const trashPageText = collectText(trashTree)
 assert.ok(trashPageText.includes('restore'), 'a deleted chain needs a restore action')
 assert.ok(trashPageText.includes('purge'), 'a deleted chain needs a permanent-delete action')
+// The recycle bin is a card like any other: it uses the shared title component
+// instead of a header block of its own, which had a different type scale.
+const trashCard = nodesOf(trashTree).find(node => typeof node.props?.className === 'string'
+  && node.props.className.split(' ').includes('relay-trash'))
+assert.ok(trashCard, 'the recycle bin must render its card')
+assert.ok(nodesOf(trashCard).some(node => node.props?.className === 'relay-card-title'), 'the recycle bin must use the shared card title')
+assert.ok(!nodesOf(trashCard).some(node => node.props?.className === 'relay-trash-head'), 'the recycle bin must not carry a header layout of its own')
 const restoreButton = nodesOf(trashTree).find(node => node.type === 'button' && collectText(node).includes('restore'))
 assert.ok(restoreButton, 'the restore action must be clickable')
 restoreButton.props.onClick()
@@ -721,7 +806,7 @@ const gateBoot = boot({
 const gatePanel = gateBoot.registrations.find(entry => entry.options.name === 'main')
 let gateTree = await gateBoot.react.settle(gatePanel.component, {})
 const gateText = collectText(gateTree)
-for (const key of ['tamperTitle', 'tamperSealed', 'tamperDisk', 'tamperRestore', 'tamperAdopt', 'commandsTitle', 'commandPending', 'commandApproved', 'acceptTitle', 'reviewPassed', 'acceptChain', 'rejectChain', 'attnTamper', 'attnAccept', 'attnCommands', 'status_awaiting_acceptance']) {
+for (const key of ['tamperTitle', 'tamperSealed', 'tamperDisk', 'tamperRestore', 'tamperAdopt', 'commandsTitle', 'commandPending', 'commandApproved', 'acceptTitle', 'reviewPassed', 'acceptChain', 'rejectChain', 'attnTamper', 'attnAccept', 'attnCommands', 'attnCommandsCount', 'status_awaiting_acceptance']) {
   assert.ok(gateText.some(text => text.includes(key)), `the gate panel must show ${key}`)
 }
 assert.ok(gateText.some(text => text.includes('verifiedByPlugin')), 'a feature verified by the plugin must say so')
